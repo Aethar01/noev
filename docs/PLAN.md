@@ -300,6 +300,8 @@ program never breaks existing code; the reverse does.
 | Generic syntax      | Angle brackets: `Distribution<T>` | Decided  |
 | Compilation         | Native code linked to a Noev runtime; code generators (Cranelift, LLVM) swappable behind the IR; QIR for export and linking (`spec/runtime.md`) | Decided  |
 | Classical control   | `if`s and `while`s on measurement results become classical control in the circuit, with changed `Bit`/`Bool` variables in classical bits (ketrs `Assign`); what cannot (printing, early exits, other outside variables) runs shot by shot, reported | Decided  |
+| Enums               | Variants with data, `match` that must cover every variant, ownership by moving (`match mv`) or lending; `Option` and `Result` built in until generics (0.2) | Decided  |
+| Measurement bases   | `measure` is Z; `measure_in(Basis::X)` in the standard library, 0 for the +1 eigenstate; bras are its shortcut | Decided  |
 | Expectation precision | `<ψ\| H \|ψ> within ε`: a standard error, default 0.01; the runtime picks the runs; exact simulators ignore it | Decided  |
 | Quantum backends    | One interface, two levels: circuit (jobs) and gate (operation by operation); ketrs first | Decided  |
 | Unconsumed qubits   | Compile error now; goal is implicit free when provably \|0⟩ | Decided  |
@@ -371,6 +373,16 @@ don't set it have no toolchain, so set `RUSTUP_HOME` when running cargo from bas
 ## 11. After v0.1
 
 Planned once milestones 1–7 are done, roughly in this order.
+
+### 0.2: enums
+
+| #  | Step                          | Description                                                          | Status  |
+| -- | ----------------------------- | -------------------------------------------------------------------- | ------- |
+| 1  | Enums and `match`             | `enum` with plain variants, `match` with tests and bindings, exhaustiveness | ☐ Todo |
+| 2  | `Basis` and `measure_in`      | The standard library's measurement in any Pauli basis                | ☐ Todo |
+| 3  | Variants with data            | Values and named fields; the ownership rules of `spec/ownership.md` §13 | ☐ Todo |
+| 4  | `Option` and `Result`         | Built-in enums until generics                                         | ☐ Todo |
+| 5  | Tools                         | Tree-sitter grammar, hover and go to definition for enums             | ☐ Todo |
 
 ### Compilation (`spec/runtime.md`)
 

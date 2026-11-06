@@ -37,11 +37,57 @@ logical qubit. The compiler and runtime decide which physical qubit that is.
 - **Structs**, declared with their fields and methods together (see
   [grammar.md](grammar.md) §2). Any field may be of any type, so a struct can mix classical
   and quantum fields freely.
+- **Enums**: a value that is one of several variants, each with its own data (below).
 - **Distributions** `Distribution<T>`: how often each value of a classical type `T` occurred
   in repeated runs, made by `sample` ([execution.md](execution.md) §3). Copyable.
 - **References** `ref T` (shared) and `mut T` (exclusive). See
   [ownership.md](ownership.md) §4–5. v0.1 supports elided lifetimes only; references stored
   in struct fields are Reserved.
+
+### Enums
+
+An enum is a value that is exactly one of its **variants**. A variant can hold nothing, a
+list of values, or named fields:
+
+```noev
+enum Basis { X, Y, Z }
+
+enum Outcome {
+    Success(Bit),
+    Retry { attempts: Int },
+    Failed,
+
+    fn succeeded(ref self) -> Bool {
+        match self {
+            Outcome::Success(_) => true,
+            _ => false,
+        }
+    }
+}
+```
+
+- Variants are written with the enum's name, as types and namespaces are: `Basis::X`,
+  `Outcome::Success(1)`, `Outcome::Retry { attempts: 3 }`. A variant with values is also a
+  function: `Outcome::Success` takes a `Bit` and gives an `Outcome`.
+- Methods and associated functions go inside the enum, after the variants, as in a struct.
+- A value is taken apart with `match` ([grammar.md](grammar.md) §2), which must cover every
+  variant.
+- Variants can hold any type, qubits included. An enum is linear, affine or copyable by its
+  variants' data (§5), and ownership follows from that ([ownership.md](ownership.md) §13).
+- Enums whose data can be compared can be compared with `==` and `!=`: same variant and
+  equal data.
+
+**`Option` and `Result`** are built-in enums until Noev has generics (§6), like
+`Distribution<T>`:
+
+| Type           | Variants              | For                                       |
+| -------------- | --------------------- | ----------------------------------------- |
+| `Option<T>`    | `Some(T)`, `None`     | A value that may be absent                |
+| `Result<T, E>` | `Ok(T)`, `Err(E)`     | The result of something that can fail      |
+
+Their variants are in scope without the enum's name: `Some(q)`, `None`, `Ok(x)`, `Err(e)`.
+`T` and `E` may be any type, so `Option<Qubit>` is "a qubit, or none", and the compiler
+makes sure a `Some` qubit is consumed.
 
 ## 3. Literals
 
@@ -165,7 +211,8 @@ Every type is **copyable**, **affine** or **linear**:
 - Exclusive references `mut T` are affine: they cannot be copied, but can be dropped.
 - `Qubit` is linear: it cannot be copied or dropped, and must be consumed.
 - A tuple, array or struct is linear if any component is linear; otherwise affine if any
-  component is affine; otherwise copyable.
+  component is affine; otherwise copyable. An enum is the same, over the data of all its
+  variants: `Option<Qubit>` is linear, `Option<Int>` copyable.
 
 A type is **pure quantum** if it contains qubits and no classical data. Pure quantum places
 can be lent for changing without writing `mut` (see [ownership.md](ownership.md) §4).
@@ -217,6 +264,7 @@ to them cannot.
 | `[Bit; N]`, tuples of `Bit`  | A bit string in index order: `|01>` measured prints `01` |
 | other tuples and arrays      | `(3, true)`, `[1, 2, 3]`                               |
 | structs                      | `Experiment { angle: 0.5 }` (classical fields only)    |
+| enums                        | `Basis::X`, `Outcome::Success(1)`, `Some(3)`, `None`   |
 | `String`                     | Its text                                               |
 | `Observable`                 | `-1.0 * Z(0) * Z(1) + 0.5 * X(0)`                      |
 | `Distribution<T>`            | One line per outcome, most frequent first: `11  513  51.3%` |

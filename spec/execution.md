@@ -118,7 +118,7 @@ In detail:
 - A **measurement result** is the `Bit` from `measure`, the `Bool` from a measurement test
   (`<s| x`), and anything computed from them.
 - Before the last quantum operation, a measurement result may only be:
-  - a condition of `if` or `while`, including comparisons and logic on measurement results
+  - a condition of `if`, `while` or `match`, including comparisons and logic on measurement results
     and constants (`==`, `!=`, `and`, `or`, `not`, `&`, `|`, `^`, `~`, and the conversions
     `Bool(b)` and `Bit(flag)`);
   - stored in variables, and moved or copied into the run's result, directly or inside

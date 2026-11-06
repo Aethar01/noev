@@ -37,6 +37,35 @@ built-in types.)
 This is the safe way to give back a qubit in an unknown state. `release` (core, `unsafe`)
 skips the reset and trusts the qubit is already in \|0⟩.
 
+### `Basis` and `measure_in`
+
+Measures a qubit in the X, Y or Z basis. `measure` is the Z basis; the others are a rotation
+into it first.
+
+```noev
+/// A measurement basis: the eigenbasis of a Pauli operator.
+enum Basis { X, Y, Z }
+
+/// Measures in `basis`: 0 for the +1 eigenstate (|0⟩, |+⟩, |+i⟩), 1 for the −1 eigenstate
+/// (|1⟩, |−⟩, |−i⟩), so the outcome is always (−1)^bit.
+fn measure_in(mv q: Qubit, basis: Basis) -> Bit {
+    match basis {
+        Basis::X => { q.h() }
+        Basis::Y => { adj q.s(); q.h() }
+        Basis::Z => {}
+    }
+    mv q.measure()
+}
+```
+
+Also a method, `mv q.measure_in(Basis::X)`, and on `[Qubit; N]`, measuring every qubit in
+the same basis and giving `[Bit; N]`. Consumes the qubits; not reversible. The basis is an
+ordinary value, so it can be computed; choosing it from a measurement result counts like a
+gate angle chosen from one ([execution.md](execution.md) §4).
+
+A measurement test is a shortcut for the same thing: `<+| mv q` is
+`mv q.measure_in(Basis::X) == 0`.
+
 ## 3. Observables
 
 ### `P` and `PX`

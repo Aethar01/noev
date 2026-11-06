@@ -551,11 +551,47 @@ block, the usual rules apply: qubits it creates are consumed in it or are its re
 is measured. `return`, `break` and `continue` cannot leave the block. `sample` is not allowed
 in a reversible context (N013).
 
-## 13. Open questions
+## 13. Enums and `match`
 
-None currently.
+An enum holding a qubit is linear like a struct holding one ([types.md](types.md) §5), and
+`match` is how its data comes out. The words that say what happens to a place say what
+happens to the value being matched:
 
-## 14. Error code index
+- **`match mv o`** moves `o` into the match. Each arm's pattern takes the parts it names:
+  they are the arm's own variables, and must be consumed in it (N003), as any variable must
+  by the end of its scope. A `_` that would throw away qubits is N003, as in `let`.
+- **`match o`**, without a word, reads `o` when its type is copyable, and otherwise lends it
+  (`ref`): names in the patterns are references to the parts, and moving out of them is
+  N007. **`match mut o`** lends it to be changed. Patterns that only test (`_`, literals,
+  variants without data) take nothing.
+- **Arms are branches.** A place from outside moved in some arms but not others is N009, and
+  qubits created in an arm must be consumed in it.
+
+```noev
+fn use_spare(spare: Option<Qubit>) -> Bit {
+    match mv spare {
+        Some(q) => mv q.measure(),          // q is this arm's; measuring consumes it
+        None => 0,
+    }
+}
+
+fn spare_is_set(spare: ref Option<Qubit>) -> Bool {
+    match spare {                           // lent: nothing is moved
+        Some(_) => true,
+        None => false,
+    }
+}
+```
+
+A `match` is not allowed to leave any variant out ([grammar.md](grammar.md) §2), so a
+linear value's every case is handled, and its qubits consumed, on every path.
+
+## 14. Open questions
+
+- **Guards** (`Some(q) if …`) and **or-patterns** (`A | B`): later. `|` in patterns needs care
+  next to ket literals.
+
+## 15. Error code index
 
 | Code | Error                                              |
 | ---- | -------------------------------------------------- |

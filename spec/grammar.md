@@ -35,8 +35,9 @@ pattern, not an identifier.
 Reserved keywords cannot be used as identifiers:
 
 ```
-and  as  assert  break  continue  else  extern  false  fn  for  if  impl  in  let  mut
-not  or  pub  ref  return  sample  self  Self  struct  trait  true  type  unsafe  use  while
+and  as  assert  break  continue  else  enum  extern  false  fn  for  if  impl  in  let
+match  mut  not  or  pub  ref  return  sample  self  Self  struct  trait  true  type  unsafe
+use  while
 ```
 
 Contextual keywords are keywords only in the positions listed. Everywhere else they are
@@ -126,7 +127,7 @@ type-checked, each format spec is checked against its value's type
 +  -  *  /  %  &  |  ^  ~  <<  >>
 == != <  <=  >  >=  and  or  not
 =  += -= *= /= %= &= |= ^= <<= >>=
-.  ,  ;  :  ::  ->  ..  (  )  [  ]  {  }
+.  ,  ;  :  ::  ->  =>  ..  (  )  [  ]  {  }
 ```
 
 `and`, `or` and `not` are logical operators on `Bool` (`and`/`or` short-circuit). `&`, `|`,
@@ -171,11 +172,16 @@ Terminals are quoted. `sep` is a line break (as defined above), `;` or `,` where
 
 ```ebnf
 program     = { item } ;
-item        = struct_def | fn_def | trait_def | impl_def | extern_def ;
+item        = struct_def | enum_def | fn_def | trait_def | impl_def | extern_def ;
 
 struct_def  = "struct" IDENT "{" { member ( sep | "," ) } "}" ;
 member      = field | fn_def ;
 field       = IDENT ":" type ;
+
+enum_def    = "enum" IDENT "{" { variant ( sep | "," ) } { fn_def sep } "}" ;
+variant     = IDENT
+            | IDENT "(" type { "," type } [ "," ] ")"            (* values *)
+            | IDENT "{" field { ( sep | "," ) field } [ "," ] "}" ;  (* named fields *)
 
 fn_def      = [ "unsafe" ] [ "rev" ] [ "circuit" ] "fn" IDENT "(" [ params ] ")" [ "->" type ] block ;
 params      = ( receiver | param ) { "," param } [ "," ] ;
@@ -237,7 +243,12 @@ stmt        = "let" [ "mut" ] pattern [ ":" type ] "=" expr
 
 pattern     = IDENT | "_"
             | "(" pattern { "," pattern } [ "," ] ")"      (* a tuple *)
-            | "[" pattern { "," pattern } [ "," ] "]" ;    (* an array, one pattern per element *)
+            | "[" pattern { "," pattern } [ "," ] "]"      (* an array, one pattern per element *)
+            | path [ "(" pattern { "," pattern } [ "," ] ")"                 (* a variant *)
+                   | "{" field_pattern { "," field_pattern } [ "," ] [ ".." ] "}" ]
+            | literal_pattern ;
+field_pattern = IDENT [ ":" pattern ] ;              (* `attempts` is short for `attempts: attempts` *)
+literal_pattern = [ "-" ] INT | "true" | "false" | STRING ;
 assign_op   = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
 ```
 
@@ -258,6 +269,8 @@ if_expr     = "if" expr_no_struct block [ "else" ( block | if_expr ) ] ;
 for_expr    = "for" IDENT "in" expr_no_struct ".." expr_no_struct block ;
 while_expr  = "while" expr_no_struct block ;
 sample_expr = "sample" expr_no_struct block ;
+match_expr  = "match" expr_no_struct "{" { arm ( "," | sep ) } "}" ;
+arm         = pattern "=>" expr ;
 
 ctrl_stmt   = "ctrl" place { "," place } block ;
 with_stmt   = "with" block "do" block ;          (* Reserved *)
@@ -276,6 +289,15 @@ unsafe_block = "unsafe" block ;
   The compiler also uses it as a known fact (see [ownership.md](ownership.md) §10).
 - `sample n { … }` runs its block `n` times, each run separate from the others and from the
   code around it, and counts the results (see [execution.md](execution.md) §3).
+- `match x { p => a, q => b }` runs the first arm whose pattern fits `x`, and its value is
+  that arm's. The arms must cover every value of `x`'s type: every variant of an enum,
+  `true` and `false`, or end with a catch-all (`_` or a name) for numbers and strings.
+  Patterns that only test (`_`, literals, variants without data) can be used in any
+  `match`; patterns that bind take parts of the value, by the rules of
+  [ownership.md](ownership.md) §13.
+- A plain name in a pattern binds a variable, except `None`, `Some`, `Ok` and `Err`, which
+  are the variants of `Option` and `Result`. Other variants are always written with their
+  enum's name (`Basis::X`), so a pattern never looks like a variable by accident.
 - `unsafe { … }` allows operations whose claims the compiler cannot check (see
   [ownership.md](ownership.md) §11).
 
@@ -304,8 +326,8 @@ primary     = INT | FLOAT | "true" | "false" | KET
             | "[" [ expr { "," expr } [ "," ] ] "]"                    (* array *)
             | "[" expr ";" expr "]"                                     (* array repeat *)
             | expectation
-            | if_expr | for_expr | while_expr | sample_expr | ctrl_stmt | with_stmt
-            | unsafe_block | block ;
+            | if_expr | for_expr | while_expr | sample_expr | match_expr | ctrl_stmt
+            | with_stmt | unsafe_block | block ;
 expectation = ( "<" prep "|" observable "|" prep ">"
               | BRA observable "|" KET_BODY ">" )   (* <+| h |+> *)
               [ "within" unary ] ;                  (* the precision *)
