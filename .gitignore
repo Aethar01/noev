@@ -1,1 +1,5 @@
 /target
+# Parsers built from the grammar by editors
+/editors/tree-sitter-noev/*.so
+/editors/tree-sitter-noev/*.dylib
+/editors/tree-sitter-noev/*.dll

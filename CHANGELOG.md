@@ -5,7 +5,7 @@ Notable changes to Noev, the language and this compiler. The format follows
 [Semantic Versioning](https://semver.org/), with breaking changes allowed in minor versions
 before 1.0.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-06
 
 The first release: the language of `spec/`, apart from what it marks *Reserved*, and a
 compiler that checks, runs and exports it.
@@ -48,3 +48,5 @@ compiler that checks, runs and exports it.
   go to definition and document symbols.
 - A tree-sitter grammar (`editors/tree-sitter-noev`) with highlight, indent and fold queries,
   and Neovim runtime files (`editors/nvim`).
+
+[0.1.0]: https://github.com/Aethar01/noev/releases/tag/v0.1.0
