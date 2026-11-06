@@ -391,6 +391,8 @@ pub enum ExprKind {
         prep: ExprId,
         /// The observable.
         observable: ExprId,
+        /// `within ε`: the standard error wanted when it is estimated.
+        precision: Option<ExprId>,
     },
     /// `{ … }`.
     Block(BlockId),

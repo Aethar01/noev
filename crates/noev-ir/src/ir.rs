@@ -283,6 +283,9 @@ pub enum Stmt {
         prep: Prep,
         /// The observable.
         observable: Operand,
+        /// The standard error wanted when it is estimated (`within`); `None` for the
+        /// default.
+        precision: Option<Operand>,
     },
 }
 
@@ -482,7 +485,11 @@ impl Program {
                 dest,
                 prep,
                 observable,
+                precision,
             } => {
+                let within = precision
+                    .as_ref()
+                    .map_or(String::new(), |p| format!(" within {}", operand_text(p)));
                 let prep = match prep {
                     Prep::Ket(state) => format!("|{state}>"),
                     Prep::Call(func, args) => {
@@ -491,7 +498,7 @@ impl Program {
                     }
                 };
                 format!(
-                    "{} = expectation {prep}, {}",
+                    "{} = expectation {prep}, {}{within}",
                     place_text(dest),
                     operand_text(observable)
                 )

@@ -137,7 +137,7 @@ circuit generation.
 | 4  | Quantum IR                   | Allocation, gates, measurement, classical dependencies                                     | ☑ Done |
 | 5  | Circuits                     | Closed runs that are circuits (`spec/execution.md`) compiled to ketrs circuits and OpenQASM 3 | ☑ Done |
 | 6  | Execution                    | Interpreter on ketrs, circuits sampled through ketrs, `noev run` | ☑ Done |
-| 7  | Expectation values           | `<ψ\| H \|ψ>` with observables, exact on ketrs where possible                               | ☐ Todo |
+| 7  | Expectation values           | `<ψ\| H \|ψ>` with observables, exact on ketrs where possible                               | ☑ Done |
 | 8  | Backend interface            | The interpreter drives ketrs through the runtime's backend interface (`spec/runtime.md`), at circuit and gate level | ☑ Done |
 
 **Priority:** build the type system and ownership checker (milestones 1–3) first, before any
@@ -300,6 +300,7 @@ program never breaks existing code; the reverse does.
 | Generic syntax      | Angle brackets: `Distribution<T>` | Decided  |
 | Compilation         | Native code linked to a Noev runtime; code generators (Cranelift, LLVM) swappable behind the IR; QIR for export and linking (`spec/runtime.md`) | Decided  |
 | Classical control   | `if`s on measurement results whose branches only apply gates become `if`s in the circuit; measurement-dependent loops and richer branches run shot by shot for now, reported | Decided  |
+| Expectation precision | `<ψ\| H \|ψ> within ε`: a standard error, default 0.01; the runtime picks the runs; exact simulators ignore it | Decided  |
 | Quantum backends    | One interface, two levels: circuit (jobs) and gate (operation by operation); ketrs first | Decided  |
 | Unconsumed qubits   | Compile error now; goal is implicit free when provably \|0⟩ | Decided  |
 

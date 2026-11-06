@@ -42,6 +42,7 @@ ordinary identifiers, so `let adj = build_graph(edges)` is valid.
 | `ctrl`  | it starts a statement and is followed by a place and, eventually, `{` |
 | `with`  | it starts a statement and is directly followed by `{`       |
 | `do`    | it directly follows the closing `}` of a `with` block       |
+| `within` | it directly follows an expectation value (see below)       |
 | `pkg`, `super` | they start a path and are followed by `::` (Reserved; see [modules.md](modules.md)) |
 
 ### Literals
@@ -294,8 +295,9 @@ primary     = INT | FLOAT | "true" | "false" | KET
             | expectation
             | if_expr | for_expr | while_expr | sample_expr | ctrl_stmt | with_stmt
             | unsafe_block | block ;
-expectation = "<" prep "|" observable "|" prep ">"
-            | BRA observable "|" KET_BODY ">" ;     (* <+| h |+> *)
+expectation = ( "<" prep "|" observable "|" prep ">"
+              | BRA observable "|" KET_BODY ">" )   (* <+| h |+> *)
+              [ "within" unary ] ;                  (* the precision *)
 prep        = postfix ;                             (* a call or a ket *)
 observable  = binary ;                              (* without `|` or comparisons at top level *)
 path        = ( IDENT | "self" | "Self" ) { "::" IDENT } ;
@@ -384,6 +386,11 @@ bra. If `|` follows, the expression is an expectation value. Otherwise it is a m
 test, and the expression must be a single operand (`<1| mv q`), so `<1| mv q and ok` means
 `(<1| mv q) and ok`. A `<` that does not form a bra literal, in operand position, always
 starts an expectation value.
+
+`within ε` after an expectation value asks for a standard error of at most `ε` when the value
+is estimated ([types.md](types.md) §3). `ε` is a unary expression, so
+`<ψ| H |ψ> within 0.01 * 2.0` doubles the value; write `within (0.01 * 2.0)` for a computed
+precision.
 
 ### Conversions
 

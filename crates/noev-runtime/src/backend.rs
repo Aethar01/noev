@@ -156,6 +156,12 @@ pub trait Backend {
     fn executes(&self) -> bool {
         true
     }
+
+    /// Whether its sessions compute exact expectation values from the state
+    /// ([`Session::expectation`]). Otherwise they are estimated by measuring.
+    fn exact_expectations(&self) -> bool {
+        false
+    }
 }
 
 /// One run on a gate-level backend. Operations arrive as the program reaches them. Nothing is
@@ -240,6 +246,14 @@ impl Backend for Recorder<'_> {
             self.jobs.borrow_mut().push((circuit.clone(), shots));
         }
         result
+    }
+
+    fn executes(&self) -> bool {
+        self.inner.executes()
+    }
+
+    fn exact_expectations(&self) -> bool {
+        self.inner.exact_expectations()
     }
 }
 

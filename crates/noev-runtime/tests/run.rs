@@ -725,3 +725,81 @@ fn circuits_are_exported_without_simulating_them() {
         (40, 40, 1000)
     );
 }
+
+const ENERGY_MAIN: &str = "fn prep(theta: Float) -> [Qubit; 2] {
+    let r = |00>
+    r[0].ry(theta)
+    r[1].h().s()
+    ctrl r[0] { r[1].x() }
+    mv r
+}
+fn main() {
+    let h = 0.5 * Z(0) * Z(1) - 0.8 * X(0) + 1.5 * Y(1) + 0.25 * I()
+    print(<prep(0.9)| h |prep(0.9)>)
+}";
+
+#[test]
+fn expectations_are_estimated_without_the_state() {
+    let exact: f64 = main_on(ENERGY_MAIN, &Ketrs)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // Run by run is slow without optimisations, so less precision is asked for.
+    let rough = ENERGY_MAIN.replace("|prep(0.9)>)", "|prep(0.9)> within 0.03)");
+    for circuits in [true, false] {
+        let estimate: f64 = main_on(&rough, &OneLevel { circuits })
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            (estimate - exact).abs() < 0.15,
+            "circuits: {circuits}, estimate {estimate}, exact {exact}"
+        );
+    }
+}
+
+#[test]
+fn precision_sets_how_many_runs_an_estimate_takes() {
+    let exact: f64 = main_on(ENERGY_MAIN, &Ketrs)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // Within 0.005 takes hundreds of thousands of runs per group; as one circuit, each group
+    // is a single simulation.
+    let precise = ENERGY_MAIN.replace("|prep(0.9)>)", "|prep(0.9)> within 0.005)");
+    let estimate: f64 = main_on(&precise, &OneLevel { circuits: true })
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        (estimate - exact).abs() < 0.025,
+        "estimate {estimate}, exact {exact}"
+    );
+    let zero = ENERGY_MAIN.replace("|prep(0.9)>)", "|prep(0.9)> within 0.0)");
+    let error = main_on(&zero, &OneLevel { circuits: true }).unwrap_err();
+    assert!(error.message.contains("must be positive"), "{error:?}");
+}
+
+#[test]
+fn expectation_circuits_are_exported() {
+    let program = compile(ENERGY_MAIN);
+    let exporter = noev_runtime::backend::Exporter::default();
+    let error = run_main(
+        &program,
+        &exporter,
+        0,
+        Output {
+            stdout: Box::new(Buffer::default()),
+            stderr: Box::new(Buffer::default()),
+        },
+    )
+    .unwrap_err();
+    assert!(error.unknown, "{error:?}");
+    // Two groups of terms measured together: Z0·Z1, and X0 with Y1.
+    let jobs = exporter.jobs.borrow();
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+}

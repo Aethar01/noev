@@ -21,6 +21,10 @@ impl Backend for Ketrs {
         "ketrs"
     }
 
+    fn exact_expectations(&self) -> bool {
+        true
+    }
+
     fn session(&self, seed: u64) -> Option<Box<dyn Session>> {
         Some(Box::new(KetrsSession {
             state: Statevector::zero(0),

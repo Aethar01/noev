@@ -603,7 +603,14 @@ fn children(ast: &Ast, node: Node, out: &mut Vec<Node>) {
                 ExprKind::Own { place, .. } => push(place),
                 ExprKind::Adj(call) => push(call),
                 ExprKind::BraTest { operand, .. } => push(operand),
-                ExprKind::Expectation { observable, .. } => push(observable),
+                ExprKind::Expectation {
+                    observable,
+                    precision,
+                    ..
+                } => {
+                    push(observable);
+                    precision.into_iter().for_each(&mut push);
+                }
                 ExprKind::Block(b) | ExprKind::Unsafe(b) => out.push(Node::Block(b)),
                 ExprKind::If {
                     cond,
@@ -1060,9 +1067,19 @@ impl<'a> Walker<'a> {
                 }
                 false
             }
-            ExprKind::Expectation { observable, .. } => {
+            ExprKind::Expectation {
+                observable,
+                precision,
+                ..
+            } => {
                 if self.expr(observable, before) && before {
                     self.violate(expr.span, "used in an observable");
+                }
+                if let Some(p) = precision
+                    && self.expr(p, before)
+                    && before
+                {
+                    self.violate(ast.expr(p).span, "used as a precision");
                 }
                 false
             }

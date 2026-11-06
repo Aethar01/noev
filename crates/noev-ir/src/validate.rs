@@ -103,9 +103,11 @@ pub fn validate(program: &Program) -> Vec<String> {
                         dest,
                         prep,
                         observable,
+                        precision,
                     } => {
                         check_place(dest, &mut report);
                         check_operand(observable, &mut report);
+                        precision.iter().for_each(|p| check_operand(p, &mut report));
                         if let Prep::Call(func, args) = prep {
                             if func.index() >= program.functions.len() {
                                 report(format!("unknown function {}", func.0));

@@ -80,8 +80,9 @@ whether it can do each:
 
 - **Check `release`**: confirm that a released qubit is in \|0⟩ ([ownership.md](ownership.md)
   §11). Other backends trust the claim.
-- **Exact expectation values**: compute `<ψ| H |ψ>` from the state. Other backends will
-  estimate it by measuring in each term's basis (not yet implemented).
+- **Exact expectation values**: compute `<ψ| H |ψ>` from the state. Other backends estimate
+  it by measuring each group of terms in its basis, as one circuit when the preparation is a
+  circuit ([types.md](types.md) §3), and `noev export` saves those circuits.
 - **Sample a state without measuring it**: when a run returns qubits and measures nothing,
   simulate it once and draw every shot from the final state.
 

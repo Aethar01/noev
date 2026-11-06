@@ -76,7 +76,14 @@ fn sexp(ast: &Ast, source: &str, id: ExprId) -> String {
         ExprKind::BraTest { state, operand } => {
             format!("(test {} {})", state.text(source), e(operand))
         }
-        ExprKind::Expectation { prep, observable } => {
+        ExprKind::Expectation {
+            prep,
+            observable,
+            precision: Some(p),
+        } => format!("(expect {} {} within {})", e(prep), e(observable), e(p)),
+        ExprKind::Expectation {
+            prep, observable, ..
+        } => {
             format!("(expect {} {})", e(prep), e(observable))
         }
         ExprKind::Block(_) => "(block)".into(),
@@ -224,6 +231,14 @@ fn bras() {
     assert_eq!(expr("<1| mv q"), "(test <1| (mv q))");
     assert_eq!(expr("<1| mv q and ok"), "(and (test <1| (mv q)) ok)");
     assert_eq!(expr("<+| Z(0) |+>"), "(expect |+> (call Z 0))");
+    assert_eq!(
+        expr("<a(t)| Z(0) |a(t)> within 0.01 * 2.0"),
+        "(* (expect (call a t) (call Z 0) within 0.01) 2.0)"
+    );
+    assert_eq!(
+        expr("<+| Z(0) |+> within e"),
+        "(expect |+> (call Z 0) within e)"
+    );
     assert_eq!(expr("<+-| Z(0) |+->"), "(expect |+-> (call Z 0))");
     assert_eq!(
         expr("<ansatz(t)| -1.0 * Z(0) + X(1) |ansatz(t)>"),

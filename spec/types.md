@@ -107,6 +107,14 @@ range is a compile error.
 The value is ⟨ψ|H|ψ⟩. A simulator computes it exactly when `ψ` contains no measurement;
 otherwise, and on hardware, it is estimated by averaging over repeated runs of `ψ`.
 
+`<ψ| H |ψ> within ε` says how precise an estimate must be: its standard error is at most `ε`,
+a positive `Float`. Without `within`, `ε` is 0.01. The precision says what is wanted, not how:
+the runtime chooses the runs. When `H = Σ cᵢ Pᵢ`, terms whose Pauli products agree on every
+qubit's basis are measured together, and a group whose coefficients sum to `S_g` (in absolute
+value) gets `S_g · S / ε²` runs, where `S` sums them over all groups; then the variances add up
+to at most `ε²`. An exact value is within any precision, so a simulator ignores `ε` when it
+computes the value exactly.
+
 ### How the two forms relate
 
 Mathematically, a measurement test is a special case of an expectation value:

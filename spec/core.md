@@ -115,7 +115,4 @@ language, specified there (§3).
 - **Measuring without consuming.** `measure` consumes the qubit. Repeated mid-circuit
   measurement (error-correction syndromes, for example) would prefer something like
   `fn measure_reset(mut self) -> Bit` that leaves the qubit in \|0⟩.
-- **Estimation settings.** How many runs an estimated expectation value uses (on hardware,
-  or when the preparation measures), and how to set it per expectation or per program.
 - **Y-basis bras** (`<i|`, `<-i|`), alongside Y-basis kets.
-- **Printing and output** for classical results, beyond the CLI's result histogram.

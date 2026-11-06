@@ -818,7 +818,12 @@ impl Builder<'_> {
                 let state = &self.text(state)[1..state.len() as usize - 1];
                 self.bra_test(state, operand, dest);
             }
-            ExprKind::Expectation { prep, observable } => {
+            ExprKind::Expectation {
+                prep,
+                observable,
+                precision,
+            } => {
+                let precision = precision.map(|p| self.operand(p));
                 let prep = match ast.expr(prep).kind {
                     ExprKind::Ket => {
                         let span = ast.expr(prep).span;
@@ -839,6 +844,7 @@ impl Builder<'_> {
                     dest,
                     prep,
                     observable,
+                    precision,
                 });
             }
             ExprKind::Sample { shots, body } => {

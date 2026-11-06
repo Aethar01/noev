@@ -65,9 +65,26 @@ impl RuntimeError {
 
 type Result<T> = std::result::Result<T, RuntimeError>;
 
-/// How many runs an expectation value averages over when its preparation measures qubits
-/// (`spec/core.md`, open question on estimation settings).
-const EXPECTATION_RUNS: usize = 1000;
+/// The standard error of an estimated expectation value without `within` (`spec/types.md`
+/// §3).
+const DEFAULT_PRECISION: f64 = 0.01;
+
+/// The most runs one expectation value may take, so a tiny precision fails clearly instead of
+/// running for ever.
+const MAX_RUNS: f64 = 1e9;
+
+/// How many runs give a standard error of at most `precision` for a sum of ±1 averages whose
+/// coefficients sum to `weight` in absolute value, when this part of it has `part`: with
+/// `part × weight / precision²` runs per part, the variances add up to `precision²`.
+fn runs_for(part: f64, weight: f64, precision: f64) -> Result<usize> {
+    let runs = (part * weight / (precision * precision)).ceil().max(1.0);
+    if runs > MAX_RUNS {
+        return Err(RuntimeError::new(format!(
+            "an expectation value within {precision} would take {runs:.0} runs; ask for less precision"
+        )));
+    }
+    Ok(runs as usize)
+}
 
 /// How a machine treats quantum operations.
 #[derive(Clone, Debug, Default)]
@@ -669,10 +686,20 @@ impl Machine<'_> {
                 dest,
                 prep,
                 observable,
+                precision,
             } => {
                 let Value::Observable(observable) = self.operand(observable)? else {
                     return Err(RuntimeError::new("expected an observable"));
                 };
+                let precision = match precision {
+                    Some(p) => self.float(p)?,
+                    None => DEFAULT_PRECISION,
+                };
+                if !(precision > 0.0 && precision.is_finite()) {
+                    return Err(RuntimeError::new(format!(
+                        "an expectation value's precision must be positive, not {precision}"
+                    )));
+                }
                 let prep_args = match prep {
                     Prep::Ket(_) => Vec::new(),
                     Prep::Call(_, args) => args
@@ -687,6 +714,7 @@ impl Machine<'_> {
                     prep,
                     prep_args,
                     &observable,
+                    precision,
                     seed,
                 )?;
                 self.store(dest, Value::Float(value))
@@ -1066,30 +1094,253 @@ fn maths(math: Math, args: &[Value]) -> Result<Value> {
 
 // Expectation values.
 
-/// `<prep| observable |prep>`. Exact when the preparation measures nothing; otherwise the
-/// average over [`EXPECTATION_RUNS`] runs of the exact value in each run's outcome.
+/// `<prep| observable |prep> within precision` (`spec/types.md` §3). On a backend that sees
+/// the state, exact when the preparation measures nothing, and otherwise the average of the
+/// exact value over enough runs for `precision`. On any other backend, estimated by measuring.
 fn expectation(
     program: &Program,
     backend: &dyn Backend,
     prep: &Prep,
     args: Vec<Value>,
     observable: &Observable,
+    precision: f64,
     seed: u64,
 ) -> Result<f64> {
     let mut seeds = SmallRng::seed_from_u64(seed);
-    let mut total = 0.0;
-    for run in 0..EXPECTATION_RUNS {
+    if !backend.exact_expectations() {
+        return estimate(
+            program, backend, prep, &args, observable, precision, &mut seeds,
+        );
+    }
+    let mut machine = Machine::new(program, backend, seeds.random());
+    let qubits = machine.prepare(prep, args.clone())?;
+    let first = machine.exact_expectation(observable, &qubits)?;
+    if !machine.measured {
+        return Ok(first);
+    }
+    // Each run's exact value lies within ± the sum of the coefficients of non-identity terms.
+    let weight: f64 = observable
+        .terms
+        .iter()
+        .filter(|(_, p)| !p.is_empty())
+        .map(|(c, _)| c.abs())
+        .sum();
+    let runs = runs_for(weight, weight, precision)?;
+    let mut total = first;
+    for _ in 1..runs {
         let mut machine = Machine::new(program, backend, seeds.random());
         let qubits = machine.prepare(prep, args.clone())?;
         total += machine.exact_expectation(observable, &qubits)?;
-        if run == 0 && !machine.measured {
-            return Ok(total);
+    }
+    Ok(total / runs as f64)
+}
+
+/// A set of Pauli terms that can be measured together: each qubit is measured in one basis.
+struct TermGroup<'o> {
+    /// `(index in the preparation, basis)`.
+    basis: Vec<(usize, Pauli)>,
+    /// `(coefficient, product)`.
+    terms: Vec<&'o (f64, Vec<(usize, Pauli)>)>,
+}
+
+/// Estimates an expectation value by measuring: terms that agree on each qubit's basis are
+/// grouped, and each group is measured over enough runs of the preparation for `precision`, as one
+/// circuit when the preparation is one, otherwise run by run. A term's value is the average of
+/// ±1, the parity of its qubits' outcomes.
+fn estimate(
+    program: &Program,
+    backend: &dyn Backend,
+    prep: &Prep,
+    args: &[Value],
+    observable: &Observable,
+    precision: f64,
+    seeds: &mut SmallRng,
+) -> Result<f64> {
+    let mut total = 0.0;
+    let mut groups: Vec<TermGroup> = Vec::new();
+    for term in &observable.terms {
+        if term.1.is_empty() {
+            total += term.0;
+            continue;
+        }
+        let fits = |group: &TermGroup| {
+            term.1
+                .iter()
+                .all(|&(q, p)| group.basis.iter().all(|&(g, b)| g != q || b == p))
+        };
+        match groups.iter_mut().find(|g| fits(g)) {
+            Some(group) => {
+                for &(q, p) in &term.1 {
+                    if !group.basis.iter().any(|&(g, _)| g == q) {
+                        group.basis.push((q, p));
+                    }
+                }
+                group.terms.push(term);
+            }
+            None => groups.push(TermGroup {
+                basis: term.1.clone(),
+                terms: vec![term],
+            }),
         }
     }
-    Ok(total / EXPECTATION_RUNS as f64)
+    let is_circuit = match prep {
+        Prep::Ket(_) => true,
+        Prep::Call(f, _) => program.functions[f.index()].sampled,
+    };
+    let part = |group: &TermGroup| group.terms.iter().map(|(c, _)| c.abs()).sum::<f64>();
+    let weight: f64 = groups.iter().map(part).sum();
+    for group in &groups {
+        let shots = runs_for(part(group), weight, precision)?;
+        // Outcomes with bit `k` for `group.basis[k]`.
+        let mut outcomes = None;
+        if is_circuit {
+            outcomes =
+                measure_as_circuit(program, backend, prep, args, &group.basis, shots, seeds)?;
+        }
+        let outcomes = match outcomes {
+            Some(outcomes) => outcomes,
+            None if !backend.executes() => {
+                return Err(RuntimeError::unknown(
+                    "the program uses an expectation value whose preparation is not a circuit",
+                ));
+            }
+            None => {
+                let mut counts: std::collections::BTreeMap<u64, usize> = Default::default();
+                for _ in 0..shots {
+                    let mut machine = Machine::new(program, backend, seeds.random());
+                    let qubits = machine.prepare(prep, args.to_vec())?;
+                    let mut bits = 0u64;
+                    for (k, value) in machine
+                        .measure_basis(&qubits, &group.basis)?
+                        .iter()
+                        .enumerate()
+                    {
+                        if *value == Value::Bit(true) {
+                            bits |= 1 << k;
+                        }
+                    }
+                    *counts.entry(bits).or_default() += 1;
+                }
+                counts.into_iter().collect()
+            }
+        };
+        let runs: usize = outcomes.iter().map(|&(_, c)| c).sum();
+        for &&(coeff, ref product) in &group.terms {
+            let mask = product.iter().fold(0u64, |mask, &(q, _)| {
+                let k = group
+                    .basis
+                    .iter()
+                    .position(|&(g, _)| g == q)
+                    .expect("in the group");
+                mask | 1 << k
+            });
+            let sum: i64 = outcomes
+                .iter()
+                .map(|&(bits, count)| {
+                    let sign = if (bits & mask).count_ones() % 2 == 0 {
+                        1
+                    } else {
+                        -1
+                    };
+                    sign * count as i64
+                })
+                .sum();
+            if runs > 0 {
+                total += coeff * sum as f64 / runs as f64;
+            }
+        }
+    }
+    if !backend.executes() {
+        return Err(RuntimeError::unknown(
+            "the program uses an expectation value",
+        ));
+    }
+    Ok(total)
+}
+
+/// Records the preparation followed by measurements in `basis` as one circuit and runs it.
+/// `None` if it cannot be recorded or the backend does not take it, so it runs run by run.
+fn measure_as_circuit(
+    program: &Program,
+    backend: &dyn Backend,
+    prep: &Prep,
+    args: &[Value],
+    basis: &[(usize, Pauli)],
+    shots: usize,
+    seeds: &mut SmallRng,
+) -> Result<Option<Vec<(u64, usize)>>> {
+    let mut builder =
+        Machine::new(program, backend, seeds.random()).with_mode(Mode::Build(Recording::default()));
+    let Ok(qubits) = builder.prepare(prep, args.to_vec()) else {
+        return Ok(None);
+    };
+    let clbits: Vec<usize> = builder
+        .measure_basis(&qubits, basis)?
+        .iter()
+        .map(|v| match v {
+            Value::Clbit(k) => *k,
+            _ => unreachable!("measurements are recorded"),
+        })
+        .collect();
+    if builder.needs_values.get() {
+        return Ok(None);
+    }
+    let Mode::Build(recording) = std::mem::take(&mut builder.mode) else {
+        unreachable!("the builder records")
+    };
+    if recording.circuit.clbits > 64 {
+        return Ok(None);
+    }
+    let Some(counts) = backend.run_circuit(&recording.circuit, shots, seeds.random()) else {
+        return Ok(None);
+    };
+    let counts = counts.map_err(backend_error)?;
+    let outcomes = counts
+        .into_iter()
+        .map(|(bits, count)| {
+            let picked = clbits
+                .iter()
+                .enumerate()
+                .fold(0u64, |acc, (k, &c)| acc | ((bits >> c) & 1) << k);
+            (picked, count)
+        })
+        .collect();
+    Ok(Some(outcomes))
 }
 
 impl Machine<'_> {
+    /// Measures the preparation's qubits `basis` names, each in its basis, consuming them:
+    /// `Bit`s, or while recording, the classical bits they go into.
+    fn measure_basis(&mut self, qubits: &[usize], basis: &[(usize, Pauli)]) -> Result<Vec<Value>> {
+        let mut values = Vec::with_capacity(basis.len());
+        for &(index, pauli) in basis {
+            let Some(&qubit) = qubits.get(index) else {
+                return Err(RuntimeError::new(format!(
+                    "the observable acts on qubit {index}, but the preparation has {} qubit{}",
+                    qubits.len(),
+                    if qubits.len() == 1 { "" } else { "s" }
+                )));
+            };
+            // Into the Z basis: X by H, Y by S† then H.
+            let gates: &[(Gate, bool)] = match pauli {
+                Pauli::X => &[(Gate::H, false)],
+                Pauli::Y => &[(Gate::S, true), (Gate::H, false)],
+                Pauli::Z => &[],
+            };
+            for &(gate, adjoint) in gates {
+                self.execute(Op {
+                    gate,
+                    adjoint,
+                    params: Vec::new(),
+                    controls: Vec::new(),
+                    targets: vec![qubit],
+                })?;
+            }
+            values.push(self.measurement(qubit)?);
+        }
+        Ok(values)
+    }
+
     /// Runs a preparation, returning its qubits in order.
     fn prepare(&mut self, prep: &Prep, args: Vec<Value>) -> Result<Vec<usize>> {
         let value = match prep {

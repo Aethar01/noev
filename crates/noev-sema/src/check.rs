@@ -919,7 +919,14 @@ impl Checker<'_> {
                 }
                 Ty::BOOL
             }
-            ExprKind::Expectation { prep, observable } => {
+            ExprKind::Expectation {
+                prep,
+                observable,
+                precision,
+            } => {
+                if let Some(precision) = precision {
+                    self.expr(precision, Expect::Ty(Ty::FLOAT));
+                }
                 let ty = self.expr(prep, Expect::None);
                 if !self.t.types.is_wildcard(ty) && !self.t.types.is_pure_quantum(ty) {
                     let message = format!(

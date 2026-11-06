@@ -1470,13 +1470,24 @@ impl Parser<'_> {
             kind: ExprKind::Ket,
             span: prep_span,
         });
+        let precision = self.within();
         self.push(
             ExprKind::Expectation {
                 prep,
                 observable: operand,
+                precision,
             },
             bra,
         )
+    }
+
+    /// `within ε` after an expectation value.
+    fn within(&mut self) -> Option<ExprId> {
+        if !self.nth_is_word(0, "within") {
+            return None;
+        }
+        self.bump();
+        Some(self.unary())
     }
 
     /// The ket closing an expectation value, starting at `|`. After the observable, the
@@ -1533,7 +1544,15 @@ impl Parser<'_> {
             )
             .with_label_mut(bra_span, "the bra's preparation");
         }
-        self.push(ExprKind::Expectation { prep, observable }, start)
+        let precision = self.within();
+        self.push(
+            ExprKind::Expectation {
+                prep,
+                observable,
+                precision,
+            },
+            start,
+        )
     }
 }
 

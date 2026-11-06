@@ -370,7 +370,11 @@ fn walk_expr(ast: &Ast, id: ExprId, visit: &mut dyn FnMut(Node)) {
         ExprKind::Own { place, .. } => children.push(place),
         ExprKind::Adj(call) => children.push(call),
         ExprKind::BraTest { operand, .. } => children.push(operand),
-        ExprKind::Expectation { observable, .. } => children.push(observable),
+        ExprKind::Expectation {
+            observable,
+            precision,
+            ..
+        } => children.extend([observable].into_iter().chain(precision)),
         // The body is a run of its own.
         ExprKind::Sample { shots, .. } => children.push(shots),
         ExprKind::Block(b) | ExprKind::Unsafe(b) => blocks.push(b),
@@ -825,13 +829,20 @@ impl Owner<'_> {
                 self.release(&carried);
                 Vec::new()
             }
-            ExprKind::Expectation { prep, observable } => {
+            ExprKind::Expectation {
+                prep,
+                observable,
+                precision,
+            } => {
                 if self.not_reversible(expr.span, "computing an expectation value") {
                     return Vec::new();
                 }
                 self.preparation(prep);
                 self.repeated_run_prints(prep, "an expectation value");
                 self.expr(observable, Use::Read);
+                if let Some(precision) = precision {
+                    self.expr(precision, Use::Read);
+                }
                 Vec::new()
             }
             ExprKind::Sample { shots, body } => {
