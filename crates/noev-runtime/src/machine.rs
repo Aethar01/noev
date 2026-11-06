@@ -54,6 +54,14 @@ impl RuntimeError {
         }
     }
 
+    /// The error, placed at `span` if it has no place yet.
+    pub fn at(mut self, span: Span) -> Self {
+        if self.span.is_none() && span != Span::default() {
+            self.span = Some(span);
+        }
+        self
+    }
+
     /// The program needs a result that is not known because circuits are only recorded.
     pub fn unknown(message: impl Into<String>) -> Self {
         RuntimeError {
@@ -256,8 +264,8 @@ impl<'p> Machine<'p> {
                 return Ok(());
             }
             let current = &function.blocks[block];
-            for stmt in &current.stmts {
-                self.stmt(stmt)?;
+            for (stmt, &span) in current.stmts.iter().zip(&current.spans) {
+                self.stmt(stmt).map_err(|e| e.at(span))?;
             }
             block = match &current.term {
                 Terminator::Goto(next) => next.index(),

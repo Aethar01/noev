@@ -83,6 +83,8 @@ pub struct LocalDecl {
 pub struct BasicBlock {
     /// The statements, in order.
     pub stmts: Vec<Stmt>,
+    /// For each statement, the source expression it comes from, for runtime errors.
+    pub spans: Vec<Span>,
     /// Where control goes next.
     pub term: Terminator,
 }

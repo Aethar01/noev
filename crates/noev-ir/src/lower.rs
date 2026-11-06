@@ -99,6 +99,8 @@ struct Builder<'a> {
     locals: Vec<Option<Local>>,
     /// `(continue, break)` targets of enclosing loops.
     loops: Vec<(Block, Block)>,
+    /// The span of the expression being lowered.
+    span: Span,
 }
 
 impl<'a> Builder<'a> {
@@ -170,6 +172,7 @@ impl<'a> Builder<'a> {
             current: Block(0),
             locals: vec![None; typed.locals.len()],
             loops: Vec::new(),
+            span: Span::default(),
         };
         builder.current = builder.new_block();
         builder
@@ -260,13 +263,16 @@ impl<'a> Builder<'a> {
     fn new_block(&mut self) -> Block {
         self.function.blocks.push(BasicBlock {
             stmts: Vec::new(),
+            spans: Vec::new(),
             term: Terminator::Unreachable,
         });
         Block(self.function.blocks.len() as u32 - 1)
     }
 
     fn push(&mut self, stmt: Stmt) {
-        self.function.blocks[self.current.index()].stmts.push(stmt);
+        let block = &mut self.function.blocks[self.current.index()];
+        block.stmts.push(stmt);
+        block.spans.push(self.span);
     }
 
     fn assign(&mut self, place: Place, value: Rvalue) {
@@ -726,7 +732,15 @@ impl Builder<'_> {
     }
 
     /// Computes an expression into `dest`, or for its effects only.
+    /// Lowers an expression into `dest`; its statements carry its span, unless a part of it
+    /// has its own.
     fn expr_into(&mut self, id: ExprId, dest: Option<Place>) {
+        let outer = std::mem::replace(&mut self.span, self.ast.expr(id).span);
+        self.expr_parts_into(id, dest);
+        self.span = outer;
+    }
+
+    fn expr_parts_into(&mut self, id: ExprId, dest: Option<Place>) {
         let ast = self.ast;
         let expr = *ast.expr(id);
         match expr.kind {
