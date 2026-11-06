@@ -1,4 +1,4 @@
-//! Throughput benchmark for type checking. Run with `cargo bench -p noev-sema`.
+//! Throughput benchmarks for type and ownership checking. Run with `cargo bench -p noev-sema`.
 //!
 //! Each UI test program is parsed once, then checked many times; repeating programs within
 //! one file would define every function twice. Dependency-free, like the syntax benchmark:
@@ -40,6 +40,17 @@ fn main() {
     let bytes: usize = sources.iter().map(String::len).sum::<usize>() * repeats;
     let lines: usize = sources.iter().map(|s| s.lines().count()).sum::<usize>() * repeats;
 
+    let report = |phase: &str, time: Duration| {
+        let secs = time.as_secs_f64();
+        let mib = bytes as f64 / (1024.0 * 1024.0);
+        println!(
+            "{phase:<9} {:>8.1} MiB/s {:>10.0} lines/s  ({:.2} ms for {mib:.1} MiB)",
+            mib / secs,
+            lines as f64 / secs,
+            secs * 1e3,
+        );
+    };
+
     let time = fastest(10, || {
         for _ in 0..repeats {
             for p in &parsed {
@@ -47,12 +58,15 @@ fn main() {
             }
         }
     });
-    let secs = time.as_secs_f64();
-    let mib = bytes as f64 / (1024.0 * 1024.0);
-    println!(
-        "check    {:>8.1} MiB/s {:>10.0} lines/s  ({:.2} ms for {mib:.1} MiB)",
-        mib / secs,
-        lines as f64 / secs,
-        secs * 1e3,
-    );
+    report("types", time);
+
+    let typed: Vec<_> = parsed.iter().map(|p| noev_sema::check(&p.ast).0).collect();
+    let time = fastest(10, || {
+        for _ in 0..repeats {
+            for (p, t) in parsed.iter().zip(&typed) {
+                black_box(noev_sema::check_ownership(black_box(&p.ast), black_box(t)));
+            }
+        }
+    });
+    report("ownership", time);
 }

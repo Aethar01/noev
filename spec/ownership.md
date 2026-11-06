@@ -293,12 +293,15 @@ In a reversible context, these are not allowed:
 - calls to `measure`, `reset`, `discard`, or any function that is not reversible;
 - ket literals (allocating qubits), except in a `with` block;
 - moving a linear value;
-- assignment to a variable declared outside the context;
-- `if` or `while` conditions that depend on a value computed inside the context.
+- assignment to a variable declared outside the context.
 
 Allowed: gates, calls to reversible functions (including purely classical ones, which are
-trivially reversible), nested `ctrl`, `adj`, `let` bindings of classical values, `if` on
-classical values from outside the context, and `for` loops over classical ranges.
+trivially reversible), nested `ctrl`, `adj`, `let` bindings and assignments of variables
+declared inside the context, `if` and `while`, and `for` loops over classical ranges.
+
+Classical control flow is safe here because nothing in a reversible context can depend on a
+measurement: every classical value is determined by the inputs, so undoing the code can
+recompute it and replay the quantum operations in reverse.
 
 ### N014: `adj` on something that is not reversible
 

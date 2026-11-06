@@ -38,6 +38,38 @@ pub enum Builtin {
     Const(FloatConst),
 }
 
+impl Builtin {
+    /// Whether it may be used in a reversible context.
+    pub fn reversible(self) -> bool {
+        !matches!(
+            self,
+            Builtin::Measure | Builtin::Reset | Builtin::Discard | Builtin::Release
+        )
+    }
+
+    /// Whether calling it needs `unsafe`.
+    pub fn is_unsafe(self) -> bool {
+        self == Builtin::Release
+    }
+
+    /// The name it is called by, for messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            Builtin::Measure => "measure",
+            Builtin::Reset => "reset",
+            Builtin::Discard => "discard",
+            Builtin::Release => "release",
+            Builtin::Gate(_) => "a gate",
+            Builtin::Pauli(_) | Builtin::Identity => "an observable",
+            Builtin::ProjectorZ => "P",
+            Builtin::ProjectorX => "PX",
+            Builtin::Math(_) => "a maths function",
+            Builtin::Convert(_) => "a conversion",
+            Builtin::Const(_) => "a constant",
+        }
+    }
+}
+
 /// The prelude's gates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[allow(missing_docs)] // Each variant is named for its gate.

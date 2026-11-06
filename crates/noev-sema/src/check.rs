@@ -20,6 +20,11 @@ impl LocalId {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// The local at `index` in [`Typed::locals`].
+    pub fn from_index(index: usize) -> Self {
+        LocalId(u32::try_from(index).expect("fewer than 2³² locals"))
+    }
 }
 
 /// A local variable.
@@ -99,6 +104,8 @@ pub struct Typed {
     pub callees: Vec<Option<Callee>>,
     /// Implicit conversions, indexed by [`ExprId::index`].
     pub adjust: Vec<Adjust>,
+    /// How each method call takes its receiver, indexed by [`ExprId::index`].
+    pub receivers: Vec<Option<OwnKind>>,
     /// The variable each name pattern binds, indexed by [`PatId::index`].
     pub pat_locals: Vec<Option<LocalId>>,
     /// Every local variable.
@@ -151,6 +158,7 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
             res: vec![Res::None; exprs],
             callees: vec![None; exprs],
             adjust: vec![Adjust::None; exprs],
+            receivers: vec![None; exprs],
             pat_locals: vec![None; ast.all_pats().len()],
             ..Typed::default()
         },
@@ -1330,6 +1338,7 @@ impl Checker<'_> {
             return self.skip_args(args);
         }
         self.t.callees[id.index()] = Some(callee);
+        self.t.receivers[id.index()] = sig.receiver;
         if base != receiver_ty {
             self.t.adjust[receiver.index()] = Adjust::Deref;
         }

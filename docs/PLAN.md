@@ -133,7 +133,7 @@ circuit generation.
 | -- | ---------------------------- | ------------------------------------------------------------------------------------------ | ------- |
 | 1  | Parser                       | Read `.nv` files, build an AST                                                             | ☑ Done |
 | 2  | Basic types                  | `Int`, `Float`, `Bool`, `Bit`, `Qubit`, tuples, arrays, structs                            | ☑ Done |
-| 3  | Ownership checker            | Rules N001–N020 in `spec/ownership.md` (`with`/`do` reserved)                              | ☐ Todo |
+| 3  | Ownership checker            | Rules N001–N020 in `spec/ownership.md` (`with`/`do` reserved)                              | ☑ Done |
 | 4  | Quantum IR                   | Allocation, gates, measurement, classical dependencies                                     | ☐ Todo |
 | 5  | Circuit generation           | Export to OpenQASM 3                                                                       | ☐ Todo |
 | 6  | Execution                    | Run on a simulator, expose results via the `noev` CLI                                      | ☐ Todo |

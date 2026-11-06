@@ -114,8 +114,12 @@ fn check(file: &Path, format: MessageFormat) -> ExitCode {
         }
     };
     let parsed = noev_syntax::parse(&source);
-    let (_typed, type_errors) = noev_sema::check(&parsed.ast);
+    let (typed, type_errors) = noev_sema::check(&parsed.ast);
     let mut diagnostics = parsed.diagnostics;
+    // Ownership is only meaningful for a well-typed program.
+    if diagnostics.is_empty() && type_errors.is_empty() {
+        diagnostics.extend(noev_sema::check_ownership(&parsed.ast, &typed));
+    }
     diagnostics.extend(type_errors);
     diagnostics.sort_by_key(|d| d.span.start);
     report::print(&file.display().to_string(), &source, &diagnostics, format);
@@ -123,9 +127,7 @@ fn check(file: &Path, format: MessageFormat) -> ExitCode {
         .iter()
         .any(|d| d.severity == noev_syntax::Severity::Error);
     if matches!(format, MessageFormat::Human) && !failed {
-        anstream::eprintln!(
-            "{NOTE}note:{NOTE:#} syntax and types were checked; ownership checks are not implemented yet"
-        );
+        anstream::eprintln!("{NOTE}note:{NOTE:#} syntax, types and ownership were checked");
     }
     if failed {
         ExitCode::from(1)

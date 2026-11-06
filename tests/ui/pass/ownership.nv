@@ -1,0 +1,103 @@
+// Patterns the ownership checker must accept.
+
+struct Pair {
+    a: Qubit
+    b: Qubit
+}
+
+fn both_branches(flag: Bool) -> Bit {
+    let q = |+>
+    if flag {
+        mv q.measure()
+    } else {
+        q.h()
+        mv q.measure()
+    }
+}
+
+fn early_return(flag: Bool) -> Bit {
+    let q = |0>
+    if flag {
+        return mv q.measure()
+    }
+    q.x()
+    mv q.measure()
+}
+
+fn fresh_in_loop() -> Int {
+    let mut ones = 0
+    for i in 0..10 {
+        let q = |+>
+        if <1| mv q {
+            ones += 1
+        }
+    }
+    ones
+}
+
+fn pass_on(q: mut Qubit) {
+    q.h()
+    h(q)
+    flip(q)
+}
+
+fn flip(q: mut Qubit) {
+    q.x()
+}
+
+fn destructure() -> (Bit, Bit) {
+    let pair = (|0>, |1>)
+    let (a, b) = mv pair
+    (mv a.measure(), mv b.measure())
+}
+
+fn into_struct() -> Bit {
+    let a = |0>
+    let b = |1>
+    let p = Pair { a: mv a, b: mv b }
+    ctrl p.a { p.b.x() }
+    let first = mv p.a.measure()
+    mv p.b.discard()
+    first
+}
+
+fn nested_controls() -> [Bit; 3] {
+    let r = |+00>
+    ctrl r[0] {
+        ctrl r[1] { r[2].x() }
+        adj r[2].s()
+    }
+    mv r.measure()
+}
+
+fn whole_register_control() -> Bit {
+    let r = |11>
+    let t = |0>
+    ctrl r { t.x() }
+    let rs = mv r.measure()
+    mv t.measure()
+}
+
+fn element_by_element() -> Bit {
+    let r = |000>
+    let a = mv r[0].measure()
+    let b = mv r[1].measure()
+    mv r[2].discard()
+    a
+}
+
+fn lend_ends_with_block() -> Bit {
+    let q = |0>
+    {
+        let r = ref q
+        let s = ref q
+    }
+    mv q.measure()
+}
+
+fn classical_moves() -> Int {
+    let n = 5
+    let m = mv n
+    let k = m
+    k + m
+}
