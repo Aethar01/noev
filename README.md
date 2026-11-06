@@ -80,6 +80,13 @@ The [`examples/`](examples/) show the language: a Bell pair, a hybrid struct hol
 and a qubit, a table of energies from expectation values, a 16-qubit quantum Fourier
 transform, and teleportation.
 
+## Editors
+
+[`editors/`](editors/) has a tree-sitter grammar (highlighting, indentation, folding) and
+Neovim support, and `noev lsp` is a language server for any editor: errors as you type, types
+on hover, go to definition and document symbols. See
+[`editors/nvim/README.md`](editors/nvim/README.md) for setting up Neovim.
+
 ## Repository
 
 - [`spec/`](spec/): the language definition. The compiler implements it; behaviour changes

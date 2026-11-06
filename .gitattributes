@@ -1,0 +1,4 @@
+editors/tree-sitter-noev/src/parser.c linguist-generated
+editors/tree-sitter-noev/src/grammar.json linguist-generated
+editors/tree-sitter-noev/src/node-types.json linguist-generated
+editors/tree-sitter-noev/src/tree_sitter/** linguist-generated

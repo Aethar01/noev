@@ -41,3 +41,10 @@ compiler that checks, runs and exports it.
   (`--message-format=short`); runtime errors point at the failing expression.
 - Conformance suites `tests/ui` (errors) and `tests/run` (output), and benchmarks for every
   compiler phase.
+
+### Editors
+
+- `noev lsp`: a language server with diagnostics as you type, hover (types and signatures),
+  go to definition and document symbols.
+- A tree-sitter grammar (`editors/tree-sitter-noev`) with highlight, indent and fold queries,
+  and Neovim runtime files (`editors/nvim`).

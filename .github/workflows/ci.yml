@@ -32,3 +32,27 @@ jobs:
           for example in examples/*.nv; do
             cargo run --quiet --release -p noev -- run "$example" --seed 1 > /dev/null
           done
+
+  grammar:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/tree-sitter-noev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install tree-sitter
+        run: npm install -g tree-sitter-cli@0.26
+      - name: Generated parser is up to date
+        run: |
+          tree-sitter generate
+          git diff --exit-code src/
+      - name: Corpus
+        run: tree-sitter test -p .
+      - name: Every program in the repository parses
+        run: |
+          find ../../examples ../../tests -name '*.nv' > files
+          tree-sitter parse -p . -q -s --paths files | tee result
+          ! grep -E 'ERROR|MISSING' result

@@ -1,5 +1,6 @@
 //! The `noev` command-line interface.
 
+mod lsp;
 mod report;
 
 use std::path::{Path, PathBuf};
@@ -78,6 +79,9 @@ enum Command {
         #[command(flatten)]
         messages: MessageOptions,
     },
+
+    /// Start the language server, for editors (speaks LSP on standard input and output)
+    Lsp,
 
     /// Save a program's circuits without running anything quantum (the same as
     /// `run --backend=export`)
@@ -169,6 +173,13 @@ fn main() -> ExitCode {
             circuits.as_deref(),
             messages.message_format,
         ),
+        Command::Lsp => match lsp::serve() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                anstream::eprintln!("noev lsp: {error}");
+                ExitCode::from(1)
+            }
+        },
         Command::Export {
             file,
             output,

@@ -1,0 +1,147 @@
+================================================================================
+Kets and bitwise or
+================================================================================
+
+fn f() {
+    let q = |0+>
+    let m = a | 0
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_item
+    (identifier)
+    (parameters)
+    (block
+      (let_declaration
+        (identifier)
+        (ket))
+      (let_declaration
+        (identifier)
+        (binary_expression
+          (identifier)
+          (integer))))))
+
+================================================================================
+Measurement test and expectation values
+================================================================================
+
+fn f() -> Float {
+    let hit = <1| mv q
+    let e = <+| Z(0) |+>
+    <ansatz(t)| h |ansatz(t)> within 0.01
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_item
+    (identifier)
+    (parameters)
+    (type_path
+      (type_identifier))
+    (block
+      (let_declaration
+        (identifier)
+        (measurement_test
+          (bra)
+          (ownership_expression
+            (ownership)
+            (identifier))))
+      (let_declaration
+        (identifier)
+        (bra_expectation
+          (bra)
+          (call_expression
+            (identifier)
+            (arguments
+              (integer)))
+          (ket)))
+      (expectation
+        (call_expression
+          (identifier)
+          (arguments
+            (identifier)))
+        (identifier)
+        (call_expression
+          (identifier)
+          (arguments
+            (identifier)))
+        (within
+          (float))))))
+
+================================================================================
+Sample, ctrl and a struct literal next to a condition
+================================================================================
+
+fn f() {
+    let d = sample 1000 { bell() }
+    ctrl r[0], r[1] { t.x() }
+    if done { let e = E { angle, state: |0> } }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_item
+    (identifier)
+    (parameters)
+    (block
+      (let_declaration
+        (identifier)
+        (sample_expression
+          (integer)
+          (block
+            (call_expression
+              (identifier)
+              (arguments)))))
+      (ctrl_expression
+        (place_index
+          (identifier)
+          (integer))
+        (place_index
+          (identifier)
+          (integer))
+        (block
+          (method_call_expression
+            (identifier)
+            (method_identifier)
+            (arguments))))
+      (if_expression
+        (identifier)
+        (block
+          (let_declaration
+            (identifier)
+            (struct_expression
+              (type_identifier)
+              (field_initializer
+                (field_identifier))
+              (field_initializer
+                (field_identifier)
+                (ket)))))))))
+
+================================================================================
+Contextual keywords as names
+================================================================================
+
+fn f() {
+    let adj = 1
+    let rev = adj + 1
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_item
+    (identifier)
+    (parameters)
+    (block
+      (let_declaration
+        (identifier)
+        (integer))
+      (let_declaration
+        (identifier)
+        (binary_expression
+          (identifier)
+          (integer))))))

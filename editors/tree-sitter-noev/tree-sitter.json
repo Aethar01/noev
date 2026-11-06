@@ -1,0 +1,20 @@
+{
+  "grammars": [
+    {
+      "name": "noev",
+      "camelcase": "Noev",
+      "scope": "source.noev",
+      "path": ".",
+      "file-types": ["nv"],
+      "highlights": "../nvim/queries/noev/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT OR Apache-2.0",
+    "description": "Noev grammar for tree-sitter",
+    "links": {
+      "repository": "https://github.com/Aethar01/noev"
+    }
+  }
+}
