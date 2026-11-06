@@ -168,6 +168,43 @@ fn calls_and_conversions() {
 }
 
 #[test]
+fn strings_and_printing() {
+    ok(
+        "fn main() {\n let x = 3\n let s = \"x = {x:>4}, pi = {Float::PI:.3}, mask {x:08b}\"\n print(s, x, 1.5, true)\n eprint(\"done\")\n}",
+    );
+    ok("fn f(a: String, b: String) -> Bool { a == b }");
+    assert_eq!(
+        one_error("fn f(x: Int) -> String { \"{x:.2}\" }"),
+        "this format spec does not apply to `Int`"
+    );
+    assert_eq!(
+        one_error("fn f(x: Float) -> String { \"{x:b}\" }"),
+        "this format spec does not apply to `Float`"
+    );
+    assert_eq!(
+        one_error("fn main() {\n let q = |0>\n print(q)\n mv q.discard()\n}"),
+        "`Qubit` cannot be printed"
+    );
+    assert_eq!(
+        one_error("fn f() -> String { \"{y}\" }"),
+        "cannot find `y` in this scope"
+    );
+}
+
+#[test]
+fn main_takes_nothing_and_returns_unit() {
+    assert_eq!(
+        one_error("fn main() -> Int { 1 }"),
+        "`main` must take no parameters and return `()`"
+    );
+    assert_eq!(
+        one_error("fn main(n: Int) {}"),
+        "`main` must take no parameters and return `()`"
+    );
+    ok("fn main() {}");
+}
+
+#[test]
 fn reserved_items() {
     assert_eq!(
         one_error("trait T { fn m(ref self) }"),

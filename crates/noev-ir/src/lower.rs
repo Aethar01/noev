@@ -22,6 +22,17 @@ pub fn lower(syntax: &Ast, typed: &Typed, source: &str) -> Program {
         .iter()
         .map(|s| syntax.name(s.name).to_string())
         .collect();
+    let struct_fields = typed
+        .types
+        .structs
+        .iter()
+        .map(|s| {
+            s.fields
+                .iter()
+                .map(|&(name, _)| syntax.name(name).to_string())
+                .collect()
+        })
+        .collect();
     // Lowering creates reference types for implicit lends, so it works on its own copy.
     let mut types = typed.types.clone();
     let mut functions = Vec::with_capacity(syntax.all_fns().len());
@@ -47,6 +58,7 @@ pub fn lower(syntax: &Ast, typed: &Typed, source: &str) -> Program {
         main,
         types,
         struct_names,
+        struct_fields,
     }
 }
 
@@ -503,6 +515,25 @@ impl Builder<'_> {
         self.read(temp, ty)
     }
 
+    /// An expression's value, following any references, for printing.
+    fn value_operand(&mut self, id: ExprId) -> Operand {
+        let op = self.operand(id);
+        if !self.is_ref(self.ty(id)) {
+            return op;
+        }
+        let mut place = match op {
+            Operand::Copy(place) | Operand::Move(place) => place,
+            constant @ Operand::Const(_) => return constant,
+        };
+        // Follow every level of reference: `ref ref Int` prints as an `Int`.
+        let mut ty = self.ty(id);
+        while let TyKind::Ref { inner, .. } = *self.types.kind(ty) {
+            place = place.with(Proj::Deref);
+            ty = inner;
+        }
+        Operand::Copy(place)
+    }
+
     /// The place an implicit lend refers to.
     fn lend_target(&mut self, id: ExprId) -> Place {
         if self.is_place_expr(id) {
@@ -581,6 +612,22 @@ impl Builder<'_> {
             ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Unit => {
                 let op = self.operand(id);
                 self.set(&dest, Rvalue::Use(op));
+            }
+            ExprKind::Str(parts) => {
+                let mut out = Vec::new();
+                for part in ast.list(parts) {
+                    match *part {
+                        ast::StrPart::Text(text) => {
+                            out.push(FormatPart::Text(ast.name(text).to_string()))
+                        }
+                        ast::StrPart::Value { expr, spec } => {
+                            let ty = self.types.deref(self.ty(expr));
+                            let op = self.value_operand(expr);
+                            out.push(FormatPart::Value(op, ty, spec));
+                        }
+                    }
+                }
+                self.set(&dest, Rvalue::Format(out));
             }
             ExprKind::Ket => {
                 let state = &self.text(expr.span)[1..expr.span.len() as usize - 1];
@@ -1124,6 +1171,16 @@ impl Builder<'_> {
                 if let Some(dest) = dest {
                     self.assign(dest, Rvalue::Math(math, ops));
                 }
+            }
+            Builtin::Print { stderr } => {
+                let args = args
+                    .iter()
+                    .map(|&a| {
+                        let ty = self.types.deref(self.ty(a));
+                        (self.value_operand(a), ty)
+                    })
+                    .collect();
+                self.push(Stmt::Print { stderr, args });
             }
             Builtin::Convert(_) | Builtin::Const(_) => {}
         }

@@ -135,8 +135,8 @@ circuit generation.
 | 2  | Basic types                  | `Int`, `Float`, `Bool`, `Bit`, `Qubit`, tuples, arrays, structs                            | ☑ Done |
 | 3  | Ownership checker            | Rules N001–N020 in `spec/ownership.md` (`with`/`do` reserved)                              | ☑ Done |
 | 4  | Quantum IR                   | Allocation, gates, measurement, classical dependencies                                     | ☑ Done |
-| 5  | Circuit generation           | Export to OpenQASM 3                                                                       | ☐ Todo |
-| 6  | Execution                    | Run on a simulator, expose results via the `noev` CLI (multi-control waits on ketrs)        | ◐ In progress |
+| 5  | Circuits                     | Closed runs that are circuits (`spec/execution.md`) compiled to ketrs circuits and OpenQASM 3 | ☐ Todo |
+| 6  | Execution                    | Interpreter on ketrs, circuits sampled through ketrs, `noev run` | ◐ In progress |
 | 7  | Expectation values           | `<ψ\| H \|ψ>` with observables, exact on ketrs where possible                               | ☐ Todo |
 
 **Priority:** build the type system and ownership checker (milestones 1–3) first, before any
@@ -170,12 +170,11 @@ resource operations gives the project its technical identity from day one.
     generated programs, so regressions are caught when they happen;
   - avoid heavy generic or macro machinery in the compiler itself, to keep its own build
     fast.
-- **Execution:** the runtime walks Noev IR and drives `ketrs::Statevector` directly
-  (`measure`, `reset` and gates exist there), rather than round-tripping through QASM text.
-  Programs whose measurements are all terminal with no classical feedback build one
-  `ketrs::Circuit`, simulate once, and `sample_counts`. Programs with mid-circuit
-  measurement or classical control re-run per shot. OpenQASM 3 stays as an export format
-  (`noev build --emit=qasm3`) for other tools and hardware.
+- **Execution** (`spec/execution.md`): every call runs once, and repeated closed runs that
+  are circuits are compiled to a `ketrs::Circuit` and sampled with `sample_circuit`, one
+  simulation for all shots (ketrs shares the work before the first mid-circuit measurement).
+  Runs that are not circuits are interpreted shot by shot on a `ketrs::Statevector`. The same
+  circuit builder emits OpenQASM 3, and later QIR for hardware.
 
 ## 6. Repository layout
 
@@ -286,6 +285,11 @@ program never breaks existing code; the reverse does.
 | Shortcuts           | Implicit `ref`, implicit `mut` for pure quantum values, inferred `rev` | Decided  |
 | Array indices       | Compile-time proof that indices differ and are in range (`spec/ownership.md` §10) | Decided  |
 | `assert`, `unsafe`  | `assert` adds runtime-checked facts; `unsafe` trusts uncheckable claims (`release`) | Decided  |
+| Execution model     | Calls run once; closed runs repeat as shots; a one-sentence rule decides circuit vs shot by shot; `circuit fn` promises it (`spec/execution.md`) | Decided  |
+| Output              | `noev run` runs `main` once; output is what the program prints (`print`, `eprint`); `std::io` reserved | Decided  |
+| Strings, formatting | `String` with value semantics; `{expr:spec}` interpolation checked at compile time | Decided  |
+| Sampling            | `sample(f(args), n) -> Distribution<T>` in the language, no CLI command | Decided  |
+| Generic syntax      | Angle brackets: `Distribution<T>` | Decided  |
 | Unconsumed qubits   | Compile error now; goal is implicit free when provably \|0⟩ | Decided  |
 
 ### References: Rust's model, Noev's spelling

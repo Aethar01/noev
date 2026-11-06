@@ -36,6 +36,11 @@ pub enum Builtin {
     Convert(Ty),
     /// `Float::PI`, `Float::TAU` or `Float::E`.
     Const(FloatConst),
+    /// `print(…)` (`stderr: false`) or `eprint(…)` (`stderr: true`). Standard library.
+    Print {
+        /// Whether it writes to standard error.
+        stderr: bool,
+    },
 }
 
 impl Builtin {
@@ -43,7 +48,11 @@ impl Builtin {
     pub fn reversible(self) -> bool {
         !matches!(
             self,
-            Builtin::Measure | Builtin::Reset | Builtin::Discard | Builtin::Release
+            Builtin::Measure
+                | Builtin::Reset
+                | Builtin::Discard
+                | Builtin::Release
+                | Builtin::Print { .. }
         )
     }
 
@@ -66,6 +75,8 @@ impl Builtin {
             Builtin::Math(_) => "a maths function",
             Builtin::Convert(_) => "a conversion",
             Builtin::Const(_) => "a constant",
+            Builtin::Print { stderr: false } => "print",
+            Builtin::Print { stderr: true } => "eprint",
         }
     }
 }
@@ -208,6 +219,7 @@ pub fn builtin_type(name: &str) -> Option<Ty> {
         "Bit" => Ty::BIT,
         "Qubit" => Ty::QUBIT,
         "Observable" => Ty::OBSERVABLE,
+        "String" => Ty::STRING,
         _ => return None,
     })
 }

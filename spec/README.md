@@ -11,6 +11,7 @@ compiler is wrong, or the spec is changed on purpose.
 | [ownership.md](ownership.md)   | Moves, borrows, consumption, reversible contexts, errors  |
 | [core.md](core.md)             | Intrinsics: built-in gates, measurement, observables, maths |
 | [std.md](std.md)               | The standard library, with a reference definition in Noev for each item |
+| [execution.md](execution.md)   | Runs, shots, sampling, and when a run is a circuit         |
 | [modules.md](modules.md)       | Modules, imports, visibility and packages (Reserved)      |
 | [interop.md](interop.md)       | Calling Noev from other languages, and foreign functions (Reserved) |
 

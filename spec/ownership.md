@@ -558,3 +558,5 @@ None currently.
 | N018 | Qubit index not proven in range                    |
 | N019 | Unsafe operation outside `unsafe`                  |
 | N020 | Preparation is not repeatable                      |
+| N021 | A `circuit fn` is not a circuit ([execution.md](execution.md) §4) |
+| N022 | A repeated run prints ([execution.md](execution.md) §3) |

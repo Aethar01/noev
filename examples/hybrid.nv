@@ -2,7 +2,7 @@
 //
 //     noev run examples/hybrid.nv
 //
-// Rotating |0⟩ by θ about Y gives 1 with probability sin²(θ/2). With θ = 2π/3, that is 75%.
+// Rotating |0⟩ by θ about Y gives 1 with probability sin²(θ/2). With θ = 2π/3 that is 75%.
 
 struct Experiment {
     angle: Float
@@ -22,8 +22,10 @@ struct Experiment {
     }
 }
 
-fn main() -> Bit {
-    let mut e = Experiment::new(2.0 * Float::PI / 3.0)
+fn main() {
+    let angle = 2.0 * Float::PI / 3.0
+    let p = (angle / 2.0).sin() * (angle / 2.0).sin()
+    let mut e = Experiment::new(angle)
     e.rotate()
-    mv e.finish()
+    print("θ = {angle:.4}, P(1) = {p:.2}, this run measured {mv e.finish()}")
 }

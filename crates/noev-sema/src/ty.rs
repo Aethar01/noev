@@ -40,6 +40,8 @@ pub enum TyKind {
     Qubit,
     /// `Observable`.
     Observable,
+    /// `String`.
+    String,
     /// `(A, B, …)`.
     Tuple(Box<[Ty]>),
     /// `[T; N]`.
@@ -122,6 +124,7 @@ basic! {
     BIT = 6: Bit,
     QUBIT = 7: Qubit,
     OBSERVABLE = 8: Observable,
+    STRING = 9: String,
 }
 
 impl Types {
@@ -223,6 +226,13 @@ impl Types {
         }
     }
 
+    /// Whether values of `ty` can be printed and interpolated into strings: classical
+    /// values, through any number of shared references (`spec/types.md` §7).
+    pub fn is_printable(&self, ty: Ty) -> bool {
+        let ty = self.deref(ty);
+        self.linearity(ty) == Kind::Copyable && !matches!(self.kind(ty), TyKind::Ref { .. })
+    }
+
     /// How many qubits a pure quantum value of type `ty` holds, if it is pure quantum.
     pub fn qubit_count(&self, ty: Ty) -> Option<u64> {
         if !self.is_pure_quantum(ty) {
@@ -257,6 +267,7 @@ impl Types {
             TyKind::Bit => "Bit".into(),
             TyKind::Qubit => "Qubit".into(),
             TyKind::Observable => "Observable".into(),
+            TyKind::String => "String".into(),
             TyKind::Tuple(elems) => {
                 let elems: Vec<String> = elems.iter().map(|&t| self.display(t, ast)).collect();
                 if elems.len() == 1 {

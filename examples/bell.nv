@@ -2,7 +2,7 @@
 //
 //     noev run examples/bell.nv
 //
-// About half the shots give 00 and half give 11; never 01 or 10.
+// Each run prints 0 0 or 1 1, never 0 1 or 1 0.
 
 fn bell_pair() -> (Bit, Bit) {
     let a = |+>
@@ -11,6 +11,7 @@ fn bell_pair() -> (Bit, Bit) {
     (mv a.measure(), mv b.measure())
 }
 
-fn main() -> (Bit, Bit) {
-    bell_pair()
+fn main() {
+    let (a, b) = bell_pair()
+    print("measured:", a, b)
 }

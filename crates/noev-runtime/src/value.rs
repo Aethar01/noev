@@ -1,6 +1,7 @@
 //! Runtime values, and observables.
 
 use std::fmt;
+use std::rc::Rc;
 
 /// A value held by a local or computed by an expression.
 #[derive(Clone, Debug, PartialEq)]
@@ -15,6 +16,8 @@ pub enum Value {
     Bool(bool),
     /// A `Bit`.
     Bit(bool),
+    /// A `String`; shared, since strings are immutable.
+    Str(Rc<str>),
     /// A qubit: its index in the simulator's state.
     Qubit(usize),
     /// An `Observable`.
@@ -76,6 +79,7 @@ impl fmt::Display for Value {
             Value::Float(v) => write!(f, "{v:?}"),
             Value::Bool(v) => write!(f, "{v}"),
             Value::Bit(v) => write!(f, "{}", u8::from(*v)),
+            Value::Str(s) => write!(f, "{s}"),
             Value::Qubit(q) => write!(f, "<qubit {q}>"),
             Value::Observable(_) => write!(f, "<observable>"),
             Value::Ref(_) => write!(f, "<reference>"),

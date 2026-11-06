@@ -63,7 +63,57 @@ multi-qubit state:
 let p11 = <ansatz(theta)| P(0, 1) * P(1, 1) |ansatz(theta)>   // probability of measuring 11
 ```
 
-## 4. Planned
+## 4. Output
+
+### `print` and `eprint`
+
+```noev
+print("energy: {e:.3}")          // energy: -0.500
+print("bits:", r, "count:", n)   // bits: 01 count: 3
+eprint("warning: {k} retries")   // to standard error
+```
+
+`print(a, b, …)` writes its arguments to standard output, separated by spaces, followed by a
+line break; `print()` writes an empty line. `eprint` does the same on standard error.
+Arguments are any classical values, printed as [types.md](types.md) §7 describes.
+
+Output is buffered: line by line when standard output is a terminal, in larger blocks when it
+is a file or pipe, and always flushed when the program ends. Standard error is not buffered.
+
+Reference definition, in terms of `std::io` below:
+
+```noev
+fn print(values: …) {           // variadic: not expressible in Noev yet
+    let out = stdout().lock()
+    out.write(/* values joined by " " */)
+    out.write("\n")
+}
+```
+
+Like the rest of the standard library, `print` and `eprint` are implemented natively in
+v0.1. They are not allowed in a run that is repeated ([execution.md](execution.md) §3).
+
+### `std::io` (Reserved)
+
+Explicit control over output, as in Rust, for loops that write a lot and for programs that
+must handle write errors. It needs modules and a `Result` type, so it comes after v0.1.
+
+```noev
+use std::io::stdout
+
+let out = stdout().lock()        // one lock for the whole loop, not one per write
+for i in 0..n {
+    out.write("{i}: {values[i]}\n")
+}
+out.flush()
+```
+
+- `stdout()` and `stderr()` return handles; `lock()` holds the stream for its lifetime, so
+  writes are not re-locked one by one and output from different threads cannot interleave.
+- `write(s: String)` buffers; `flush()` writes the buffer out. Both report write errors as a
+  `Result`.
+
+## 5. Planned
 
 Most of the standard library needs generics, so that one definition works for any register
 size: the quantum Fourier transform, Grover iterations, arithmetic circuits, state

@@ -18,6 +18,19 @@ pub struct Lexed {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+/// Lexes the part of `source` from `start` to `end`, with spans in `source`'s offsets. Used
+/// for the expressions interpolated into string literals.
+pub fn lex_range(source: &str, start: u32, end: u32) -> Lexed {
+    let mut lexed = lex(&source[start as usize..end as usize]);
+    for token in &mut lexed.tokens {
+        token.span = Span::new(token.span.start + start, token.span.end + start);
+    }
+    for diagnostic in &mut lexed.diagnostics {
+        diagnostic.span = Span::new(diagnostic.span.start + start, diagnostic.span.end + start);
+    }
+    lexed
+}
+
 /// Lexes `source`.
 pub fn lex(source: &str) -> Lexed {
     let mut lexer = Lexer {
@@ -103,6 +116,7 @@ impl Lexer<'_> {
                 b'/' if self.peek(1) == b'*' => self.block_comment(),
                 b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.ident(),
                 b'0'..=b'9' => self.number(),
+                b'"' => self.string(),
                 b'|' if self.ket_allowed() && self.state_literal(b'|', b'>', TokenKind::Ket) => {}
                 b'<' if self.ket_allowed() && self.state_literal(b'<', b'|', TokenKind::Bra) => {}
                 _ if byte.is_ascii() => self.punct(),
@@ -156,6 +170,20 @@ impl Lexer<'_> {
         if spans_lines {
             self.push_newline(start);
         }
+    }
+
+    /// A string literal, which may contain interpolations `{…}` with code, including nested
+    /// string literals. Their contents are checked by the parser.
+    fn string(&mut self) {
+        let start = self.pos;
+        match scan_string(self.bytes, start) {
+            Ok(end) => self.pos = end,
+            Err(end) => {
+                self.pos = end;
+                self.error(start, "unterminated string literal");
+            }
+        }
+        self.push(TokenKind::Str, start);
     }
 
     fn ident(&mut self) {
@@ -298,6 +326,44 @@ impl Lexer<'_> {
         };
         self.pos += len;
         self.push(kind, start);
+    }
+}
+
+/// The end of the string literal starting at `start` (one past its closing quote), or, if it
+/// is not closed, `Err` with the end of the input.
+pub(crate) fn scan_string(bytes: &[u8], start: usize) -> Result<usize, usize> {
+    let mut pos = start + 1;
+    loop {
+        match bytes.get(pos) {
+            None => return Err(bytes.len()),
+            Some(b'"') => return Ok(pos + 1),
+            Some(b'\\') => pos += 2,
+            Some(b'{') if bytes.get(pos + 1) == Some(&b'{') => pos += 2,
+            Some(b'{') => pos = scan_interpolation(bytes, pos)?,
+            Some(_) => pos += 1,
+        }
+    }
+}
+
+/// The end of the interpolation starting at `{` at `start` (one past its `}`).
+pub(crate) fn scan_interpolation(bytes: &[u8], start: usize) -> Result<usize, usize> {
+    let mut pos = start + 1;
+    let mut depth = 0usize;
+    loop {
+        match bytes.get(pos) {
+            None => return Err(bytes.len()),
+            Some(b'"') => pos = scan_string(bytes, pos)?,
+            Some(b'{') => {
+                depth += 1;
+                pos += 1;
+            }
+            Some(b'}') if depth == 0 => return Ok(pos + 1),
+            Some(b'}') => {
+                depth -= 1;
+                pos += 1;
+            }
+            Some(_) => pos += 1,
+        }
     }
 }
 
@@ -495,6 +561,18 @@ mod tests {
     fn less_than_after_an_operand() {
         assert_eq!(kinds("a < 0|b"), [Ident, Lt, Int, Pipe, Ident]);
         assert_eq!(kinds("x = <2|"), [Ident, Eq, Lt, Int, Pipe]);
+    }
+
+    #[test]
+    fn strings() {
+        assert_eq!(
+            kinds(r#"print("a b", x)"#),
+            [Ident, LParen, Str, Comma, Ident, RParen]
+        );
+        assert_eq!(texts(r#" "say \"hi\"" "#), [r#""say \"hi\"""#]);
+        assert_eq!(texts(r#" "{f("}")} {{x}}" "#), [r#""{f("}")} {{x}}""#]);
+        assert_eq!(kinds("\"a\nb\"\nx"), [Str, Newline, Ident]);
+        assert_eq!(lex("\"open").diagnostics.len(), 1);
     }
 
     #[test]

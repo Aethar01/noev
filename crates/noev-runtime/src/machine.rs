@@ -17,7 +17,20 @@ use noev_syntax::Span;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
+use std::cell::RefCell;
+use std::io::Write;
+use std::rc::Rc;
+
+use crate::format;
 use crate::value::{Observable, Pauli, Pointer, Value};
+
+/// Where a program's output goes.
+pub struct Output {
+    /// Standard output.
+    pub stdout: Box<dyn Write>,
+    /// Standard error.
+    pub stderr: Box<dyn Write>,
+}
 
 /// A failure while running a program.
 #[derive(Clone, Debug, PartialEq)]
@@ -69,6 +82,8 @@ pub struct Machine<'p> {
     rng: SmallRng,
     /// Whether anything has been measured, which makes an expectation value an estimate.
     measured: bool,
+    /// Where `print` and `eprint` write; `None` in runs that are repeated, which cannot print.
+    output: Option<Rc<RefCell<Output>>>,
 }
 
 impl<'p> Machine<'p> {
@@ -84,7 +99,14 @@ impl<'p> Machine<'p> {
             recording: Vec::new(),
             rng: SmallRng::seed_from_u64(seed),
             measured: false,
+            output: None,
         }
+    }
+
+    /// Sends the program's output to `output`.
+    pub fn with_output(mut self, output: Rc<RefCell<Output>>) -> Self {
+        self.output = Some(output);
+        self
     }
 
     /// Whether anything has been measured, so later shots could behave differently.
@@ -432,6 +454,28 @@ impl Machine<'_> {
                 self.controls.truncate(mark);
                 Ok(())
             }
+            Stmt::Print { stderr, args } => {
+                let mut line = String::new();
+                for (i, (op, ty)) in args.iter().enumerate() {
+                    if i > 0 {
+                        line.push(' ');
+                    }
+                    line.push_str(&format::display(self.program, &self.operand(op)?, *ty));
+                }
+                line.push('\n');
+                if let Some(output) = &self.output {
+                    let mut output = output.borrow_mut();
+                    let stream = if *stderr {
+                        &mut output.stderr
+                    } else {
+                        &mut output.stdout
+                    };
+                    stream
+                        .write_all(line.as_bytes())
+                        .map_err(|e| RuntimeError::new(format!("cannot write output: {e}")))?;
+                }
+                Ok(())
+            }
             Stmt::Expectation {
                 dest,
                 prep,
@@ -465,12 +509,8 @@ impl Machine<'_> {
                 "more than 30 qubits are alive at once, which is beyond the statevector simulator",
             ));
         }
-        // The new qubit is the most significant: the existing amplitudes are the half where
-        // it is |0⟩, and the other half is zero.
-        let state = std::mem::replace(&mut self.state, Statevector::zero(0));
-        let mut amplitudes = state.into_amplitudes();
-        amplitudes.resize(amplitudes.len() * 2, Default::default());
-        self.state = Statevector::from_amplitudes(amplitudes).map_err(sim_error)?;
+        // The new qubit is the most significant, so existing qubits keep their indices.
+        self.state.add_qubit();
         Ok(qubit)
     }
 
@@ -509,12 +549,17 @@ impl Machine<'_> {
                 control,
                 target,
             },
-            (controls, _, _) => {
-                return Err(RuntimeError::new(format!(
-                    "this gate has {} controls, but the ketrs simulator does not support multi-controlled gates yet",
-                    controls.len().max(1)
-                )));
-            }
+            (controls, Some(gate), &[target]) => Operation::MultiControlled {
+                gate,
+                controls: controls.to_vec(),
+                target,
+            },
+            (controls, None, &[a, b]) => Operation::ControlledSwap {
+                controls: controls.to_vec(),
+                a,
+                b,
+            },
+            _ => return Err(RuntimeError::new("a gate with the wrong number of qubits")),
         };
         self.state.apply(&operation).map_err(sim_error)
     }
@@ -593,6 +638,23 @@ impl Machine<'_> {
                 Value::Observable(Observable::pauli(pauli, index))
             }
             Rvalue::Identity => Value::Observable(Observable::identity()),
+            Rvalue::Format(parts) => {
+                let mut text = String::new();
+                for part in parts {
+                    match part {
+                        FormatPart::Text(t) => text.push_str(t),
+                        FormatPart::Value(op, ty, spec) => {
+                            text.push_str(&format::format(
+                                self.program,
+                                &self.operand(op)?,
+                                *ty,
+                                spec.as_ref(),
+                            ));
+                        }
+                    }
+                }
+                Value::Str(text.into())
+            }
             Rvalue::Projector {
                 x_basis,
                 index,
@@ -681,6 +743,11 @@ fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
             Eq => Value::Bool(a == b),
             NotEq => Value::Bool(a != b),
             _ => return Err(RuntimeError::new(format!("{} on Bool", op.as_str()))),
+        },
+        (Value::Str(a), Value::Str(b)) => match op {
+            Eq => Value::Bool(a == b),
+            NotEq => Value::Bool(a != b),
+            _ => return Err(RuntimeError::new(format!("{} on String", op.as_str()))),
         },
         (Value::Bit(a), Value::Bit(b)) => match op {
             BitAnd => Value::Bit(a & b),

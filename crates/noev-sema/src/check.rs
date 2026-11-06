@@ -263,6 +263,9 @@ impl Checker<'_> {
                         self.error(decl.name_span, message);
                     }
                     self.collect_fn(f, None);
+                    if self.name(decl.name) == "main" {
+                        self.check_main(f);
+                    }
                 }
                 ItemKind::Struct {
                     fields, methods, ..
@@ -303,6 +306,19 @@ impl Checker<'_> {
                 }
                 ItemKind::Error => {}
             }
+        }
+    }
+
+    /// `main` takes no parameters and returns `()` (`spec/execution.md` §6).
+    fn check_main(&mut self, f: FnId) {
+        let decl = *self.ast.function(f);
+        let sig = &self.t.fns[f.index()].sig;
+        if !sig.params.is_empty() || sig.ret != Ty::UNIT {
+            self.error(
+                decl.name_span,
+                "`main` must take no parameters and return `()`",
+            )
+            .help = Some("print results instead of returning them".into());
         }
     }
 
@@ -672,6 +688,7 @@ impl Checker<'_> {
                 }
             }
             ExprKind::Float(_) => Ty::FLOAT,
+            ExprKind::Str(parts) => self.string(parts),
             ExprKind::Bool(_) => Ty::BOOL,
             ExprKind::Ket => {
                 let qubits = u64::from(expr.span.len() - 2);
@@ -1183,8 +1200,9 @@ impl Checker<'_> {
         }
         let result = match op {
             Or | And => (lhs == Ty::BOOL && rhs == Ty::BOOL).then_some(Ty::BOOL),
-            Eq | NotEq => (lhs == rhs && matches!(lhs, Ty::INT | Ty::FLOAT | Ty::BOOL | Ty::BIT))
-                .then_some(Ty::BOOL),
+            Eq | NotEq => (lhs == rhs
+                && matches!(lhs, Ty::INT | Ty::FLOAT | Ty::BOOL | Ty::BIT | Ty::STRING))
+            .then_some(Ty::BOOL),
             Lt | Le | Gt | Ge => {
                 (lhs == rhs && matches!(lhs, Ty::INT | Ty::FLOAT)).then_some(Ty::BOOL)
             }
@@ -1256,6 +1274,9 @@ impl Checker<'_> {
                 let text = self.name(name).to_string();
                 if let Some(target) = prelude::builtin_type(&text) {
                     return self.conversion(id, target, args, span);
+                }
+                if text == "print" || text == "eprint" {
+                    return self.print_call(id, text == "eprint", args);
                 }
                 if text == "measure" {
                     return self.measure_fn(id, args, span);
@@ -1412,6 +1433,63 @@ impl Checker<'_> {
             }
         }
         target
+    }
+
+    /// `print(…)` and `eprint(…)`: any number of printable values.
+    fn print_call(&mut self, id: ExprId, stderr: bool, args: &[ExprId]) -> Ty {
+        self.t.callees[id.index()] = Some(Callee::Builtin(Builtin::Print { stderr }));
+        for &arg in args {
+            let ty = self.expr(arg, Expect::None);
+            self.require_printable(arg, ty);
+        }
+        Ty::UNIT
+    }
+
+    fn require_printable(&mut self, expr: ExprId, ty: Ty) {
+        if self.t.types.is_wildcard(ty) || self.t.types.is_printable(ty) {
+            return;
+        }
+        let span = self.ast.expr(expr).span;
+        let message = format!("{} cannot be printed", self.show(ty));
+        let quantum = self.t.types.linearity(self.t.types.deref(ty)) == crate::ty::Kind::Linear;
+        let diagnostic = self.error(span, message);
+        if quantum {
+            diagnostic.help = Some("measure qubits first, and print the result".into());
+        }
+    }
+
+    /// A string literal's interpolated values, checked against their format specs.
+    fn string(&mut self, parts: List<StrPart>) -> Ty {
+        for part in self.ast.list(parts) {
+            let StrPart::Value { expr, spec } = *part else {
+                continue;
+            };
+            let ty = self.expr(expr, Expect::None);
+            self.require_printable(expr, ty);
+            let ty = self.t.types.deref(ty);
+            let Some(spec) = spec else { continue };
+            if self.t.types.is_wildcard(ty) {
+                continue;
+            }
+            let numeric = matches!(ty, Ty::INT | Ty::FLOAT);
+            let problem = match spec.kind {
+                Some(FormatKind::Exponent) if ty != Ty::FLOAT => Some("`e` applies to `Float`"),
+                Some(
+                    FormatKind::Binary | FormatKind::Octal | FormatKind::Hex | FormatKind::HexUpper,
+                ) if ty != Ty::INT => Some("`b`, `o`, `x` and `X` apply to `Int`"),
+                _ if spec.precision.is_some() && ty != Ty::FLOAT => {
+                    Some("a precision applies to `Float`")
+                }
+                _ if spec.plus && !numeric => Some("`+` applies to `Int` and `Float`"),
+                _ if spec.zero && !numeric => Some("`0` padding applies to `Int` and `Float`"),
+                _ => None,
+            };
+            if let Some(problem) = problem {
+                let message = format!("this format spec does not apply to {}", self.show(ty));
+                self.error(spec.span, message).help = Some(problem.into());
+            }
+        }
+        Ty::STRING
     }
 
     /// The free function `measure`, on a qubit or an array of qubits.

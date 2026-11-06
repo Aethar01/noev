@@ -10,6 +10,7 @@ use std::fmt;
 use noev_sema::prelude::{FloatConst, Gate, Math, Pauli};
 use noev_sema::{Ty, TyKind, Types};
 use noev_syntax::Span;
+pub use noev_syntax::ast::{Align, FormatKind, FormatSpec};
 
 macro_rules! index {
     ($($(#[$doc:meta])* $name:ident;)*) => {$(
@@ -46,6 +47,8 @@ pub struct Program {
     pub types: Types,
     /// Struct names, indexed like [`Types::structs`].
     pub struct_names: Vec<String>,
+    /// Each struct's field names, in declaration order.
+    pub struct_fields: Vec<Vec<String>>,
 }
 
 /// A function's control-flow graph.
@@ -189,6 +192,8 @@ pub enum Rvalue {
     Pauli(Pauli, Operand),
     /// `I()`.
     Identity,
+    /// A string literal: text and formatted values.
+    Format(Vec<FormatPart>),
     /// `P(i, b)` (`x_basis: false`) or `PX(i, b)` (`x_basis: true`).
     Projector {
         /// Whether it is in the X basis.
@@ -200,9 +205,26 @@ pub enum Rvalue {
     },
 }
 
+/// A piece of a string being built.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FormatPart {
+    /// Literal text.
+    Text(String),
+    /// A value, formatted according to its type and spec.
+    Value(Operand, Ty, Option<FormatSpec>),
+}
+
 /// A statement.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Stmt {
+    /// Write values, separated by spaces and followed by a line break, to standard output or
+    /// (`stderr`) standard error.
+    Print {
+        /// Whether to write to standard error.
+        stderr: bool,
+        /// The values and their types.
+        args: Vec<(Operand, Ty)>,
+    },
     /// `place = value`.
     Assign(Place, Rvalue),
     /// Allocate a fresh qubit in \|0⟩ at a `Qubit` place.
@@ -310,6 +332,7 @@ impl Program {
             TyKind::Bit => "Bit".into(),
             TyKind::Qubit => "Qubit".into(),
             TyKind::Observable => "Observable".into(),
+            TyKind::String => "String".into(),
             TyKind::Tuple(elems) => {
                 let elems: Vec<String> = elems.iter().map(|&t| self.type_name(t)).collect();
                 format!("({})", elems.join(", "))
@@ -405,6 +428,14 @@ impl Program {
                 format!("ctrl push {}", places.join(", "))
             }
             Stmt::CtrlPop => "ctrl pop".into(),
+            Stmt::Print { stderr, args } => {
+                let args: Vec<String> = args.iter().map(|(op, _)| operand_text(op)).collect();
+                format!(
+                    "{} {}",
+                    if *stderr { "eprint" } else { "print" },
+                    args.join(", ")
+                )
+            }
             Stmt::Expectation {
                 dest,
                 prep,
@@ -462,6 +493,16 @@ impl Program {
             ),
             Rvalue::Pauli(p, i) => format!("{p:?}({})", operand_text(i)),
             Rvalue::Identity => "I()".into(),
+            Rvalue::Format(parts) => {
+                let text: String = parts
+                    .iter()
+                    .map(|part| match part {
+                        FormatPart::Text(t) => t.escape_debug().to_string(),
+                        FormatPart::Value(op, _, _) => format!("{{{}}}", operand_text(op)),
+                    })
+                    .collect();
+                format!("format \"{text}\"")
+            }
             Rvalue::Projector {
                 x_basis,
                 index,

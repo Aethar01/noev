@@ -36,7 +36,8 @@ ordinary identifiers, so `let adj = build_graph(edges)` is valid.
 | Keyword | Is a keyword when…                                          |
 | ------- | ----------------------------------------------------------- |
 | `mv`    | it is followed by a place expression (`mv q`, `mv e.state`) or by `self` in a parameter list |
-| `rev`   | it is directly followed by `fn`                             |
+| `rev`   | it is directly followed by `fn` or `circuit`                |
+| `circuit` | it is directly followed by `fn` (see [execution.md](execution.md) §4) |
 | `adj`   | it is followed by a call (`adj s(q)`, `adj q.s()`)          |
 | `ctrl`  | it starts a statement and is followed by a place and, eventually, `{` |
 | `with`  | it starts a statement and is directly followed by `{`       |
@@ -52,6 +53,7 @@ ordinary identifiers, so `let adj = build_graph(edges)` is valid.
 | Bool     | `true`, `false`                      |                                    |
 | Ket      | `\|0>`, `\|1>`, `\|+>`, `\|->`, `\|01>`, `\|+0->` | See below             |
 | Bra      | `<0\|`, `<1\|`, `<+\|`, `<-\|`, `<01\|`           | See below             |
+| String   | `"text"`, `"θ = {theta:.3}"`, `"a\tb\n"`           | See below             |
 
 There is no separate `Bit` literal. The integer literals `0` and `1` have type `Bit` where
 the context requires it (see [types.md](types.md)).
@@ -80,6 +82,33 @@ A bra literal is `<`, then one or more of the characters `0 1 + -`, then `|`, wi
 whitespace inside. Like a ket, it is only recognised where an operand can start, so
 `a < 0|b` is still a comparison followed by bitwise or. Bras are used for measurement tests
 and expectation values (§2, Bras and expectation values).
+
+### String literals
+
+A string literal is text between double quotes. It may span lines. Escapes:
+
+| Escape            | Meaning                       |
+| ----------------- | ----------------------------- |
+| `\n`, `\t`, `\r`  | Line feed, tab, carriage return |
+| `\\`, `\"`        | Backslash, double quote       |
+| `\0`              | The null character            |
+| `\u{1F600}`       | The Unicode scalar value with that hexadecimal code |
+| `{{`               | A literal `{`                 |
+
+Only `{` is special in a string: it starts an interpolation, and `{{` writes a literal `{`.
+A `}` outside an interpolation is always just a `}`.
+
+**Interpolation.** `{expr}` inside a string inserts the value of `expr`, and `{expr:spec}`
+formats it:
+
+```noev
+let s = "θ = {theta:.4}, outcome {bits}, {n:>5} shots, mask {m:08b}"
+```
+
+The expression is any expression without a top-level `:` or unbalanced braces; it may contain
+string literals of its own. Interpolation is checked at compile time: the expressions are
+type-checked, each format spec is checked against its value's type
+([types.md](types.md) §7), and nothing is parsed at runtime.
 
 ### Operators and punctuation
 
@@ -138,14 +167,14 @@ struct_def  = "struct" IDENT "{" { member ( sep | "," ) } "}" ;
 member      = field | fn_def ;
 field       = IDENT ":" type ;
 
-fn_def      = [ "unsafe" ] [ "rev" ] "fn" IDENT "(" [ params ] ")" [ "->" type ] block ;
+fn_def      = [ "unsafe" ] [ "rev" ] [ "circuit" ] "fn" IDENT "(" [ params ] ")" [ "->" type ] block ;
 params      = ( receiver | param ) { "," param } [ "," ] ;
 receiver    = ( "mv" | "ref" | "mut" ) "self" ;
 param       = IDENT ":" type ;
 
 trait_def   = "trait" IDENT "{" { trait_item sep } "}" ;              (* Reserved *)
 trait_item  = fn_sig | fn_def | "type" IDENT ;
-fn_sig      = [ "unsafe" ] [ "rev" ] "fn" IDENT "(" [ params ] ")" [ "->" type ] ;
+fn_sig      = [ "unsafe" ] [ "rev" ] [ "circuit" ] "fn" IDENT "(" [ params ] ")" [ "->" type ] ;
 impl_def    = "impl" path "for" type "{" { impl_item sep } "}" ;     (* Reserved *)
 impl_item   = fn_def | "type" IDENT "=" type ;
 extern_def  = "extern" fn_sig | "extern" STRING "{" { fn_sig sep } "}" ;   (* Reserved *)
@@ -176,7 +205,7 @@ parsed, but they need generics, which come after v0.1. See [types.md](types.md) 
 ### Types
 
 ```ebnf
-type        = path                                (* Int, Float, Bool, Bit, Qubit, Self, struct name *)
+type        = path [ "<" type { "," type } [ "," ] ">" ]   (* Int, Float, Bool, Bit, Qubit, String, Self, struct name, Distribution<T> *)
             | "ref" type                          (* shared reference *)
             | "mut" type                          (* exclusive reference *)
             | "(" ")"                             (* unit *)
@@ -444,9 +473,10 @@ fn main() {
 
 ## 4. Open questions
 
-- **Generic parameter syntax.** `<T>` is familiar but makes `a < b > c` ambiguous (Rust
-  needs `::<>` to work around it). `[T]`, as in Go and Scala, has no such problem but
-  overlaps visually with indexing. Decide when generics are designed.
+- **Explicit type arguments in expressions.** Type arguments are written with angle
+  brackets, `Distribution<(Bit, Bit)>`, which is unambiguous in type positions. Writing them
+  inside an expression (calling a generic function with explicit types) would clash with
+  `<`; Rust's `f::<T>()` is the likely answer, decided with generics.
 - **Negative controls.** `ctrl !a { … }` or `ctrl not a { … }` (control on \|0⟩). `!` is
   reserved for this or similar. Not in v0.1.
 - **`adj` on blocks.** `adj { … }` could invert a whole block. v0.1 only allows `adj` on

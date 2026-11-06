@@ -99,6 +99,10 @@ A C API (`noev.h`) also lets C and C++ programs embed Noev, with the same type m
 
 ## 5. Where foreign calls can run
 
+A foreign call that uses a measurement result before a run's last quantum operation makes
+the run not a circuit ([execution.md](execution.md) §4).
+
+
 On a simulator, a foreign call can appear anywhere a classical call can. On real hardware,
 code that runs **while qubits are alive** (between the gates of one circuit) runs on the
 control electronics, under tight latency limits, so arbitrary foreign calls cannot run there.

@@ -7,7 +7,7 @@
 
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
-use crate::lexer::lex;
+use crate::lexer::{lex, lex_range, scan_interpolation, scan_string};
 use crate::span::Span;
 use crate::symbol::Symbol;
 use crate::token::{Token, TokenKind};
@@ -26,7 +26,7 @@ pub fn parse(source: &str) -> Parsed {
     let lexed = lex(source);
     let mut parser = Parser {
         source,
-        tokens: &lexed.tokens,
+        tokens: lexed.tokens,
         pos: 0,
         ast: Ast::default(),
         diagnostics: lexed.diagnostics,
@@ -97,7 +97,7 @@ fn assign_op(kind: TokenKind) -> Option<AssignOp> {
 
 struct Parser<'a> {
     source: &'a str,
-    tokens: &'a [Token],
+    tokens: Vec<Token>,
     pos: usize,
     ast: Ast,
     diagnostics: Vec<Diagnostic>,
@@ -243,9 +243,7 @@ impl Parser<'_> {
             match self.kind() {
                 Eof => return,
                 Fn | Struct | Trait | Impl | Unsafe | Extern | Pub | Use if depth == 0 => return,
-                Ident if depth == 0 && self.nth_is_word(0, "rev") && self.nth(1).kind == Fn => {
-                    return;
-                }
+                Ident if depth == 0 && self.at_fn_start() => return,
                 LParen | LBracket | LBrace => depth += 1,
                 RParen | RBracket | RBrace => depth = depth.saturating_sub(1),
                 _ => {}
@@ -286,7 +284,12 @@ impl Parser<'_> {
         use TokenKind::*;
         match self.kind() {
             Fn | Unsafe => true,
-            Ident => self.nth_is_word(0, "rev") && self.nth(1).kind == Fn,
+            Ident => {
+                (self.nth_is_word(0, "rev")
+                    && (self.nth(1).kind == Fn
+                        || (self.nth_is_word(1, "circuit") && self.nth(2).kind == Fn)))
+                    || (self.nth_is_word(0, "circuit") && self.nth(1).kind == Fn)
+            }
             _ => false,
         }
     }
@@ -371,13 +374,17 @@ impl Parser<'_> {
         true
     }
 
-    /// `[unsafe] [rev] fn name(params) [-> type] block`, or without the block when
+    /// `[unsafe] [rev] [circuit] fn name(params) [-> type] block`, or without the block when
     /// `needs_body` is false (trait declarations).
     fn fn_decl(&mut self, needs_body: bool) -> FnId {
         let start = self.span();
         let is_unsafe = self.eat(TokenKind::Unsafe);
         let is_rev = self.nth_is_word(0, "rev");
         if is_rev {
+            self.bump();
+        }
+        let is_circuit = self.nth_is_word(0, "circuit") && self.nth(1).kind == TokenKind::Fn;
+        if is_circuit {
             self.bump();
         }
         self.expect(TokenKind::Fn, "`fn`");
@@ -419,6 +426,7 @@ impl Parser<'_> {
             name_span,
             is_unsafe,
             is_rev,
+            is_circuit,
             receiver,
             params,
             ret,
@@ -1131,6 +1139,10 @@ impl Parser<'_> {
                 self.bump();
                 ExprKind::Ket
             }
+            Str => {
+                self.bump();
+                ExprKind::Str(self.string_parts(start))
+            }
             Ident if self.nth_is_word(0, "ctrl") && self.nth_starts_place(1) => {
                 return self.ctrl();
             }
@@ -1477,6 +1489,248 @@ impl Parser<'_> {
             .with_label_mut(bra_span, "the bra's preparation");
         }
         self.push(ExprKind::Expectation { prep, observable }, start)
+    }
+}
+
+// String literals.
+impl Parser<'_> {
+    /// Splits a string literal into text and interpolated values, decoding escapes and
+    /// parsing each interpolation from its own slice of the source.
+    fn string_parts(&mut self, span: Span) -> List<StrPart> {
+        let mark = self.ast.mark::<StrPart>();
+        let bytes = self.source.as_bytes();
+        let start = span.start as usize + 1;
+        let end = (span.end as usize).saturating_sub(1).max(start);
+        let mut text = String::new();
+        let mut pos = start;
+        while pos < end {
+            match bytes[pos] {
+                b'\\' => pos = self.escape(pos, &mut text),
+                b'{' if bytes.get(pos + 1) == Some(&b'{') => {
+                    text.push('{');
+                    pos += 2;
+                }
+                b'{' => {
+                    let close = scan_interpolation(bytes, pos)
+                        .unwrap_or(end + 1)
+                        .min(end + 1);
+                    if !text.is_empty() {
+                        let symbol = self.ast.symbols.intern(&std::mem::take(&mut text));
+                        self.ast.push_to(StrPart::Text(symbol));
+                    }
+                    if let Some(part) = self.interpolation(pos + 1, close - 1) {
+                        self.ast.push_to(part);
+                    }
+                    pos = close;
+                }
+                _ => {
+                    // Copy a run of ordinary text in one go.
+                    let run = bytes[pos..end]
+                        .iter()
+                        .position(|&b| matches!(b, b'\\' | b'{'))
+                        .map_or(end, |n| pos + n);
+                    text.push_str(&self.source[pos..run]);
+                    pos = run;
+                }
+            }
+        }
+        if !text.is_empty() {
+            let symbol = self.ast.symbols.intern(&text);
+            self.ast.push_to(StrPart::Text(symbol));
+        }
+        self.ast.finish(mark)
+    }
+
+    /// Decodes the escape at `pos` into `text`, returning the position after it.
+    fn escape(&mut self, pos: usize, text: &mut String) -> usize {
+        let bytes = self.source.as_bytes();
+        let decoded = match bytes.get(pos + 1) {
+            Some(b'n') => '\n',
+            Some(b't') => '\t',
+            Some(b'r') => '\r',
+            Some(b'0') => '\0',
+            Some(b'\\') => '\\',
+            Some(b'"') => '"',
+            Some(b'u') if bytes.get(pos + 2) == Some(&b'{') => {
+                let digits_start = pos + 3;
+                let close = bytes[digits_start..]
+                    .iter()
+                    .position(|&b| b == b'}')
+                    .map(|n| digits_start + n);
+                let value = close
+                    .and_then(|c| u32::from_str_radix(&self.source[digits_start..c], 16).ok())
+                    .and_then(char::from_u32);
+                match (close, value) {
+                    (Some(c), Some(ch)) => {
+                        text.push(ch);
+                        return c + 1;
+                    }
+                    _ => {
+                        let end = close.map_or(pos + 2, |c| c + 1);
+                        self.error(Span::new(pos as u32, end as u32), "invalid Unicode escape")
+                            .with_help_mut(
+                                "write it as `\\u{1F600}`, with 1 to 6 hexadecimal digits",
+                            );
+                        return end;
+                    }
+                }
+            }
+            _ => {
+                let len = self.source[pos + 1..]
+                    .chars()
+                    .next()
+                    .map_or(0, char::len_utf8);
+                let at = Span::new(pos as u32, (pos + 1 + len) as u32);
+                self.error(at, "unknown escape")
+                    .with_help_mut("the escapes are \\n, \\t, \\r, \\0, \\\\, \\\" and \\u{…}");
+                return pos + 1 + len;
+            }
+        };
+        text.push(decoded);
+        pos + 2
+    }
+
+    /// The interpolation whose contents run from `start` to `end`: an expression and an
+    /// optional format spec after a top-level `:`.
+    fn interpolation(&mut self, start: usize, end: usize) -> Option<StrPart> {
+        let bytes = self.source.as_bytes();
+        let span = Span::new(start as u32 - 1, end as u32 + 1);
+        // The spec starts at the first `:` outside brackets and nested strings that is not
+        // part of `::`.
+        let mut depth = 0usize;
+        let mut colon = None;
+        let mut pos = start;
+        while pos < end {
+            match bytes[pos] {
+                b'"' => {
+                    pos = scan_string(bytes, pos).unwrap_or(end);
+                    continue;
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                b':' if bytes.get(pos + 1) == Some(&b':') => {
+                    pos += 2;
+                    continue;
+                }
+                b':' if depth == 0 => {
+                    colon = Some(pos);
+                    break;
+                }
+                _ => {}
+            }
+            pos += 1;
+        }
+        let expr_end = colon.unwrap_or(end);
+        if self.source[start..expr_end].trim().is_empty() {
+            self.error(span, "empty interpolation")
+                .with_help_mut("write `{{` for a literal brace");
+            return None;
+        }
+        let expr = self.sub_expr(start as u32, expr_end as u32);
+        let spec = colon.and_then(|c| self.format_spec(c + 1, end));
+        Some(StrPart::Value { expr, spec })
+    }
+
+    /// Parses the source from `start` to `end` as one expression.
+    fn sub_expr(&mut self, start: u32, end: u32) -> ExprId {
+        let mut lexed = lex_range(self.source, start, end);
+        lexed.tokens.retain(|t| t.kind != TokenKind::Newline);
+        self.diagnostics.extend(lexed.diagnostics);
+        let saved_tokens = std::mem::replace(&mut self.tokens, lexed.tokens);
+        let saved_pos = std::mem::replace(&mut self.pos, 0);
+        let saved_no_struct = std::mem::replace(&mut self.no_struct, false);
+        let expr = self.expr();
+        if !self.at(TokenKind::Eof) {
+            self.expected("the end of the interpolated expression");
+        }
+        self.tokens = saved_tokens;
+        self.pos = saved_pos;
+        self.no_struct = saved_no_struct;
+        expr
+    }
+
+    /// `[[fill] align] ["+"] ["0"] [width] ["." precision] [type]`.
+    fn format_spec(&mut self, start: usize, end: usize) -> Option<FormatSpec> {
+        let text = &self.source[start..end];
+        let span = Span::new(start as u32, end as u32);
+        let mut chars = text.chars().peekable();
+        let align_of = |c: char| match c {
+            '<' => Some(Align::Left),
+            '>' => Some(Align::Right),
+            '^' => Some(Align::Center),
+            _ => None,
+        };
+        let mut spec = FormatSpec {
+            fill: ' ',
+            align: None,
+            plus: false,
+            zero: false,
+            width: None,
+            precision: None,
+            kind: None,
+            span,
+        };
+        // A fill character is only present when an alignment follows it.
+        let first_two: Vec<char> = text.chars().take(2).collect();
+        if first_two.len() == 2 && align_of(first_two[1]).is_some() {
+            spec.fill = first_two[0];
+            spec.align = align_of(first_two[1]);
+            chars.next();
+            chars.next();
+        } else if let Some(a) = first_two.first().and_then(|&c| align_of(c)) {
+            spec.align = Some(a);
+            chars.next();
+        }
+        if chars.peek() == Some(&'+') {
+            spec.plus = true;
+            chars.next();
+        }
+        if chars.peek() == Some(&'0') {
+            spec.zero = true;
+            chars.next();
+        }
+        let number = |chars: &mut std::iter::Peekable<std::str::Chars>| {
+            let mut digits = String::new();
+            while let Some(&c) = chars.peek().filter(|c| c.is_ascii_digit()) {
+                digits.push(c);
+                chars.next();
+            }
+            (!digits.is_empty())
+                .then(|| digits.parse::<u32>().ok())
+                .flatten()
+        };
+        spec.width = number(&mut chars);
+        if chars.peek() == Some(&'.') {
+            chars.next();
+            spec.precision = number(&mut chars);
+            if spec.precision.is_none() {
+                self.error(span, "expected a precision after `.`");
+                return None;
+            }
+        }
+        spec.kind = match chars.next() {
+            None => None,
+            Some('b') => Some(FormatKind::Binary),
+            Some('o') => Some(FormatKind::Octal),
+            Some('x') => Some(FormatKind::Hex),
+            Some('X') => Some(FormatKind::HexUpper),
+            Some('e') => Some(FormatKind::Exponent),
+            Some(_) => {
+                self.error(span, format!("invalid format spec `{text}`"))
+                    .with_help_mut(
+                        "see spec/types.md §7: for example `:>8`, `:.3`, `:08b`, `:x`, `:e`",
+                    );
+                return None;
+            }
+        };
+        if chars.next().is_some() {
+            self.error(span, format!("invalid format spec `{text}`"))
+                .with_help_mut(
+                    "see spec/types.md §7: for example `:>8`, `:.3`, `:08b`, `:x`, `:e`",
+                );
+            return None;
+        }
+        Some(spec)
     }
 }
 

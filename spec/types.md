@@ -12,12 +12,17 @@ no implicit conversions except the literal typing rules in §3.
 | `Bool`  | classical | `true` or `false`                                           |
 | `Bit`   | classical | A classical bit, usually the result of a measurement        |
 | `Qubit` | quantum   | Ownership of one logical qubit                              |
+| `String`| classical | Immutable text                                              |
 | `()`    | classical | Unit; the type of statements and of functions with no `->` |
 
 `Bit` and `Bool` are separate types: `Bit` is data (a measurement outcome, part of a bit
 string), `Bool` is logic. Both can be used as an `if` or `while` condition (a `Bit` is true
 when it is `1`). `and`, `or` and `not` work on `Bool`; `&`, `|`, `^` and `~` work on `Bit`
 and `Int`. Convert between them with `Bool(b)` and `Bit(flag)`.
+
+`String` has value semantics: assigning or passing a string gives an independent copy, which
+the implementation makes cheap by sharing the text. Strings are immutable in v0.1 and can be
+compared with `==` and `!=`; operations on them (length, concatenation, slicing) come later.
 
 A `Qubit` value is not a quantum state that can be inspected. It is the right to act on one
 logical qubit. The compiler and runtime decide which physical qubit that is.
@@ -32,6 +37,8 @@ logical qubit. The compiler and runtime decide which physical qubit that is.
 - **Structs**, declared with their fields and methods together (see
   [grammar.md](grammar.md) §2). Any field may be of any type, so a struct can mix classical
   and quantum fields freely.
+- **Distributions** `Distribution<T>`: how often each value of a classical type `T` occurred
+  in repeated runs, made by `sample` ([execution.md](execution.md) §3). Copyable.
 - **References** `ref T` (shared) and `mut T` (exclusive). See
   [ownership.md](ownership.md) §4–5. v0.1 supports elided lifetimes only; references stored
   in struct fields are Reserved.
@@ -44,6 +51,7 @@ logical qubit. The compiler and runtime decide which physical qubit that is.
 | `1.0`, `1e-3`       | `Float`                                                      |
 | `true`, `false`     | `Bool`                                                       |
 | `\|0>`, `\|+>`, …   | `Qubit` for one character, `[Qubit; N]` for N characters      |
+| `"text {x}"`        | `String`                                                     |
 
 `let b: Bit = 1` and `if m == 1 { … }` with `m: Bit` both work through the literal rule.
 
@@ -144,7 +152,8 @@ measurement.
 
 Every type is **copyable**, **affine** or **linear**:
 
-- `Int`, `Float`, `Bool`, `Bit`, `()` and shared references `ref T` are copyable.
+- `Int`, `Float`, `Bool`, `Bit`, `String`, `Observable`, `Distribution<T>`, `()` and shared
+  references `ref T` are copyable.
 - Exclusive references `mut T` are affine: they cannot be copied, but can be dropped.
 - `Qubit` is linear: it cannot be copied or dropped, and must be consumed.
 - A tuple, array or struct is linear if any component is linear; otherwise affine if any
@@ -188,11 +197,49 @@ a classical struct of its own, such as `Experiment` to `ExperimentResult`. In v0
 Other planned traits: `From` (conversions), `Copy`, `Discard`, and quantum interfaces such
 as `Oracle`, `Ansatz` and `Observable`.
 
-## 7. Open questions
+## 7. Printing and formatting
 
-- **Classical values that are expensive to copy** (strings, growable arrays, maps): Rust-style
-  moves, or value semantics as in Swift (assignment gives an independent copy, made lazily
-  when one side changes). Not needed for v0.1, whose classical types are all scalars.
+Every classical value can be printed and interpolated into a string. Qubits and references
+to them cannot.
+
+| Type                         | Printed as                                             |
+| ---------------------------- | ------------------------------------------------------ |
+| `Int`, `Float`, `Bool`       | `42`, `-0.5`, `true` (a `Float` always shows a decimal point) |
+| `Bit`                        | `0` or `1`                                             |
+| `[Bit; N]`, tuples of `Bit`  | A bit string in index order: `|01>` measured prints `01` |
+| other tuples and arrays      | `(3, true)`, `[1, 2, 3]`                               |
+| structs                      | `Experiment { angle: 0.5 }` (classical fields only)    |
+| `String`                     | Its text                                               |
+| `Observable`                 | `-1.0 * Z(0) * Z(1) + 0.5 * X(0)`                      |
+| `Distribution<T>`            | One line per outcome, most frequent first: `11  513  51.3%` |
+
+### Format specs
+
+`{expr:spec}` in a string literal formats a value. The spec is a subset of Rust's:
+
+```
+spec  = [ [ fill ] align ] [ "+" ] [ "0" ] [ width ] [ "." precision ] [ type ]
+align = "<" | ">" | "^"              (left, right, centre)
+type  = "b" | "o" | "x" | "X" | "e"  (binary, octal, hex, HEX for Int; exponent for Float)
+```
+
+| Spec       | Applies to          | Example                          |
+| ---------- | ------------------- | -------------------------------- |
+| `:8`, `:>8`, `:<8`, `:^8`, `:*^8` | Any value | Pad to a width, aligned, with an optional fill character |
+| `:+`       | `Int`, `Float`      | Always show the sign             |
+| `:.3`      | `Float`             | Three digits after the point     |
+| `:08b`     | `Int`               | Binary, zero-padded to 8 digits  |
+| `:x`       | `Int`               | Hexadecimal                      |
+| `:e`       | `Float`             | Scientific notation              |
+
+A spec that does not apply to the value's type is a compile error.
+
+## 8. Open questions
+
+- **Classical values that are expensive to copy** (growable arrays, maps): v0.1's `String`
+  and `Distribution` use value semantics with shared storage; whether growable collections do
+  the same, as in Swift, is open.
+- **String operations**: length, concatenation, slicing, and how indexing relates to Unicode.
 - **Generic parameter syntax**: see [grammar.md](grammar.md) §4.
 - **Angles.** Whether rotation angles get their own type (with units) or stay `Float`.
 - **Other bases for kets**, such as `|i>` and `|-i>` for the Y basis.

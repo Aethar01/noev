@@ -312,6 +312,10 @@ fn walk_expr(ast: &Ast, id: ExprId, visit: &mut dyn FnMut(Node)) {
     let mut blocks: Vec<BlockId> = Vec::new();
     match ast.expr(id).kind {
         ExprKind::Tuple(l) | ExprKind::Array(l) => children.extend(ast.list(l)),
+        ExprKind::Str(parts) => children.extend(ast.list(parts).iter().filter_map(|p| match *p {
+            StrPart::Value { expr, .. } => Some(expr),
+            StrPart::Text(_) => None,
+        })),
         ExprKind::ArrayRepeat { value, count } => children.extend([value, count]),
         ExprKind::StructLit { fields, .. } => {
             children.extend(ast.list(fields).iter().filter_map(|f| f.value));
@@ -685,6 +689,14 @@ impl Owner<'_> {
             | ExprKind::Bool(_)
             | ExprKind::Unit
             | ExprKind::Path(_) => Vec::new(),
+            ExprKind::Str(parts) => {
+                for part in ast.list(parts) {
+                    if let StrPart::Value { expr, .. } = *part {
+                        self.expr(expr, Use::Read);
+                    }
+                }
+                Vec::new()
+            }
             ExprKind::Ket => {
                 self.not_reversible(expr.span, "creating qubits");
                 self.discarded(id, use_);

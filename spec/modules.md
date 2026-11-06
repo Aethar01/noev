@@ -100,6 +100,8 @@ is part of a function's contract:
   another module that uses it inside `ctrl` or `adj`. The change is caught at the function,
   by its `rev` declaration.
 - `unsafe fn` works the same in every module.
+- Being a circuit works like reversibility: a `pub fn` is a circuit to other modules only if
+  it is declared `circuit fn` ([execution.md](execution.md) §4).
 
 The compiler warns about a `pub fn` that is reversible but not declared `rev`, since callers
 elsewhere cannot use it as reversible.

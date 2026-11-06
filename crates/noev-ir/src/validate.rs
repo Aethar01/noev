@@ -56,6 +56,13 @@ pub fn validate(program: &Program) -> Vec<String> {
                                 check_operand(bit, &mut report);
                             }
                             Rvalue::FloatConst(_) | Rvalue::Identity => {}
+                            Rvalue::Format(parts) => {
+                                for part in parts {
+                                    if let FormatPart::Value(op, _, _) = part {
+                                        check_operand(op, &mut report);
+                                    }
+                                }
+                            }
                         }
                     }
                     Stmt::Alloc(p) | Stmt::Reset(p) | Stmt::Release(p) => {
@@ -73,6 +80,9 @@ pub fn validate(program: &Program) -> Vec<String> {
                         places.iter().for_each(|p| check_place(p, &mut report))
                     }
                     Stmt::CtrlPop => {}
+                    Stmt::Print { args, .. } => args
+                        .iter()
+                        .for_each(|(op, _)| check_operand(op, &mut report)),
                     Stmt::Expectation {
                         dest,
                         prep,

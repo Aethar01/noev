@@ -18,6 +18,21 @@ fn sexp(ast: &Ast, source: &str, id: ExprId) -> String {
         ExprKind::Float(v) => format!("{v:?}"),
         ExprKind::Bool(v) => v.to_string(),
         ExprKind::Ket => expr.span.text(source).into(),
+        ExprKind::Str(parts) => {
+            let parts: Vec<String> = ast
+                .list(parts)
+                .iter()
+                .map(|part| match part {
+                    StrPart::Text(t) => format!("{:?}", ast.name(*t)),
+                    StrPart::Value { expr, spec } => {
+                        let spec =
+                            spec.map_or(String::new(), |s| format!(":{}", s.span.text(source)));
+                        format!("{}{spec}", e(*expr))
+                    }
+                })
+                .collect();
+            format!("(str {})", parts.join(" "))
+        }
         ExprKind::Name(s) => ast.name(s).into(),
         ExprKind::Path(p) => ast
             .list(p)
@@ -262,7 +277,11 @@ fn items() {
         panic!()
     };
     let f = ast.function(f);
-    assert!(f.is_unsafe && f.is_rev);
+    assert!(f.is_unsafe && f.is_rev && !f.is_circuit);
+    let parsed = parse("circuit fn a() {}\nrev circuit fn b() {}\nfn circuit() {}");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let fns = parsed.ast.all_fns();
+    assert!(fns[0].is_circuit && fns[1].is_circuit && fns[1].is_rev && !fns[2].is_circuit);
 }
 
 #[test]
@@ -336,4 +355,32 @@ fn ui_tests_parse_cleanly() {
         }
     }
     assert!(count > 0);
+}
+
+#[test]
+fn string_literals() {
+    assert_eq!(expr(r#""plain""#), r#"(str "plain")"#);
+    assert_eq!(expr(r#""a\tb\n\"q\" \u{3B8}""#), r#"(str "a\tb\n\"q\" θ")"#);
+    assert_eq!(
+        expr(r#""x = {x}, y = {y:.3}""#),
+        r#"(str "x = " x ", y = " y:.3)"#
+    );
+    assert_eq!(expr(r#""{{literal}""#), r#"(str "{literal}")"#);
+    assert_eq!(expr(r#""a } b""#), r#"(str "a } b")"#);
+    assert_eq!(expr(r#""{Float::PI:>10.4}""#), r#"(str Float::PI:>10.4)"#);
+    assert_eq!(
+        expr(r#""{d.probability((1, 1)):.3}""#),
+        r#"(str (method d probability (tuple 1 1)):.3)"#
+    );
+    assert_eq!(expr(r#""{f("}")}""#), r#"(str (call f (str "}")))"#);
+    assert_eq!(expr(r#""{m:*^08b}""#), r#"(str m:*^08b)"#);
+}
+
+#[test]
+fn string_errors() {
+    assert_eq!(errors(r#"fn f() { "a {} b" }"#), ["empty interpolation"]);
+    assert_eq!(errors(r#"fn f() { "{x:q}" }"#), ["invalid format spec `q`"]);
+    assert_eq!(errors(r#"fn f() { "\q" }"#), ["unknown escape"]);
+    assert_eq!(errors(r#"fn f() { "\u{zz}" }"#), ["invalid Unicode escape"]);
+    assert_eq!(errors(r#"fn f() { "{x y}" }"#).len(), 1);
 }

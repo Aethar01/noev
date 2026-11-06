@@ -184,6 +184,7 @@ pools! {
     fields: FieldDecl,
     field_inits: FieldInit,
     type_aliases: TypeAlias,
+    str_parts: StrPart,
 }
 
 /// A parsed file.
@@ -288,6 +289,8 @@ pub enum ExprKind {
     Bool(bool),
     /// A ket literal such as `|+0>`; the state is the text of the span.
     Ket,
+    /// A string literal, as text and interpolated values in order.
+    Str(List<StrPart>),
     /// A single name: a variable, function, type, `self` or `Self`.
     Name(Symbol),
     /// A path with `::`, such as `Experiment::new`.
@@ -529,6 +532,67 @@ impl OwnKind {
     }
 }
 
+/// A piece of a string literal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StrPart {
+    /// Literal text, with escapes already decoded.
+    Text(Symbol),
+    /// `{expr}` or `{expr:spec}`.
+    Value {
+        /// The interpolated expression.
+        expr: ExprId,
+        /// How to format it.
+        spec: Option<FormatSpec>,
+    },
+}
+
+/// A format spec: `{x:>8.3}` and the like (`spec/types.md` §7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FormatSpec {
+    /// The padding character; a space unless given.
+    pub fill: char,
+    /// Alignment within `width`; the type's default when absent.
+    pub align: Option<Align>,
+    /// `+`: always show the sign.
+    pub plus: bool,
+    /// `0`: pad numbers with zeros after the sign.
+    pub zero: bool,
+    /// The minimum width.
+    pub width: Option<u32>,
+    /// Digits after the decimal point.
+    pub precision: Option<u32>,
+    /// Another representation: binary, octal, hexadecimal or exponent.
+    pub kind: Option<FormatKind>,
+    /// Where the spec is written.
+    pub span: Span,
+}
+
+/// Alignment in a format spec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Align {
+    /// `<`
+    Left,
+    /// `>`
+    Right,
+    /// `^`
+    Center,
+}
+
+/// A format spec's representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormatKind {
+    /// `b`
+    Binary,
+    /// `o`
+    Octal,
+    /// `x`
+    Hex,
+    /// `X`
+    HexUpper,
+    /// `e`
+    Exponent,
+}
+
 /// `name: value` in a struct literal.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FieldInit {
@@ -715,6 +779,8 @@ pub struct FnDecl {
     pub is_unsafe: bool,
     /// Whether it is `rev fn`.
     pub is_rev: bool,
+    /// Whether it is `circuit fn`.
+    pub is_circuit: bool,
     /// `mv self`, `ref self` or `mut self`, for methods.
     pub receiver: Option<Receiver>,
     /// The other parameters.

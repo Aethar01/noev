@@ -1,10 +1,9 @@
 // Expectation values: the energy of a two-qubit Hamiltonian in a parameterised state.
 //
-//     noev run examples/energy.nv --shots 1
+//     noev run examples/energy.nv
 //
-// The state is cos(θ/2)|00⟩ + sin(θ/2)|11⟩, so the energy is −1 + cos θ + ½ sin θ:
-// 0 at θ = 0, −0.5 at θ = π/2, and −2 at θ = π. The simulator computes expectation values
-// exactly, so one shot is enough.
+// The state is cos(θ/2)|00⟩ + sin(θ/2)|11⟩, so the energy is −1 + cos θ + ½ sin θ. The
+// simulator computes expectation values exactly.
 
 fn ansatz(theta: Float) -> [Qubit; 2] {
     let r = |00>
@@ -18,6 +17,10 @@ fn energy(theta: Float) -> Float {
     <ansatz(theta)| h |ansatz(theta)>
 }
 
-fn main() -> (Float, Float, Float) {
-    (energy(0.0), energy(Float::PI / 2.0), energy(Float::PI))
+fn main() {
+    print("     θ     energy")
+    for i in 0..9 {
+        let theta = Float(i) * Float::PI / 8.0
+        print("{theta:>6.3}  {energy(theta):>+9.4}")
+    }
 }
