@@ -9,6 +9,7 @@ use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand, ValueEnum};
 
 const NOTE: anstyle::Style = AnsiColor::Cyan.on_default().effects(Effects::BOLD);
+const ERROR: anstyle::Style = AnsiColor::Red.on_default().effects(Effects::BOLD);
 
 /// Help colours, matching Cargo's.
 const STYLES: Styles = Styles::styled()
@@ -62,12 +63,16 @@ enum Command {
         file: PathBuf,
 
         /// How many times to run the program
-        #[arg(long, default_value_t = 1000, value_name = "N")]
+        #[arg(long, default_value_t = 1000, value_name = "N", value_parser = clap::value_parser!(u64).range(1..))]
         shots: u64,
 
         /// Seed for the simulator's random number generator
         #[arg(long, value_name = "N")]
         seed: Option<u64>,
+
+        /// How many of the most frequent results to show (0 shows all)
+        #[arg(long, default_value_t = 20, value_name = "N")]
+        limit: usize,
 
         #[command(flatten)]
         messages: MessageOptions,
@@ -116,7 +121,13 @@ fn main() -> ExitCode {
             output,
             messages,
         } => build(&file, emit, output.as_deref(), messages.message_format),
-        Command::Run { .. } => not_implemented("run"),
+        Command::Run {
+            file,
+            shots,
+            seed,
+            limit,
+            messages,
+        } => run(&file, shots, seed, limit, messages.message_format),
     }
 }
 
@@ -184,6 +195,54 @@ fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) 
             ExitCode::SUCCESS
         }
     }
+}
+
+/// Runs `file`'s `main` `shots` times on the simulator and prints how often each result
+/// occurred.
+fn run(
+    file: &Path,
+    shots: u64,
+    seed: Option<u64>,
+    limit: usize,
+    format: MessageFormat,
+) -> ExitCode {
+    let checked = match front_end(file, format) {
+        Ok(checked) => checked,
+        Err(code) => return code,
+    };
+    let program = noev_ir::lower(&checked.parsed.ast, &checked.typed, &checked.source);
+    let Some(main) = program.main else {
+        anstream::eprintln!(
+            "{ERROR}error:{ERROR:#} `{}` has no `fn main()` to run",
+            file.display()
+        );
+        return ExitCode::from(1);
+    };
+    let seed = seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64)
+    });
+    let start = std::time::Instant::now();
+    let counts = match noev_runtime::run(&program, main, shots as usize, seed) {
+        Ok(counts) => counts,
+        Err(error) => {
+            let diagnostic =
+                noev_syntax::Diagnostic::error(error.span.unwrap_or_default(), error.message);
+            match error.span {
+                Some(_) => report::print(
+                    &file.display().to_string(),
+                    &checked.source,
+                    &[diagnostic],
+                    format,
+                ),
+                None => anstream::eprintln!("{ERROR}error:{ERROR:#} {}", diagnostic.message),
+            }
+            return ExitCode::from(1);
+        }
+    };
+    report::histogram(&counts, limit, start.elapsed(), seed);
+    ExitCode::SUCCESS
 }
 
 fn not_implemented(command: &str) -> ExitCode {

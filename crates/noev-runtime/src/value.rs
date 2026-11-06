@@ -1,0 +1,209 @@
+//! Runtime values, and observables.
+
+use std::fmt;
+
+/// A value held by a local or computed by an expression.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Value {
+    /// `()`, and the contents of a local before it is assigned.
+    Unit,
+    /// An `Int`.
+    Int(i64),
+    /// A `Float`.
+    Float(f64),
+    /// A `Bool`.
+    Bool(bool),
+    /// A `Bit`.
+    Bit(bool),
+    /// A qubit: its index in the simulator's state.
+    Qubit(usize),
+    /// An `Observable`.
+    Observable(Observable),
+    /// A tuple, array or struct (fields in declaration order).
+    Aggregate(Vec<Value>),
+    /// A reference.
+    Ref(Pointer),
+}
+
+/// Where a reference points: a local in some call frame, then fields and elements.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pointer {
+    /// The call frame, counted from the outermost.
+    pub frame: usize,
+    /// The local in that frame.
+    pub local: usize,
+    /// Field and element steps.
+    pub path: Vec<usize>,
+}
+
+impl Value {
+    /// The value with each qubit replaced by a bit of `bits`, in order (bit `k` for the
+    /// `k`th qubit).
+    pub fn with_bits(&self, bits: u64) -> Value {
+        fn go(value: &Value, bits: u64, next: &mut usize) -> Value {
+            match value {
+                Value::Qubit(_) => {
+                    let bit = (bits >> *next) & 1 == 1;
+                    *next += 1;
+                    Value::Bit(bit)
+                }
+                Value::Aggregate(items) => {
+                    Value::Aggregate(items.iter().map(|v| go(v, bits, next)).collect())
+                }
+                other => other.clone(),
+            }
+        }
+        go(self, bits, &mut 0)
+    }
+
+    /// Every qubit in the value, in order: elements and fields left to right.
+    pub fn qubits(&self, out: &mut Vec<usize>) {
+        match self {
+            Value::Qubit(q) => out.push(*q),
+            Value::Aggregate(items) => items.iter().for_each(|v| v.qubits(out)),
+            _ => {}
+        }
+    }
+}
+
+/// How a value is shown in `noev run`'s results: bits as `0`/`1`, a tuple or array of bits
+/// as a bit string in index order (`|01>` measures as `01`), anything else in brackets.
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Unit => write!(f, "()"),
+            Value::Int(v) => write!(f, "{v}"),
+            Value::Float(v) => write!(f, "{v:?}"),
+            Value::Bool(v) => write!(f, "{v}"),
+            Value::Bit(v) => write!(f, "{}", u8::from(*v)),
+            Value::Qubit(q) => write!(f, "<qubit {q}>"),
+            Value::Observable(_) => write!(f, "<observable>"),
+            Value::Ref(_) => write!(f, "<reference>"),
+            Value::Aggregate(items)
+                if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Bit(_))) =>
+            {
+                items.iter().try_for_each(|v| write!(f, "{v}"))
+            }
+            Value::Aggregate(items) => {
+                write!(f, "(")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
+/// A Pauli operator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Pauli {
+    /// X.
+    X,
+    /// Y.
+    Y,
+    /// Z.
+    Z,
+}
+
+/// A real-weighted sum of Pauli products. Indices refer to the qubits of a preparation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Observable {
+    /// `(coefficient, [(qubit index, Pauli)])`, each product sorted by index.
+    pub terms: Vec<(f64, Vec<(usize, Pauli)>)>,
+}
+
+impl Observable {
+    /// A single Pauli on qubit `index`.
+    pub fn pauli(pauli: Pauli, index: usize) -> Self {
+        Observable {
+            terms: vec![(1.0, vec![(index, pauli)])],
+        }
+    }
+
+    /// The identity.
+    pub fn identity() -> Self {
+        Observable {
+            terms: vec![(1.0, Vec::new())],
+        }
+    }
+
+    /// `c × self`.
+    pub fn scale(&self, c: f64) -> Self {
+        Observable {
+            terms: self.terms.iter().map(|(k, p)| (k * c, p.clone())).collect(),
+        }
+    }
+
+    /// `self + other`.
+    pub fn add(&self, other: &Observable) -> Self {
+        let mut terms = self.terms.clone();
+        terms.extend(other.terms.iter().cloned());
+        Observable { terms }
+    }
+
+    /// `self × other`, for factors acting on different qubits.
+    pub fn mul(&self, other: &Observable) -> Result<Self, String> {
+        let mut terms = Vec::with_capacity(self.terms.len() * other.terms.len());
+        for (a, pa) in &self.terms {
+            for (b, pb) in &other.terms {
+                if pa.iter().any(|(i, _)| pb.iter().any(|(j, _)| i == j)) {
+                    return Err("a product of observables must act on different qubits".into());
+                }
+                let mut product = pa.clone();
+                product.extend(pb.iter().copied());
+                product.sort();
+                terms.push((a * b, product));
+            }
+        }
+        Ok(Observable { terms })
+    }
+
+    /// `P(i, b)` or `PX(i, b)`: `(I ± Z) / 2` or `(I ± X) / 2`.
+    pub fn projector(x_basis: bool, index: usize, bit: bool) -> Self {
+        let pauli = if x_basis { Pauli::X } else { Pauli::Z };
+        let sign = if bit { -0.5 } else { 0.5 };
+        Observable::identity()
+            .scale(0.5)
+            .add(&Observable::pauli(pauli, index).scale(sign))
+    }
+
+    /// The largest qubit index used, plus one.
+    pub fn width(&self) -> usize {
+        self.terms
+            .iter()
+            .flat_map(|(_, p)| p.iter().map(|(i, _)| i + 1))
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projector_is_half_identity_plus_half_pauli() {
+        let p = Observable::projector(false, 0, false);
+        assert_eq!(p.terms, vec![(0.5, vec![]), (0.5, vec![(0, Pauli::Z)])]);
+    }
+
+    #[test]
+    fn products_on_shared_qubits_are_rejected() {
+        let z0 = Observable::pauli(Pauli::Z, 0);
+        assert!(z0.mul(&z0).is_err());
+        let zz = z0.mul(&Observable::pauli(Pauli::Z, 1)).unwrap();
+        assert_eq!(zz.terms, vec![(1.0, vec![(0, Pauli::Z), (1, Pauli::Z)])]);
+    }
+
+    #[test]
+    fn bit_strings() {
+        let bits = Value::Aggregate(vec![Value::Bit(false), Value::Bit(true)]);
+        assert_eq!(bits.to_string(), "01");
+        let mixed = Value::Aggregate(vec![Value::Int(3), Value::Bool(true)]);
+        assert_eq!(mixed.to_string(), "(3, true)");
+    }
+}

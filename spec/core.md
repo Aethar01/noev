@@ -104,7 +104,32 @@ Constants: `Float::PI`, `Float::TAU`, `Float::E`.
 
 All of these are pure, so they may be called in reversible contexts.
 
-## 6. Open questions
+## 6. Running a program
+
+A program runs by calling `main` once per **shot**. What `main` returns is the shot's result,
+and the results of all shots are counted.
+
+- **Classical results** (bits, integers, tuples, structs…) are reported as they are. Bits,
+  and tuples and arrays of bits, are written as bit strings in index order, the same order
+  as kets: `|01>` measured gives `01`.
+- **Qubits** may be returned too: `main` hands them to the runtime, which measures them in
+  the Z basis after the shot (so returning them consumes them). This is the way to ask for
+  **sampling**: when `main` measures nothing itself, every shot produces the same state, so
+  a simulator computes it once and samples it as many times as needed. When `main` does
+  measure (for feedback, say), each shot runs separately.
+
+```noev
+fn main() -> [Qubit; 2] {        // sampled: the state is computed once
+    let r = |+0>
+    ctrl r[0] { r[1].x() }
+    mv r
+}
+```
+
+Returned qubits are measured in the order of the value's qubits: elements and fields left
+to right.
+
+## 7. Open questions
 
 - **Measuring without consuming.** `measure` consumes the qubit. Repeated mid-circuit
   measurement (error-correction syndromes, for example) would prefer something like
@@ -113,3 +138,5 @@ All of these are pure, so they may be called in reversible contexts.
   or when the preparation measures), and how to set it per expectation or per program.
 - **Y-basis bras** (`<i|`, `<-i|`), alongside Y-basis kets.
 - **Printing and output** for classical results, beyond the CLI's result histogram.
+- **Sampling inside a program**: a `sample` of a preparation returning a distribution, for
+  hybrid loops that post-process measurement statistics.

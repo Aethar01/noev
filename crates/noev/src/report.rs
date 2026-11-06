@@ -200,6 +200,58 @@ fn excerpt(
     }
 }
 
+/// Prints how often each result occurred, most frequent first, with a bar for each. Shows the
+/// `limit` most frequent (all when `limit` is 0) and summarises the rest.
+pub fn histogram(
+    counts: &noev_runtime::Counts,
+    limit: usize,
+    elapsed: std::time::Duration,
+    seed: u64,
+) {
+    const BAR: usize = 40;
+    let mut out = anstream::stdout().lock();
+    let width = counts
+        .results
+        .iter()
+        .map(|(r, _)| r.chars().count())
+        .max()
+        .unwrap_or(0);
+    let digits = counts.shots.to_string().len();
+    let most = counts.results.first().map_or(1, |(_, n)| *n).max(1);
+    let shown = if limit == 0 {
+        counts.results.len()
+    } else {
+        limit.min(counts.results.len())
+    };
+    for (result, count) in &counts.results[..shown] {
+        let share = *count as f64 / counts.shots as f64;
+        let bar = "█".repeat((count * BAR).div_ceil(most));
+        let _ = writeln!(
+            out,
+            "{BOLD}{result:<width$}{BOLD:#}  {count:>digits$}  {:>5.1}%  {NOTE}{bar}{NOTE:#}",
+            share * 100.0
+        );
+    }
+    let hidden = &counts.results[shown..];
+    if !hidden.is_empty() {
+        let hidden_shots: usize = hidden.iter().map(|(_, n)| n).sum();
+        let _ = writeln!(
+            out,
+            "{NOTE}… and {} more result{} ({hidden_shots} shots); use --limit 0 to show all{NOTE:#}",
+            hidden.len(),
+            if hidden.len() == 1 { "" } else { "s" }
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\n{} shots, {} distinct result{}, in {:.1?} (seed {seed})",
+        counts.shots,
+        counts.results.len(),
+        if counts.results.len() == 1 { "" } else { "s" },
+        elapsed
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

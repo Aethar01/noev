@@ -9,7 +9,11 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+ketrs = { path = "../../../ketrs/crates/ketrs" }
 noev-ir = { path = "../noev-ir" }
+noev-sema = { path = "../noev-sema" }
+noev-syntax = { path = "../noev-syntax" }
+rand = { version = "0.9", default-features = false, features = ["small_rng"] }
 
 [lints]
 workspace = true

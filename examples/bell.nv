@@ -1,0 +1,16 @@
+// A Bell pair: two qubits that always measure the same.
+//
+//     noev run examples/bell.nv
+//
+// About half the shots give 00 and half give 11; never 01 or 10.
+
+fn bell_pair() -> (Bit, Bit) {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    (mv a.measure(), mv b.measure())
+}
+
+fn main() -> (Bit, Bit) {
+    bell_pair()
+}

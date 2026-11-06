@@ -1,0 +1,29 @@
+// A hybrid struct: a classical angle that controls a quantum rotation.
+//
+//     noev run examples/hybrid.nv
+//
+// Rotating |0⟩ by θ about Y gives 1 with probability sin²(θ/2). With θ = 2π/3, that is 75%.
+
+struct Experiment {
+    angle: Float
+    state: Qubit
+
+    fn new(angle: Float) -> Self {
+        Experiment { angle, state: |0> }
+    }
+
+    fn rotate(mut self) -> mut Self {
+        self.state.ry(self.angle)
+        mut self
+    }
+
+    fn finish(mv self) -> Bit {
+        mv self.state.measure()
+    }
+}
+
+fn main() -> Bit {
+    let mut e = Experiment::new(2.0 * Float::PI / 3.0)
+    e.rotate()
+    mv e.finish()
+}

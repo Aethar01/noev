@@ -136,7 +136,7 @@ circuit generation.
 | 3  | Ownership checker            | Rules N001–N020 in `spec/ownership.md` (`with`/`do` reserved)                              | ☑ Done |
 | 4  | Quantum IR                   | Allocation, gates, measurement, classical dependencies                                     | ☑ Done |
 | 5  | Circuit generation           | Export to OpenQASM 3                                                                       | ☐ Todo |
-| 6  | Execution                    | Run on a simulator, expose results via the `noev` CLI                                      | ☐ Todo |
+| 6  | Execution                    | Run on a simulator, expose results via the `noev` CLI (multi-control waits on ketrs)        | ◐ In progress |
 | 7  | Expectation values           | `<ψ\| H \|ψ>` with observables, exact on ketrs where possible                               | ☐ Todo |
 
 **Priority:** build the type system and ownership checker (milestones 1–3) first, before any

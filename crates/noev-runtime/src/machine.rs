@@ -1,0 +1,848 @@
+//! Runs IR on the ketrs statevector simulator.
+//!
+//! One [`Machine`] runs one shot. Qubits are allocated on demand: the statevector grows by one
+//! qubit when no released qubit is free, and qubits that are measured, discarded or released
+//! go back on a free list in \|0⟩ for reuse.
+//!
+//! `ctrl` keeps a stack of control qubits that every gate picks up. `adj` records the gates a
+//! reversible call applies, then applies their inverses in reverse order. Reversible code
+//! cannot measure or allocate, and its classical computation is deterministic, so this is
+//! exactly the inverse.
+
+use ketrs::{Operation, PauliString, PauliSum, Statevector};
+use noev_ir::ir::*;
+use noev_sema::prelude::{FloatConst, Gate, Math, Pauli as IrPauli};
+use noev_sema::{Ty, TyKind};
+use noev_syntax::Span;
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
+
+use crate::value::{Observable, Pauli, Pointer, Value};
+
+/// A failure while running a program.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeError {
+    /// What went wrong.
+    pub message: String,
+    /// Where, when known.
+    pub span: Option<Span>,
+}
+
+impl RuntimeError {
+    fn new(message: impl Into<String>) -> Self {
+        RuntimeError {
+            message: message.into(),
+            span: None,
+        }
+    }
+}
+
+type Result<T> = std::result::Result<T, RuntimeError>;
+
+/// How many runs an expectation value averages over when its preparation measures qubits
+/// (`spec/core.md`, open question on estimation settings).
+const EXPECTATION_RUNS: usize = 1000;
+
+/// A quantum operation with its qubits resolved, as applied or recorded under `adj`.
+#[derive(Clone, Debug)]
+struct Op {
+    gate: Gate,
+    adjoint: bool,
+    params: Vec<f64>,
+    controls: Vec<usize>,
+    targets: Vec<usize>,
+}
+
+/// The state of one run of a program.
+pub struct Machine<'p> {
+    program: &'p Program,
+    state: Statevector,
+    /// Qubits in \|0⟩ that can be handed out again.
+    free: Vec<usize>,
+    frames: Vec<Vec<Value>>,
+    /// Control qubits that every gate picks up, from enclosing `ctrl` blocks.
+    controls: Vec<usize>,
+    /// The length of `controls` before each `ctrl` push.
+    control_marks: Vec<usize>,
+    /// Gates recorded by enclosing `adj` calls, innermost last.
+    recording: Vec<Vec<Op>>,
+    rng: SmallRng,
+    /// Whether anything has been measured, which makes an expectation value an estimate.
+    measured: bool,
+}
+
+impl<'p> Machine<'p> {
+    /// A machine with no qubits.
+    pub fn new(program: &'p Program, seed: u64) -> Self {
+        Machine {
+            program,
+            state: Statevector::zero(0),
+            free: Vec::new(),
+            frames: Vec::new(),
+            controls: Vec::new(),
+            control_marks: Vec::new(),
+            recording: Vec::new(),
+            rng: SmallRng::seed_from_u64(seed),
+            measured: false,
+        }
+    }
+
+    /// Whether anything has been measured, so later shots could behave differently.
+    pub fn measured(&self) -> bool {
+        self.measured
+    }
+
+    /// Measures every qubit in `value`, replacing each with its `Bit`. This is how returned
+    /// qubits are consumed at the end of a shot (`spec/core.md` §6).
+    pub fn measure_value(&mut self, value: Value) -> Result<Value> {
+        Ok(match value {
+            Value::Qubit(q) => Value::Bit(self.measure(q)?),
+            Value::Aggregate(items) => Value::Aggregate(
+                items
+                    .into_iter()
+                    .map(|v| self.measure_value(v))
+                    .collect::<Result<_>>()?,
+            ),
+            other => other,
+        })
+    }
+
+    /// Samples the current state `shots` times, returning how often each outcome of `qubits`
+    /// occurred, with `qubits[k]` at bit `k`. Leaves the state unchanged.
+    pub fn sample(&mut self, qubits: &[usize], shots: usize) -> Vec<(u64, usize)> {
+        let mut counts: std::collections::BTreeMap<u64, usize> = Default::default();
+        for (index, count) in self.state.sample_counts(shots, &mut self.rng) {
+            let bits = qubits
+                .iter()
+                .enumerate()
+                .fold(0u64, |acc, (k, &q)| acc | (((index >> q) & 1) as u64) << k);
+            *counts.entry(bits).or_default() += count;
+        }
+        counts.into_iter().collect()
+    }
+
+    /// Calls `func` with `args` and returns its result.
+    pub fn call(&mut self, func: FuncId, args: Vec<Value>) -> Result<Value> {
+        let program = self.program;
+        let function = &program.functions[func.index()];
+        let mut locals: Vec<Value> = function.locals.iter().map(|l| self.default(l.ty)).collect();
+        for (i, arg) in args.into_iter().enumerate() {
+            locals[i + 1] = arg;
+        }
+        self.frames.push(locals);
+        let control_depth = (self.controls.len(), self.control_marks.len());
+        let result = self.run_blocks(function);
+        // A `return` from inside a `ctrl` block leaves its controls behind.
+        self.controls.truncate(control_depth.0);
+        self.control_marks.truncate(control_depth.1);
+        let mut frame = self.frames.pop().expect("pushed above");
+        result?;
+        Ok(std::mem::replace(&mut frame[0], Value::Unit))
+    }
+
+    fn run_blocks(&mut self, function: &'p Function) -> Result<()> {
+        let mut block = 0;
+        loop {
+            let current = &function.blocks[block];
+            for stmt in &current.stmts {
+                self.stmt(stmt)?;
+            }
+            block = match &current.term {
+                Terminator::Goto(next) => next.index(),
+                Terminator::Branch {
+                    cond,
+                    then,
+                    otherwise,
+                } => {
+                    if self.truth(cond)? {
+                        then.index()
+                    } else {
+                        otherwise.index()
+                    }
+                }
+                Terminator::Call {
+                    func,
+                    args,
+                    dest,
+                    adjoint,
+                    next,
+                } => {
+                    let args = args
+                        .iter()
+                        .map(|a| self.operand(a))
+                        .collect::<Result<Vec<_>>>()?;
+                    let value = if *adjoint {
+                        self.recording.push(Vec::new());
+                        let value = self.call(*func, args);
+                        let ops = self.recording.pop().expect("pushed above");
+                        let value = value?;
+                        for mut op in ops.into_iter().rev() {
+                            op.adjoint = !op.adjoint;
+                            self.execute(op)?;
+                        }
+                        value
+                    } else {
+                        self.call(*func, args)?
+                    };
+                    self.store(dest, value)?;
+                    next.index()
+                }
+                Terminator::Assert { cond, next, span } => {
+                    if !self.truth(cond)? {
+                        return Err(RuntimeError {
+                            message: "assertion failed".into(),
+                            span: Some(*span),
+                        });
+                    }
+                    next.index()
+                }
+                Terminator::Return => return Ok(()),
+                Terminator::Unreachable => {
+                    return Err(RuntimeError::new(format!(
+                        "reached unreachable code in `{}`",
+                        function.name
+                    )));
+                }
+            };
+        }
+    }
+
+    /// The value a local starts with: aggregates are built out so their parts can be
+    /// assigned one at a time.
+    fn default(&self, ty: Ty) -> Value {
+        let types = &self.program.types;
+        match types.kind(ty) {
+            TyKind::Tuple(elems) => {
+                Value::Aggregate(elems.iter().map(|&t| self.default(t)).collect())
+            }
+            &TyKind::Array(elem, len) => {
+                Value::Aggregate((0..len).map(|_| self.default(elem)).collect())
+            }
+            &TyKind::Struct(s) => Value::Aggregate(
+                types.structs[s.index()]
+                    .fields
+                    .iter()
+                    .map(|&(_, t)| self.default(t))
+                    .collect(),
+            ),
+            _ => Value::Unit,
+        }
+    }
+}
+
+// Places and values.
+
+impl Machine<'_> {
+    fn resolve(&self, place: &Place) -> Result<Pointer> {
+        let mut ptr = Pointer {
+            frame: self.frames.len() - 1,
+            local: place.local.index(),
+            path: Vec::new(),
+        };
+        for proj in &place.proj {
+            match proj {
+                Proj::Deref => match self.get(&ptr)? {
+                    Value::Ref(target) => ptr = target.clone(),
+                    other => {
+                        return Err(RuntimeError::new(format!(
+                            "expected a reference, found {other:?}"
+                        )));
+                    }
+                },
+                Proj::Field(i) => ptr.path.push(*i as usize),
+                Proj::Index(index) => {
+                    let index = self.int(index)?;
+                    let len = match self.get(&ptr)? {
+                        Value::Aggregate(items) => items.len(),
+                        other => {
+                            return Err(RuntimeError::new(format!(
+                                "expected an array, found {other:?}"
+                            )));
+                        }
+                    };
+                    if index < 0 || index as usize >= len {
+                        return Err(RuntimeError::new(format!(
+                            "index {index} is out of range for an array of length {len}"
+                        )));
+                    }
+                    ptr.path.push(index as usize);
+                }
+            }
+        }
+        Ok(ptr)
+    }
+
+    fn get(&self, ptr: &Pointer) -> Result<&Value> {
+        let mut value = &self.frames[ptr.frame][ptr.local];
+        for &step in &ptr.path {
+            value = match value {
+                Value::Aggregate(items) => &items[step],
+                other => return Err(RuntimeError::new(format!("cannot take part of {other:?}"))),
+            };
+        }
+        Ok(value)
+    }
+
+    fn get_mut(&mut self, ptr: &Pointer) -> Result<&mut Value> {
+        let mut value = &mut self.frames[ptr.frame][ptr.local];
+        for &step in &ptr.path {
+            value = match value {
+                Value::Aggregate(items) => &mut items[step],
+                other => return Err(RuntimeError::new(format!("cannot take part of {other:?}"))),
+            };
+        }
+        Ok(value)
+    }
+
+    fn load(&self, place: &Place) -> Result<Value> {
+        let ptr = self.resolve(place)?;
+        self.get(&ptr).cloned()
+    }
+
+    fn store(&mut self, place: &Place, value: Value) -> Result<()> {
+        let ptr = self.resolve(place)?;
+        *self.get_mut(&ptr)? = value;
+        Ok(())
+    }
+
+    fn operand(&self, op: &Operand) -> Result<Value> {
+        match op {
+            Operand::Copy(place) | Operand::Move(place) => self.load(place),
+            Operand::Const(c) => Ok(match *c {
+                Const::Unit => Value::Unit,
+                Const::Int(v) => Value::Int(v),
+                Const::Float(v) => Value::Float(v),
+                Const::Bool(v) => Value::Bool(v),
+                Const::Bit(v) => Value::Bit(v),
+            }),
+        }
+    }
+
+    fn int(&self, op: &Operand) -> Result<i64> {
+        match self.operand(op)? {
+            Value::Int(v) => Ok(v),
+            other => Err(RuntimeError::new(format!(
+                "expected an Int, found {other:?}"
+            ))),
+        }
+    }
+
+    fn float(&self, op: &Operand) -> Result<f64> {
+        match self.operand(op)? {
+            Value::Float(v) => Ok(v),
+            other => Err(RuntimeError::new(format!(
+                "expected a Float, found {other:?}"
+            ))),
+        }
+    }
+
+    fn truth(&self, op: &Operand) -> Result<bool> {
+        match self.operand(op)? {
+            Value::Bool(v) | Value::Bit(v) => Ok(v),
+            other => Err(RuntimeError::new(format!(
+                "expected a Bool or Bit, found {other:?}"
+            ))),
+        }
+    }
+
+    fn qubit(&self, place: &Place) -> Result<usize> {
+        match self.load(place)? {
+            Value::Qubit(q) => Ok(q),
+            other => Err(RuntimeError::new(format!(
+                "expected a qubit, found {other:?}"
+            ))),
+        }
+    }
+}
+
+// Statements.
+
+impl Machine<'_> {
+    fn stmt(&mut self, stmt: &Stmt) -> Result<()> {
+        match stmt {
+            Stmt::Assign(place, value) => {
+                let value = self.rvalue(value)?;
+                self.store(place, value)
+            }
+            Stmt::Alloc(place) => {
+                let qubit = self.allocate()?;
+                self.store(place, Value::Qubit(qubit))
+            }
+            Stmt::Gate {
+                gate,
+                adjoint,
+                qubits,
+                params,
+            } => {
+                let targets = qubits
+                    .iter()
+                    .map(|q| self.qubit(q))
+                    .collect::<Result<Vec<_>>>()?;
+                let params = params
+                    .iter()
+                    .map(|p| self.float(p))
+                    .collect::<Result<Vec<_>>>()?;
+                let op = Op {
+                    gate: *gate,
+                    adjoint: *adjoint,
+                    params,
+                    controls: self.controls.clone(),
+                    targets,
+                };
+                match self.recording.last_mut() {
+                    Some(recording) => {
+                        recording.push(op);
+                        Ok(())
+                    }
+                    None => self.execute(op),
+                }
+            }
+            Stmt::Measure { dest, qubit } => {
+                let qubit = self.qubit(qubit)?;
+                let bit = self.measure(qubit)?;
+                self.store(dest, Value::Bit(bit))
+            }
+            Stmt::Reset(place) => {
+                let qubit = self.qubit(place)?;
+                self.state.reset(qubit, &mut self.rng).map_err(sim_error)
+            }
+            Stmt::Release(place) => {
+                let qubit = self.qubit(place)?;
+                // Simulators check `release`'s claim (spec/ownership.md §11).
+                let p1 = self.state.probability_one(qubit).map_err(sim_error)?;
+                if p1 > 1e-9 {
+                    return Err(RuntimeError::new(format!(
+                        "a released qubit was not in |0⟩ (probability of 1: {p1:.3})"
+                    )));
+                }
+                self.free.push(qubit);
+                Ok(())
+            }
+            Stmt::CtrlPush(places) => {
+                self.control_marks.push(self.controls.len());
+                for place in places {
+                    let mut qubits = Vec::new();
+                    self.load(place)?.qubits(&mut qubits);
+                    self.controls.extend(qubits);
+                }
+                Ok(())
+            }
+            Stmt::CtrlPop => {
+                let mark = self.control_marks.pop().unwrap_or(0);
+                self.controls.truncate(mark);
+                Ok(())
+            }
+            Stmt::Expectation {
+                dest,
+                prep,
+                observable,
+            } => {
+                let Value::Observable(observable) = self.operand(observable)? else {
+                    return Err(RuntimeError::new("expected an observable"));
+                };
+                let prep_args = match prep {
+                    Prep::Ket(_) => Vec::new(),
+                    Prep::Call(_, args) => args
+                        .iter()
+                        .map(|a| self.operand(a))
+                        .collect::<Result<Vec<_>>>()?,
+                };
+                let seed = self.rng.random();
+                let value = expectation(self.program, prep, prep_args, &observable, seed)?;
+                self.store(dest, Value::Float(value))
+            }
+        }
+    }
+
+    /// A qubit in \|0⟩: a released one, or a new one added to the state.
+    fn allocate(&mut self) -> Result<usize> {
+        if let Some(qubit) = self.free.pop() {
+            return Ok(qubit);
+        }
+        let qubit = self.state.n_qubits();
+        if qubit >= 30 {
+            return Err(RuntimeError::new(
+                "more than 30 qubits are alive at once, which is beyond the statevector simulator",
+            ));
+        }
+        // The new qubit is the most significant: the existing amplitudes are the half where
+        // it is |0⟩, and the other half is zero.
+        let state = std::mem::replace(&mut self.state, Statevector::zero(0));
+        let mut amplitudes = state.into_amplitudes();
+        amplitudes.resize(amplitudes.len() * 2, Default::default());
+        self.state = Statevector::from_amplitudes(amplitudes).map_err(sim_error)?;
+        Ok(qubit)
+    }
+
+    /// Measures a qubit, consuming it: it is returned to \|0⟩ and freed.
+    fn measure(&mut self, qubit: usize) -> Result<bool> {
+        self.measured = true;
+        let bit = self
+            .state
+            .measure(qubit, &mut self.rng)
+            .map_err(sim_error)?;
+        if bit {
+            self.state
+                .apply(&Operation::Gate {
+                    gate: ketrs::Gate::X,
+                    target: qubit,
+                })
+                .map_err(sim_error)?;
+        }
+        self.free.push(qubit);
+        Ok(bit)
+    }
+
+    /// Applies a gate with its controls.
+    fn execute(&mut self, op: Op) -> Result<()> {
+        if op.controls.iter().any(|c| op.targets.contains(c)) {
+            return Err(RuntimeError::new(
+                "a gate's target is also one of its controls",
+            ));
+        }
+        let gate = ketrs_gate(op.gate, op.adjoint, &op.params);
+        let operation = match (op.controls.as_slice(), gate, op.targets.as_slice()) {
+            ([], None, &[a, b]) => Operation::Swap(a, b),
+            ([], Some(gate), &[target]) => Operation::Gate { gate, target },
+            (&[control], Some(gate), &[target]) => Operation::Controlled {
+                gate,
+                control,
+                target,
+            },
+            (controls, _, _) => {
+                return Err(RuntimeError::new(format!(
+                    "this gate has {} controls, but the ketrs simulator does not support multi-controlled gates yet",
+                    controls.len().max(1)
+                )));
+            }
+        };
+        self.state.apply(&operation).map_err(sim_error)
+    }
+}
+
+/// The ketrs gate for a Noev gate, inverted for `adj`; `None` for `swap`.
+fn ketrs_gate(gate: Gate, adjoint: bool, params: &[f64]) -> Option<ketrs::Gate> {
+    use ketrs::Gate as K;
+    let sign = if adjoint { -1.0 } else { 1.0 };
+    let param = |i: usize| params.get(i).copied().unwrap_or(0.0);
+    Some(match gate {
+        Gate::X => K::X,
+        Gate::Y => K::Y,
+        Gate::Z => K::Z,
+        Gate::H => K::H,
+        Gate::S if adjoint => K::Sdg,
+        Gate::S => K::S,
+        Gate::T if adjoint => K::Tdg,
+        Gate::T => K::T,
+        Gate::Rx => K::Rx(sign * param(0)),
+        Gate::Ry => K::Ry(sign * param(0)),
+        Gate::Rz => K::Rz(sign * param(0)),
+        Gate::P => K::Phase(sign * param(0)),
+        // U(θ, φ, λ)† = U(−θ, −λ, −φ).
+        Gate::U if adjoint => K::U {
+            theta: -param(0),
+            phi: -param(2),
+            lambda: -param(1),
+        },
+        Gate::U => K::U {
+            theta: param(0),
+            phi: param(1),
+            lambda: param(2),
+        },
+        Gate::Swap => return None,
+    })
+}
+
+fn sim_error(error: ketrs::Error) -> RuntimeError {
+    RuntimeError::new(format!("simulator error: {error}"))
+}
+
+// Expressions.
+
+impl Machine<'_> {
+    fn rvalue(&self, value: &Rvalue) -> Result<Value> {
+        Ok(match value {
+            Rvalue::Use(op) => self.operand(op)?,
+            Rvalue::Unary(op, x) => unary(*op, self.operand(x)?)?,
+            Rvalue::Binary(op, a, b) => binary(*op, self.operand(a)?, self.operand(b)?)?,
+            Rvalue::Aggregate(ops) => {
+                Value::Aggregate(ops.iter().map(|o| self.operand(o)).collect::<Result<_>>()?)
+            }
+            Rvalue::Repeat(op, n) => Value::Aggregate(vec![self.operand(op)?; *n as usize]),
+            Rvalue::Ref { place, .. } => Value::Ref(self.resolve(place)?),
+            Rvalue::Convert(target, op) => convert(*target, self.operand(op)?)?,
+            Rvalue::Math(math, ops) => {
+                let args = ops
+                    .iter()
+                    .map(|o| self.operand(o))
+                    .collect::<Result<Vec<_>>>()?;
+                maths(*math, &args)?
+            }
+            Rvalue::FloatConst(c) => Value::Float(match c {
+                FloatConst::Pi => std::f64::consts::PI,
+                FloatConst::Tau => std::f64::consts::TAU,
+                FloatConst::E => std::f64::consts::E,
+            }),
+            Rvalue::Pauli(p, index) => {
+                let index = self.qubit_index(index)?;
+                let pauli = match p {
+                    IrPauli::X => Pauli::X,
+                    IrPauli::Y => Pauli::Y,
+                    IrPauli::Z => Pauli::Z,
+                };
+                Value::Observable(Observable::pauli(pauli, index))
+            }
+            Rvalue::Identity => Value::Observable(Observable::identity()),
+            Rvalue::Projector {
+                x_basis,
+                index,
+                bit,
+            } => {
+                let index = self.qubit_index(index)?;
+                let bit = self.truth(bit)?;
+                Value::Observable(Observable::projector(*x_basis, index, bit))
+            }
+        })
+    }
+
+    fn qubit_index(&self, op: &Operand) -> Result<usize> {
+        let index = self.int(op)?;
+        usize::try_from(index)
+            .map_err(|_| RuntimeError::new(format!("qubit index {index} is negative")))
+    }
+}
+
+fn unary(op: UnOp, x: Value) -> Result<Value> {
+    Ok(match (op, x) {
+        (UnOp::Neg, Value::Int(v)) => Value::Int(v.checked_neg().ok_or_else(overflow)?),
+        (UnOp::Neg, Value::Float(v)) => Value::Float(-v),
+        (UnOp::Neg, Value::Observable(o)) => Value::Observable(o.scale(-1.0)),
+        (UnOp::BitNot, Value::Int(v)) => Value::Int(!v),
+        (UnOp::BitNot, Value::Bit(v)) => Value::Bit(!v),
+        (UnOp::Not, Value::Bool(v)) => Value::Bool(!v),
+        (op, x) => return Err(RuntimeError::new(format!("cannot apply {op:?} to {x:?}"))),
+    })
+}
+
+fn overflow() -> RuntimeError {
+    RuntimeError::new("integer overflow")
+}
+
+fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
+    use BinOp::*;
+    Ok(match (a, b) {
+        (Value::Int(a), Value::Int(b)) => match op {
+            Add => Value::Int(a.checked_add(b).ok_or_else(overflow)?),
+            Sub => Value::Int(a.checked_sub(b).ok_or_else(overflow)?),
+            Mul => Value::Int(a.checked_mul(b).ok_or_else(overflow)?),
+            Div => Value::Int(
+                a.checked_div(b)
+                    .ok_or_else(|| RuntimeError::new("division by zero or overflow"))?,
+            ),
+            Rem => Value::Int(
+                a.checked_rem(b)
+                    .ok_or_else(|| RuntimeError::new("remainder by zero or overflow"))?,
+            ),
+            BitAnd => Value::Int(a & b),
+            BitOr => Value::Int(a | b),
+            BitXor => Value::Int(a ^ b),
+            Shl | Shr => {
+                let shift = u32::try_from(b)
+                    .ok()
+                    .filter(|&s| s < 64)
+                    .ok_or_else(|| RuntimeError::new(format!("cannot shift by {b}")))?;
+                Value::Int(if op == Shl { a << shift } else { a >> shift })
+            }
+            Eq => Value::Bool(a == b),
+            NotEq => Value::Bool(a != b),
+            Lt => Value::Bool(a < b),
+            Le => Value::Bool(a <= b),
+            Gt => Value::Bool(a > b),
+            Ge => Value::Bool(a >= b),
+            And | Or => return Err(RuntimeError::new("logic on Int")),
+        },
+        (Value::Float(a), Value::Float(b)) => match op {
+            Add => Value::Float(a + b),
+            Sub => Value::Float(a - b),
+            Mul => Value::Float(a * b),
+            Div => Value::Float(a / b),
+            Rem => Value::Float(a % b),
+            Eq => Value::Bool(a == b),
+            NotEq => Value::Bool(a != b),
+            Lt => Value::Bool(a < b),
+            Le => Value::Bool(a <= b),
+            Gt => Value::Bool(a > b),
+            Ge => Value::Bool(a >= b),
+            _ => return Err(RuntimeError::new(format!("{} on Float", op.as_str()))),
+        },
+        (Value::Bool(a), Value::Bool(b)) => match op {
+            And => Value::Bool(a && b),
+            Or => Value::Bool(a || b),
+            Eq => Value::Bool(a == b),
+            NotEq => Value::Bool(a != b),
+            _ => return Err(RuntimeError::new(format!("{} on Bool", op.as_str()))),
+        },
+        (Value::Bit(a), Value::Bit(b)) => match op {
+            BitAnd => Value::Bit(a & b),
+            BitOr => Value::Bit(a | b),
+            BitXor => Value::Bit(a ^ b),
+            Eq => Value::Bool(a == b),
+            NotEq => Value::Bool(a != b),
+            _ => return Err(RuntimeError::new(format!("{} on Bit", op.as_str()))),
+        },
+        (Value::Observable(a), Value::Observable(b)) => Value::Observable(match op {
+            Add => a.add(&b),
+            Sub => a.add(&b.scale(-1.0)),
+            Mul => a.mul(&b).map_err(RuntimeError::new)?,
+            _ => return Err(RuntimeError::new(format!("{} on Observable", op.as_str()))),
+        }),
+        (Value::Float(c), Value::Observable(o)) | (Value::Observable(o), Value::Float(c))
+            if op == Mul =>
+        {
+            Value::Observable(o.scale(c))
+        }
+        (a, b) => {
+            return Err(RuntimeError::new(format!(
+                "cannot apply `{}` to {a:?} and {b:?}",
+                op.as_str()
+            )));
+        }
+    })
+}
+
+fn convert(target: Ty, value: Value) -> Result<Value> {
+    Ok(match (target, value) {
+        (Ty::FLOAT, Value::Int(v)) => Value::Float(v as f64),
+        (Ty::INT, Value::Bit(v) | Value::Bool(v)) => Value::Int(i64::from(v)),
+        (Ty::BIT, Value::Bool(v)) => Value::Bit(v),
+        (Ty::BOOL, Value::Bit(v)) => Value::Bool(v),
+        (_, value) => value,
+    })
+}
+
+fn maths(math: Math, args: &[Value]) -> Result<Value> {
+    let float = |i: usize| match args.get(i) {
+        Some(Value::Float(v)) => Ok(*v),
+        other => Err(RuntimeError::new(format!(
+            "expected a Float, found {other:?}"
+        ))),
+    };
+    let to_int = |x: f64| -> Result<Value> {
+        if x.is_nan() {
+            return Err(RuntimeError::new("cannot convert NaN to an Int"));
+        }
+        // `as` saturates at the Int range, as spec/types.md §4 requires.
+        Ok(Value::Int(x as i64))
+    };
+    if let Some(Value::Int(a)) = args.first() {
+        return Ok(Value::Int(match (math, args.get(1)) {
+            (Math::Abs, _) => a.checked_abs().ok_or_else(overflow)?,
+            (Math::Min, Some(Value::Int(b))) => *a.min(b),
+            (Math::Max, Some(Value::Int(b))) => *a.max(b),
+            _ => return Err(RuntimeError::new(format!("{math:?} on Int"))),
+        }));
+    }
+    let x = float(0)?;
+    Ok(match math {
+        Math::Sin => Value::Float(x.sin()),
+        Math::Cos => Value::Float(x.cos()),
+        Math::Tan => Value::Float(x.tan()),
+        Math::Asin => Value::Float(x.asin()),
+        Math::Acos => Value::Float(x.acos()),
+        Math::Atan => Value::Float(x.atan()),
+        Math::Atan2 => Value::Float(x.atan2(float(1)?)),
+        Math::Sqrt => Value::Float(x.sqrt()),
+        Math::Exp => Value::Float(x.exp()),
+        Math::Ln => Value::Float(x.ln()),
+        Math::Abs => Value::Float(x.abs()),
+        Math::Min => Value::Float(x.min(float(1)?)),
+        Math::Max => Value::Float(x.max(float(1)?)),
+        Math::Trunc => to_int(x.trunc())?,
+        Math::Round => to_int(x.round())?,
+        Math::Floor => to_int(x.floor())?,
+        Math::Ceil => to_int(x.ceil())?,
+    })
+}
+
+// Expectation values.
+
+/// `<prep| observable |prep>`. Exact when the preparation measures nothing; otherwise the
+/// average over [`EXPECTATION_RUNS`] runs of the exact value in each run's outcome.
+fn expectation(
+    program: &Program,
+    prep: &Prep,
+    args: Vec<Value>,
+    observable: &Observable,
+    seed: u64,
+) -> Result<f64> {
+    let mut seeds = SmallRng::seed_from_u64(seed);
+    let mut total = 0.0;
+    for run in 0..EXPECTATION_RUNS {
+        let mut machine = Machine::new(program, seeds.random());
+        let qubits = machine.prepare(prep, args.clone())?;
+        total += machine.exact_expectation(observable, &qubits)?;
+        if run == 0 && !machine.measured {
+            return Ok(total);
+        }
+    }
+    Ok(total / EXPECTATION_RUNS as f64)
+}
+
+impl Machine<'_> {
+    /// Runs a preparation, returning its qubits in order.
+    fn prepare(&mut self, prep: &Prep, args: Vec<Value>) -> Result<Vec<usize>> {
+        let value = match prep {
+            Prep::Ket(state) => {
+                let mut qubits = Vec::new();
+                for c in state.chars() {
+                    let qubit = self.allocate()?;
+                    let gates: &[Gate] = match c {
+                        '1' => &[Gate::X],
+                        '+' => &[Gate::H],
+                        '-' => &[Gate::X, Gate::H],
+                        _ => &[],
+                    };
+                    for &gate in gates {
+                        self.execute(Op {
+                            gate,
+                            adjoint: false,
+                            params: Vec::new(),
+                            controls: Vec::new(),
+                            targets: vec![qubit],
+                        })?;
+                    }
+                    qubits.push(Value::Qubit(qubit));
+                }
+                Value::Aggregate(qubits)
+            }
+            Prep::Call(func, _) => self.call(*func, args)?,
+        };
+        let mut qubits = Vec::new();
+        value.qubits(&mut qubits);
+        Ok(qubits)
+    }
+
+    fn exact_expectation(&self, observable: &Observable, qubits: &[usize]) -> Result<f64> {
+        if observable.width() > qubits.len() {
+            return Err(RuntimeError::new(format!(
+                "the observable acts on qubit {}, but the preparation has {} qubit{}",
+                observable.width() - 1,
+                qubits.len(),
+                if qubits.len() == 1 { "" } else { "s" }
+            )));
+        }
+        let mut sum = PauliSum::new();
+        for (coeff, product) in &observable.terms {
+            let ops = product.iter().map(|&(i, p)| {
+                let pauli = match p {
+                    Pauli::X => ketrs::Pauli::X,
+                    Pauli::Y => ketrs::Pauli::Y,
+                    Pauli::Z => ketrs::Pauli::Z,
+                };
+                (qubits[i], pauli)
+            });
+            sum.add(*coeff, PauliString::new(ops).map_err(sim_error)?);
+        }
+        self.state.expectation(&sum).map_err(sim_error)
+    }
+}
