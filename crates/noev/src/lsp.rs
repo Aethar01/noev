@@ -20,7 +20,9 @@ use lsp_types::{
     TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 use noev_sema::check::{Callee, Res};
-use noev_sema::{Ty, TyKind, Typed};
+use noev_sema::{Circuits, Ty, TyKind, Typed};
+
+mod docs;
 use noev_syntax::ast::{ExprId, ExprKind, FnId, ItemKind, TypeKind};
 use noev_syntax::{Ast, Severity, Span};
 
@@ -215,20 +217,31 @@ struct Document {
     lines: Vec<u32>,
     utf8: bool,
     parsed: noev_syntax::Parsed,
+    tokens: Vec<noev_syntax::Token>,
     typed: Typed,
     found: Vec<noev_syntax::Diagnostic>,
+    /// How each function runs, when the program passed the other checks.
+    circuits: Option<Circuits>,
+    /// Why each function is not reversible, when the program is well typed.
+    reversible: Option<Vec<Option<(Span, String)>>>,
 }
 
 impl Document {
     /// Checks `text` as `noev check` does.
     fn new(text: String, utf8: bool) -> Self {
         let parsed = noev_syntax::parse(&text);
+        let tokens = noev_syntax::lex(&text).tokens;
         let (typed, type_errors) = noev_sema::check(&parsed.ast);
         let mut found = parsed.diagnostics.clone();
+        let mut circuits = None;
+        let mut reversible = None;
         if found.is_empty() && type_errors.is_empty() {
+            reversible = Some(noev_sema::reversibility(&parsed.ast, &typed));
             found.extend(noev_sema::check_ownership(&parsed.ast, &typed));
             if found.is_empty() {
-                found.extend(noev_sema::check_circuits(&parsed.ast, &typed).1);
+                let (info, warnings) = noev_sema::check_circuits(&parsed.ast, &typed);
+                found.extend(warnings);
+                circuits = Some(info);
             }
         }
         found.extend(type_errors);
@@ -240,8 +253,11 @@ impl Document {
             lines,
             utf8,
             parsed,
+            tokens,
             typed,
             found,
+            circuits,
+            reversible,
         }
     }
 
@@ -405,46 +421,295 @@ impl Document {
         )
     }
 
+    /// What hover shows: code (a signature, a declaration or a type), then an explanation.
     fn hover(&self, offset: u32) -> Option<Hover> {
-        let ast = self.ast();
-        let text = self
-            .function_named_at(offset)
-            .map(|f| self.signature(f))
-            .or_else(|| {
-                let local = self.local_declared_at(offset)?;
-                let local = self.typed.local(local);
-                Some(format!(
-                    "let {}: {}",
-                    ast.name(local.name),
-                    self.show(local.ty)
-                ))
-            })
-            .or_else(|| {
-                let expr = self.expr_at(offset)?;
-                if let Some(f) = self.called(expr)
-                    && matches!(
-                        ast.expr(expr).kind,
-                        ExprKind::Name(_) | ExprKind::Path(_) | ExprKind::MethodCall { .. }
-                    )
-                {
-                    return Some(self.signature(f));
-                }
-                if let ExprKind::Name(_) = ast.expr(expr).kind
-                    && let Some(Res::Local(local)) = self.typed.res.get(expr.index())
-                {
-                    let local = self.typed.local(*local);
-                    return Some(format!("{}: {}", ast.name(local.name), self.show(local.ty)));
-                }
-                let ty = *self.typed.expr_types.get(expr.index())?;
-                (ty != Ty::ERROR).then(|| self.show(ty))
-            })?;
+        let (code, docs) = self.describe(offset)?;
+        let mut value = format!("```noev\n{code}\n```");
+        if !docs.is_empty() {
+            value.push_str("\n\n");
+            value.push_str(&docs);
+        }
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!("```noev\n{text}\n```"),
+                value,
             }),
             range: None,
         })
+    }
+
+    fn describe(&self, offset: u32) -> Option<(String, String)> {
+        let ast = self.ast();
+        if let Some(found) = self.describe_token(offset) {
+            return Some(found);
+        }
+        if let Some(f) = self.function_named_at(offset) {
+            return Some(self.describe_fn(f));
+        }
+        if let Some(found) = self.describe_declared_struct_or_field(offset) {
+            return Some(found);
+        }
+        if let Some(local) = self.local_declared_at(offset) {
+            return Some(self.describe_local(local));
+        }
+        let expr = self.expr_at(offset)?;
+        let kind = ast.expr(expr).kind;
+        let names_callee = matches!(
+            kind,
+            ExprKind::Name(_) | ExprKind::Path(_) | ExprKind::MethodCall { .. }
+        );
+        if names_callee {
+            if let Some(f) = self.called(expr) {
+                return Some(self.describe_fn(f));
+            }
+            if let Some(callee) = self.callee(expr) {
+                match callee {
+                    Callee::Builtin(b) => return Some(docs::builtin(b)),
+                    Callee::Convert(ty) => {
+                        return Some(docs::builtin(noev_sema::prelude::Builtin::Convert(ty)));
+                    }
+                    Callee::Fn(_) => {}
+                }
+            }
+        }
+        match (kind, self.typed.res.get(expr.index()).copied()) {
+            (ExprKind::Name(_), Some(Res::Local(local))) => {
+                return Some(self.describe_local(local));
+            }
+            (_, Some(Res::Builtin(b))) => return Some(docs::builtin(b)),
+            (ExprKind::Name(name), _) => {
+                if let Some(found) = self.describe_struct(name) {
+                    return Some(found);
+                }
+            }
+            (ExprKind::Field { base, name }, _) => {
+                if let Some(found) = self.describe_field_of(base, name) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+        let ty = *self.typed.expr_types.get(expr.index())?;
+        (ty != Ty::ERROR).then(|| (self.show(ty), String::new()))
+    }
+
+    /// Keywords, kets and bras.
+    fn describe_token(&self, offset: u32) -> Option<(String, String)> {
+        use noev_syntax::TokenKind;
+        let token = self
+            .tokens
+            .iter()
+            .find(|t| t.span.start <= offset && offset < t.span.end)?;
+        let text = &self.text[token.span.start as usize..token.span.end as usize];
+        match token.kind {
+            TokenKind::Ket => Some(docs::ket(text)),
+            TokenKind::Bra => Some(docs::bra(text)),
+            TokenKind::Ident
+            | TokenKind::Mut
+            | TokenKind::Ref
+            | TokenKind::Sample
+            | TokenKind::Unsafe
+            | TokenKind::Assert => {
+                // A contextual keyword used as a name is a name.
+                let is_name = self
+                    .ast()
+                    .all_exprs()
+                    .iter()
+                    .any(|e| e.span == token.span && matches!(e.kind, ExprKind::Name(_)))
+                    || self.typed.locals.iter().any(|l| l.span == token.span);
+                if is_name {
+                    return None;
+                }
+                let (code, doc) = docs::keyword(text)?;
+                Some((code.to_string(), doc.to_string()))
+            }
+            _ => None,
+        }
+    }
+
+    /// A function: its signature and doc comment, how it runs, and whether it is reversible.
+    fn describe_fn(&self, f: FnId) -> (String, String) {
+        let decl = self.ast().function(f);
+        let mut notes = Vec::new();
+        if let Some(doc) = self.doc_comment(decl.span) {
+            notes.push(doc);
+        }
+        let mut facts = Vec::new();
+        if let Some(info) = self.circuits.as_ref().and_then(|c| c.fns.get(f.index()))
+            && info.quantum
+        {
+            let line = |span: Span| self.position(span.start).line + 1;
+            let how = if let Some((span, what)) = &info.not_circuit {
+                format!(
+                    "not a circuit: a measurement result is {what} (line {})",
+                    line(*span)
+                )
+            } else if let Some((span, why)) = &info.feedback_unsupported {
+                format!(
+                    "a circuit, but run shot by shot: {why} (line {})",
+                    line(*span)
+                )
+            } else if let Some(span) = info.releases {
+                format!(
+                    "a circuit, but run shot by shot: it calls `release` (line {})",
+                    line(span)
+                )
+            } else {
+                "a circuit: sampled from one simulation when repeated".to_string()
+            };
+            facts.push(format!("**Runs as** {how}."));
+        }
+        if let Some(reversible) = &self.reversible
+            && let Some(entry) = reversible.get(f.index())
+        {
+            let line = |span: Span| self.position(span.start).line + 1;
+            facts.push(match entry {
+                None if decl.is_rev => {
+                    "**Reversible** (declared `rev`): usable under `adj` and in `ctrl`.".into()
+                }
+                None => "**Reversible** (inferred): usable under `adj` and in `ctrl`.".into(),
+                Some((span, why)) => format!("**Not reversible**: {why} (line {}).", line(*span)),
+            });
+        }
+        if !facts.is_empty() {
+            notes.push(facts.join("  \n"));
+        }
+        (self.signature(f), notes.join("\n\n"))
+    }
+
+    fn describe_local(&self, local: noev_sema::check::LocalId) -> (String, String) {
+        let ast = self.ast();
+        let info = self.typed.local(local);
+        let is_param = self.typed.fns.iter().any(|f| f.params.contains(&local));
+        let name = ast.name(info.name);
+        let ty = self.show(info.ty);
+        let code = if is_param {
+            format!("{name}: {ty}")
+        } else if info.mutable {
+            format!("let mut {name}: {ty}")
+        } else {
+            format!("let {name}: {ty}")
+        };
+        let linear = self.typed.types.linearity(info.ty) == noev_sema::ty::Kind::Linear;
+        let doc = if linear {
+            "Holds qubits, so it must be consumed exactly once: measured, discarded, moved \
+             (`mv`) or returned."
+                .to_string()
+        } else {
+            String::new()
+        };
+        (code, doc)
+    }
+
+    /// The struct called `name`: its fields and methods, and its doc comment.
+    fn describe_struct(&self, name: noev_syntax::Symbol) -> Option<(String, String)> {
+        let ast = self.ast();
+        ast.all_items().iter().find_map(|item| match item.kind {
+            ItemKind::Struct {
+                name: n,
+                fields,
+                methods,
+                ..
+            } if n == name => {
+                let mut code = format!("struct {} {{\n", ast.name(name));
+                for field in ast.list(fields) {
+                    let ty = self.field_type(name, field.name).unwrap_or_default();
+                    code.push_str(&format!("    {}: {ty}\n", ast.name(field.name)));
+                }
+                for &m in ast.list(methods) {
+                    code.push_str(&format!("    {}\n", self.signature(m)));
+                }
+                code.push('}');
+                Some((code, self.doc_comment(item.span).unwrap_or_default()))
+            }
+            _ => None,
+        })
+    }
+
+    /// A struct or field where it is declared.
+    fn describe_declared_struct_or_field(&self, offset: u32) -> Option<(String, String)> {
+        let ast = self.ast();
+        for item in ast.all_items() {
+            let ItemKind::Struct {
+                name,
+                name_span,
+                fields,
+                ..
+            } = item.kind
+            else {
+                continue;
+            };
+            if name_span.start <= offset && offset < name_span.end {
+                return self.describe_struct(name);
+            }
+            for field in ast.list(fields) {
+                if field.span.start <= offset && offset < field.span.end {
+                    let ty = self.field_type(name, field.name).unwrap_or_default();
+                    let doc = self.doc_comment(field.span).unwrap_or_default();
+                    return Some((format!("{}: {ty}", ast.name(field.name)), doc));
+                }
+            }
+        }
+        None
+    }
+
+    /// The field `name` of `base`'s struct.
+    fn describe_field_of(
+        &self,
+        base: ExprId,
+        name: noev_syntax::Symbol,
+    ) -> Option<(String, String)> {
+        let ty = self
+            .typed
+            .types
+            .deref(*self.typed.expr_types.get(base.index())?);
+        let TyKind::Struct(s) = *self.typed.types.kind(ty) else {
+            return None;
+        };
+        let def = &self.typed.types.structs[s.index()];
+        let span = self.field_of(def.span, name)?;
+        let ty = self.field_type(def.name, name).unwrap_or_default();
+        let doc = self.doc_comment(span).unwrap_or_default();
+        Some((format!("{}: {ty}", self.ast().name(name)), doc))
+    }
+
+    fn field_type(
+        &self,
+        strukt: noev_syntax::Symbol,
+        field: noev_syntax::Symbol,
+    ) -> Option<String> {
+        let def = self.typed.types.structs.iter().find(|d| d.name == strukt)?;
+        let &(_, ty) = def.fields.iter().find(|(n, _)| *n == field)?;
+        Some(self.show(ty))
+    }
+
+    /// The `///` lines directly above the declaration starting at `span`.
+    fn doc_comment(&self, span: Span) -> Option<String> {
+        let line = self.position(span.start).line as usize;
+        let mut docs = Vec::new();
+        for l in (0..line).rev() {
+            let start = self.lines[l] as usize;
+            let end = self
+                .lines
+                .get(l + 1)
+                .map_or(self.text.len(), |&e| e as usize);
+            let text = self.text[start..end].trim();
+            match text.strip_prefix("///") {
+                Some(doc) => docs.push(doc.strip_prefix(' ').unwrap_or(doc).to_string()),
+                None => break,
+            }
+        }
+        docs.reverse();
+        (!docs.is_empty()).then(|| docs.join("\n"))
+    }
+
+    /// What `expr` calls, or names as the callee of a call.
+    fn callee(&self, expr: ExprId) -> Option<Callee> {
+        let call = match self.ast().expr(expr).kind {
+            ExprKind::Call { .. } | ExprKind::MethodCall { .. } => expr,
+            _ => self.call_of(expr)?,
+        };
+        self.typed.callees.get(call.index()).copied().flatten()
     }
 
     /// The function whose name is at `offset`, in its declaration.

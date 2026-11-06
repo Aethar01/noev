@@ -195,3 +195,74 @@ fn hover_definition_and_symbols() {
     assert_eq!(names, ["Experiment", "bell", "main"]);
     client.stop();
 }
+
+const DOCUMENTED: &str = "/// Flips `q` when `flip` is 1.
+fn correct(q: mut Qubit, flip: Bit) {
+    if flip == 1 { q.x() }
+}
+
+fn bell() -> (Bit, Bit) {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    let m = mv a.measure()
+    correct(b, m)
+    (m, mv b.measure())
+}
+
+fn main() {
+    let d = sample 10 { bell() }
+    print(d.count((0, 0)), Float::PI)
+}
+";
+
+fn hover_text(client: &mut Client, uri: &str, line: u32, character: u32) -> String {
+    let hover = client.at("textDocument/hover", uri, line, character);
+    hover["contents"]["value"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[test]
+fn hover_explains_functions_builtins_and_keywords() {
+    let mut client = Client::start();
+    let uri = "file:///tmp/documented.nv";
+    client.open(uri, DOCUMENTED);
+    assert!(client.diagnostics().is_empty());
+
+    // A function: signature, doc comment, how it runs, whether it is reversible.
+    let text = hover_text(&mut client, uri, 10, 5);
+    assert!(
+        text.contains("fn correct(q: mut Qubit, flip: Bit)"),
+        "{text}"
+    );
+    assert!(text.contains("Flips `q` when `flip` is 1."), "{text}");
+    assert!(text.contains("**Runs as** a circuit"), "{text}");
+    assert!(text.contains("**Reversible** (inferred)"), "{text}");
+    let text = hover_text(&mut client, uri, 5, 4);
+    assert!(
+        text.contains("**Not reversible**: it creates qubits"),
+        "{text}"
+    );
+
+    // Built-ins: a gate, measure, a distribution method, a constant.
+    assert!(hover_text(&mut client, uri, 8, 16).contains("Pauli X"));
+    assert!(hover_text(&mut client, uri, 9, 18).contains("Measures the qubit in the Z basis"));
+    assert!(hover_text(&mut client, uri, 16, 13).contains("How many runs gave `x`"));
+    assert!(hover_text(&mut client, uri, 16, 33).contains("π = 3.14159"));
+
+    // Keywords and literals.
+    assert!(hover_text(&mut client, uri, 8, 4).contains("under quantum control"));
+    assert!(hover_text(&mut client, uri, 9, 12).contains("Gives the value away"));
+    assert!(hover_text(&mut client, uri, 15, 13).contains("Runs the block `n` times"));
+    let text = hover_text(&mut client, uri, 6, 13);
+    assert!(
+        text.contains("|+>: Qubit") && text.contains("A fresh qubit: |+⟩"),
+        "{text}"
+    );
+
+    // A variable holding qubits says it must be consumed.
+    assert!(hover_text(&mut client, uri, 7, 8).contains("must be consumed exactly once"));
+    client.stop();
+}

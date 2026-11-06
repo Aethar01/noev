@@ -11,5 +11,5 @@ pub mod ty;
 
 pub use check::{Typed, check};
 pub use circuit::{CircuitInfo, Circuits, check_circuits};
-pub use ownership::check_ownership;
+pub use ownership::{check_ownership, reversibility};
 pub use ty::{Ty, TyKind, Types};

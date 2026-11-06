@@ -16,6 +16,15 @@ Source files are UTF-8 with the extension `.nv`.
 `// line comment` and `/* block comment */`. Block comments nest. Spaces and tabs only
 separate tokens. Line breaks can end statements (§1, Line breaks).
 
+**Doc comments.** Lines starting with `///` directly above a function, method, struct or
+field document it. They are ordinary comments to the compiler; tools such as the language
+server show them.
+
+```noev
+/// The receiver's corrections, from the sender's two measurements.
+fn correct(receiver: mut Qubit, m1: Bit, m2: Bit) { … }
+```
+
 ### Identifiers
 
 `[A-Za-z_][A-Za-z0-9_]*`, excluding reserved keywords. `_` on its own is a wildcard

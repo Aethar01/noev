@@ -42,6 +42,13 @@ Then run `:TSInstall noev` once, and `:TSUpdate noev` after the grammar changes.
 - **Indentation and folding** by blocks.
 - **Diagnostics as you type**, the same as `noev check`: errors with their codes (`N003`) and
   help, and warnings for runs that go shot by shot.
-- **Hover:** the type of a variable or expression, or a function's signature.
+- **Hover** (`K`):
+  - functions: the signature, the `///` doc comment, whether it runs as a circuit (and why
+    not), and whether it is reversible (and why not);
+  - structs and fields, with their doc comments; variables, with a note when they hold
+    qubits that must be consumed;
+  - built-ins (gates, `measure`, `discard`, observables, maths, `Distribution` methods,
+    constants), keywords (`mv`, `ctrl`, `adj`, `sample`, `within`, …), and what a ket or
+    bra prepares or measures.
 - **Go to definition** (`gd`): variables, functions and methods, structs and fields.
 - **Document symbols:** functions, structs, fields and methods.

@@ -87,6 +87,9 @@
 
 (line_comment) @comment
 
+((line_comment) @comment.documentation
+  (#match? @comment.documentation "^///"))
+
 (block_comment) @comment
 
 ; Keywords

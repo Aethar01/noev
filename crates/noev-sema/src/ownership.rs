@@ -176,6 +176,15 @@ struct Owner<'a> {
 // Reversibility inference
 // ---------------------------------------------------------------------------------------
 
+/// For each function, where and why it is not reversible, or `None` if it is (declared `rev`,
+/// or inferred to be). For tools such as the language server.
+pub fn reversibility(ast: &Ast, typed: &Typed) -> Vec<Option<(Span, String)>> {
+    infer_reversibility(ast, typed)
+        .into_iter()
+        .map(|r| r.map(|i| (i.span, i.why)))
+        .collect()
+}
+
 /// For each function, why it is not reversible, or `None` if it is. Functions without `rev`
 /// are inferred from their bodies, repeating until nothing changes, since they can call each
 /// other.

@@ -5,6 +5,14 @@ Notable changes to Noev, the language and this compiler. The format follows
 [Semantic Versioning](https://semver.org/), with breaking changes allowed in minor versions
 before 1.0.
 
+## [Unreleased]
+
+### Editors
+
+- Hover explains more: doc comments (`///`, now in `spec/grammar.md`), whether a function
+  runs as a circuit and whether it is reversible, struct fields and methods, built-ins,
+  keywords, and kets and bras.
+
 ## [0.1.0] - 2026-11-06
 
 The first release: the language of `spec/`, apart from what it marks *Reserved*, and a
