@@ -244,7 +244,7 @@ impl Backend for Recorder<'_> {
 }
 
 /// A backend that runs nothing: it keeps every circuit job it is given, with its shots, so
-/// circuits can be saved without simulating them. This is how `noev build --emit=qasm3` works.
+/// circuits can be saved without simulating them. This is how `noev export` (and `run --backend=export`) works.
 #[derive(Default)]
 pub struct Exporter {
     /// The circuits recorded so far, in order, and how many shots each asked for.
