@@ -35,7 +35,8 @@ compiler that checks, runs and exports it.
   ketrs `IfElse`, `While` and `Assign`; other runs go shot by shot, and the compiler says why.
 - Expectation values are exact on ketrs, and estimated by measuring grouped terms on backends
   that can't see the state.
-- A backend interface at circuit and gate level, with ketrs as the first backend.
+- A backend interface at circuit and gate level, with ketrs as the first backend: an
+  optional dependency (the `ketrs` feature, on by default).
 - Diagnostics with source excerpts, labels and help, or one line each
   (`--message-format=short`); runtime errors point at the failing expression.
 - Conformance suites `tests/ui` (errors) and `tests/run` (output), and benchmarks for every

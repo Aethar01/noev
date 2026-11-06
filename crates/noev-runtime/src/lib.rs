@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 pub use backend::Backend;
+#[cfg(feature = "ketrs")]
 pub use backend::ketrs::Ketrs;
 pub use machine::{Machine, Output, RuntimeError};
 use machine::{Mode, Recording};
@@ -93,6 +94,7 @@ pub struct Counts {
     pub shots: usize,
 }
 
+#[cfg(feature = "ketrs")]
 /// Runs `entry` `shots` times on ketrs and counts its results, keyed by how each result prints
 /// without type information. A convenience for tests; programs use `sample`.
 pub fn run(

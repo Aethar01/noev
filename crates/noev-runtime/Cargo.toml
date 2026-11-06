@@ -9,12 +9,20 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
-# From crates.io once published; until then the release tag.
-ketrs = { git = "https://github.com/Aethar01/ketrs", tag = "v0.1.1" }
+# The ketrs simulator, one backend among possible others.
+ketrs = { version = "0.1.1", optional = true }
 noev-ir = { path = "../noev-ir" }
 noev-sema = { path = "../noev-sema" }
 noev-syntax = { path = "../noev-syntax" }
 rand = { version = "0.9", default-features = false, features = ["small_rng"] }
+
+[features]
+default = ["ketrs"]
+
+# The end-to-end tests run programs on ketrs.
+[[test]]
+name = "run"
+required-features = ["ketrs"]
 
 [lints]
 workspace = true

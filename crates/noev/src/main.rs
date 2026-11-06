@@ -57,7 +57,7 @@ enum Command {
         messages: MessageOptions,
     },
 
-    /// Run a program, with its quantum parts on a backend (ketrs unless chosen)
+    /// Run a program, with its quantum parts on a backend (the ketrs simulator unless chosen)
     Run {
         /// The `.nv` file to run
         file: PathBuf,
@@ -66,9 +66,9 @@ enum Command {
         #[arg(long, value_name = "N")]
         seed: Option<u64>,
 
-        /// What runs the quantum parts
-        #[arg(long, value_enum, default_value_t = BackendChoice::Ketrs)]
-        backend: BackendChoice,
+        /// What runs the quantum parts [default: ketrs, when noev is built with it]
+        #[arg(long, value_enum)]
+        backend: Option<BackendChoice>,
 
         /// Save every circuit the run sends to the backend as OpenQASM 3, one file per job,
         /// in this directory
@@ -100,7 +100,7 @@ enum Command {
 
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
 enum BackendChoice {
-    /// The ketrs statevector simulator
+    /// The ketrs statevector simulator (the `ketrs` feature, on by default)
     Ketrs,
     /// Record each circuit instead of running it, and save it; nothing quantum runs, and
     /// what the program prints is dropped, since its results are not known
@@ -261,6 +261,14 @@ fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) 
     }
 }
 
+/// The simulator `noev run` uses, if this build has one.
+fn simulator() -> Option<&'static dyn noev_runtime::Backend> {
+    #[cfg(feature = "ketrs")]
+    return Some(&noev_runtime::Ketrs);
+    #[cfg(not(feature = "ketrs"))]
+    return None;
+}
+
 /// `noev export` and `run --backend=export`: runs the program's classical code with every
 /// circuit recorded instead of run, so nothing is simulated, then writes the circuits.
 fn export(
@@ -358,7 +366,7 @@ fn report_runtime_error(
 fn run(
     file: &Path,
     seed: Option<u64>,
-    backend: BackendChoice,
+    backend: Option<BackendChoice>,
     circuits: Option<&Path>,
     format: MessageFormat,
 ) -> ExitCode {
@@ -367,7 +375,7 @@ fn run(
         Ok(checked) => checked,
         Err(code) => return code,
     };
-    if backend == BackendChoice::Export {
+    if backend == Some(BackendChoice::Export) {
         return export(file, &checked, circuits, format);
     }
     let program = noev_ir::lower(
@@ -394,7 +402,14 @@ fn run(
         stdout,
         stderr: Box::new(std::io::stderr()),
     };
-    let backend = noev_runtime::backend::Recorder::new(&noev_runtime::Ketrs);
+    let Some(simulator) = simulator() else {
+        anstream::eprintln!(
+            "{ERROR}error:{ERROR:#} this noev was built without a simulator (its `ketrs` feature); \
+             `--backend=export` saves the program's circuits instead"
+        );
+        return ExitCode::from(2);
+    };
+    let backend = noev_runtime::backend::Recorder::new(simulator);
     let result = noev_runtime::run_main(&program, &backend, seed, output);
     if let Some(dir) = circuits
         && let Err(code) = save_circuits(file, dir, &backend.jobs.borrow(), format)

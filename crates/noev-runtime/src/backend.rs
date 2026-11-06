@@ -4,6 +4,7 @@
 //! gate level (a [`Session`] taking one operation at a time), or both. The runtime chooses
 //! between them for each run, as `spec/runtime.md` §3 says.
 
+#[cfg(feature = "ketrs")]
 pub mod ketrs;
 
 use noev_sema::prelude::Gate;

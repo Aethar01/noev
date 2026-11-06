@@ -16,10 +16,20 @@ path = "src/main.rs"
 noev-syntax = { path = "../noev-syntax" }
 noev-sema = { path = "../noev-sema" }
 noev-ir = { path = "../noev-ir" }
-noev-runtime = { path = "../noev-runtime" }
+noev-runtime = { path = "../noev-runtime", default-features = false }
 clap = { version = "4.6.7", features = ["derive"] }
 anstream = "1"
 anstyle = "1"
+
+[features]
+default = ["ketrs"]
+# The ketrs simulator as a backend for `noev run`. Without it, only `--backend=export` runs.
+ketrs = ["noev-runtime/ketrs"]
+
+# The run suite needs a simulator.
+[[test]]
+name = "run"
+required-features = ["ketrs"]
 
 [lints]
 workspace = true

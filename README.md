@@ -61,6 +61,10 @@ Noev needs Rust 1.88 or later.
 cargo install --git https://github.com/Aethar01/noev noev
 ```
 
+The [ketrs](https://crates.io/crates/ketrs) simulator is built in through the `ketrs`
+feature, on by default. `--no-default-features` builds Noev without a simulator: it still
+checks, builds and exports programs, but `noev run` needs `--backend=export`.
+
 ## Use
 
 ```

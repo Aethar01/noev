@@ -23,6 +23,10 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+      - name: Without the simulator
+        run: |
+          cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+          cargo test --workspace --no-default-features
       - name: Examples
         run: |
           for example in examples/*.nv; do
