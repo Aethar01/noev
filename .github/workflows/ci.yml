@@ -44,7 +44,7 @@ jobs:
         with:
           node-version: 22
       - name: Install tree-sitter
-        run: npm install -g tree-sitter-cli@0.26
+        run: npm install -g tree-sitter-cli@0.26.9
       - name: Generated parser is up to date
         run: |
           tree-sitter generate
