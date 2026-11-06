@@ -226,7 +226,9 @@ stmt        = "let" [ "mut" ] pattern [ ":" type ] "=" expr
             | "assert" expr
             | expr ;
 
-pattern     = IDENT | "_" | "(" pattern { "," pattern } [ "," ] ")" ;
+pattern     = IDENT | "_"
+            | "(" pattern { "," pattern } [ "," ] ")"      (* a tuple *)
+            | "[" pattern { "," pattern } [ "," ] "]" ;    (* an array, one pattern per element *)
 assign_op   = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
 ```
 

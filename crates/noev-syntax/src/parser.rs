@@ -715,22 +715,31 @@ impl Parser<'_> {
                 self.bump();
                 PatKind::Name(self.intern(start))
             }
-            LParen => {
-                self.bump();
+            LParen | LBracket => {
+                let close = if self.bump().kind == LParen {
+                    RParen
+                } else {
+                    RBracket
+                };
                 let mark = self.ast.mark::<PatId>();
-                while !matches!(self.kind(), RParen | Eof) {
+                while !matches!(self.kind(), RParen | RBracket | Eof) {
                     let pat = self.pat();
                     self.ast.push_to(pat);
                     if !self.eat(Comma) {
                         break;
                     }
                 }
-                self.expect(RParen, "`)` or `,`");
-                PatKind::Tuple(self.ast.finish(mark))
+                if close == RParen {
+                    self.expect(RParen, "`)` or `,`");
+                    PatKind::Tuple(self.ast.finish(mark))
+                } else {
+                    self.expect(RBracket, "`]` or `,`");
+                    PatKind::Array(self.ast.finish(mark))
+                }
             }
             _ => {
                 if !self.reserved_word() {
-                    self.expected("a variable name or `(`");
+                    self.expected("a variable name, `(` or `[`");
                 }
                 PatKind::Wildcard
             }

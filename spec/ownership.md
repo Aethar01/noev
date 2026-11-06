@@ -158,7 +158,8 @@ fn f() {
 At the end of every scope, and at every `return` and `break`, each linear place owned by
 that scope must have been moved. A qubit is consumed by `measure`, `discard`, moving it into
 something that is itself consumed, or returning it. Discarding a linear value as a block's
-unused final expression is also N003.
+unused final expression is also N003, and so is binding one to `_`, alone or inside a tuple
+or array pattern (`let [a, _] = mv pair`).
 
 There is never an implicit measure or discard. If `q` is entangled with a qubit the program
 keeps, discarding `q` acts as a measurement and collapses the kept qubit. The programmer has

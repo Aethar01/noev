@@ -691,6 +691,8 @@ pub enum PatKind {
     Wildcard,
     /// `(a, b)`.
     Tuple(List<PatId>),
+    /// `[a, b]`: one pattern per element of an array.
+    Array(List<PatId>),
 }
 
 /// A type annotation and where it is.

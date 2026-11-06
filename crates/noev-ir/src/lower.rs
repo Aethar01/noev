@@ -484,6 +484,12 @@ impl Builder<'_> {
                     self.bind(p, value.with(Proj::Field(i as u32)));
                 }
             }
+            ast::PatKind::Array(pats) => {
+                for (i, &p) in self.ast.list(pats).iter().enumerate() {
+                    let index = Operand::Const(Const::Int(i as i64));
+                    self.bind(p, value.with(Proj::Index(index)));
+                }
+            }
         }
     }
 

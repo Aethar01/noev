@@ -583,7 +583,8 @@ impl Owner<'_> {
                 let carried = self.expr(init, Use::Value);
                 let poisoned = self.diagnostics.len() > errors;
                 let mut bound = Vec::new();
-                self.bind(pat, poisoned, &mut bound);
+                let ty = self.typed.ty(init);
+                self.bind(pat, ty, poisoned, &mut bound);
                 match bound.as_slice() {
                     [local] if !carried.is_empty() => {
                         for &i in &carried {
@@ -624,7 +625,10 @@ impl Owner<'_> {
         }
     }
 
-    fn bind(&mut self, pat: PatId, poisoned: bool, bound: &mut Vec<LocalId>) {
+    /// Declares the locals a pattern binds from a value of type `ty`. N003 for a `_` that
+    /// would throw qubits away.
+    fn bind(&mut self, pat: PatId, ty: Ty, poisoned: bool, bound: &mut Vec<LocalId>) {
+        let types = &self.typed.types;
         match self.ast.pat(pat).kind {
             PatKind::Name(_) => {
                 if let Some(local) = self.typed.pat_locals[pat.index()] {
@@ -632,10 +636,30 @@ impl Owner<'_> {
                     bound.push(local);
                 }
             }
-            PatKind::Wildcard => {}
+            PatKind::Wildcard => {
+                if !poisoned && types.linearity(ty) == Kind::Linear {
+                    let span = self.ast.pat(pat).span;
+                    self.error("N003", span, "`_` would throw away qubits").help =
+                        Some("bind them to a name and consume them, or measure them".into());
+                }
+            }
             PatKind::Tuple(pats) => {
+                let elems = match types.kind(ty) {
+                    TyKind::Tuple(elems) => elems.to_vec(),
+                    _ => Vec::new(),
+                };
+                for (i, &p) in self.ast.list(pats).iter().enumerate() {
+                    let ty = elems.get(i).copied().unwrap_or(Ty::ERROR);
+                    self.bind(p, ty, poisoned, bound);
+                }
+            }
+            PatKind::Array(pats) => {
+                let elem = match *types.kind(ty) {
+                    TyKind::Array(elem, _) => elem,
+                    _ => Ty::ERROR,
+                };
                 for &p in self.ast.list(pats) {
-                    self.bind(p, poisoned, bound);
+                    self.bind(p, elem, poisoned, bound);
                 }
             }
         }

@@ -943,7 +943,7 @@ impl<'a> Walker<'a> {
                 }
             }
             PatKind::Wildcard => {}
-            PatKind::Tuple(pats) => {
+            PatKind::Tuple(pats) | PatKind::Array(pats) => {
                 for &p in self.cx.ast.list(pats) {
                     self.taint_pattern(p, tainted);
                 }

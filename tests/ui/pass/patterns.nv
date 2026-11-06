@@ -1,0 +1,14 @@
+// Destructuring tuples and arrays, of classical values and of qubits.
+
+fn main() {
+    let (x, y) = (1, 2.5)
+    let [p, q, r] = [1, 2, 3]
+    print(x, y, p + q + r)
+
+    let pair = |+0>
+    ctrl pair[0] { pair[1].x() }
+    let [a, b] = mv pair
+    let (m, n) = (mv a.measure(), mv b.measure())
+    let [_, keep] = [m, n]
+    print(keep)
+}

@@ -16,3 +16,16 @@ fn early_return(stop: Bool) {
 fn discarded_final_value() {
     |0>                             //~ N003
 }
+
+fn wildcard() {
+    let _ = |0>                     //~ N003
+}
+
+fn wildcard_in_patterns() {
+    let pair = |00>
+    let [a, _] = mv pair            //~ N003
+    mv a.discard()
+    let t = (|0>, 1)
+    let (c, _) = mv t
+    mv c.discard()
+}

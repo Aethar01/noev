@@ -670,6 +670,25 @@ impl Checker<'_> {
                     self.bind(pat, ty, mutable);
                 }
             }
+            PatKind::Array(pats) => {
+                let pats = ast.list(pats);
+                let elem = match *self.t.types.kind(ty) {
+                    TyKind::Array(elem, len) if len as usize == pats.len() => elem,
+                    _ if self.t.types.is_wildcard(ty) => Ty::ERROR,
+                    _ => {
+                        let message = format!(
+                            "this pattern takes an array of {}, but the value is {}",
+                            pats.len(),
+                            self.show(ty)
+                        );
+                        self.error(node.span, message);
+                        Ty::ERROR
+                    }
+                };
+                for &pat in pats {
+                    self.bind(pat, elem, mutable);
+                }
+            }
         }
     }
 }
