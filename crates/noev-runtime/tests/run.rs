@@ -428,13 +428,52 @@ fn circuit_and_shot_paths_agree() {
 }
 
 #[test]
-fn feedback_runs_shot_by_shot_for_now() {
+fn feedback_ifs_are_part_of_the_circuit() {
     let (counts, circuit) = sampled(
         "fn test() -> Bit {\n let a = |+>\n let b = |0>\n ctrl a { b.x() }\n if mv a.measure() { b.x() }\n mv b.measure()\n}",
         200,
     );
-    assert!(!circuit);
+    assert!(circuit);
     assert_eq!(counts, [("0".to_string(), 200)]);
+}
+
+/// Teleportation: the corrections depend on two measurements, combined with logic, and the
+/// teleported state comes out exactly.
+const TELEPORT: &str = "
+fn test() -> (Bit, Bit, Bit) {
+    let msg = |0>
+    msg.ry(2.0 * Float::PI / 3.0)
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    ctrl msg { a.x() }
+    msg.h()
+    let m1 = mv msg.measure()
+    let m2 = mv a.measure()
+    let phase = m1 == 1
+    if phase { b.z() }
+    if m2 == 1 and not false { b.x() }
+    // Undo the preparation: b should now be |0⟩.
+    b.ry(-2.0 * Float::PI / 3.0)
+    (m1, m2, mv b.measure())
+}";
+
+#[test]
+fn teleportation_is_one_circuit() {
+    let (counts, circuit) = sampled(TELEPORT, 4000);
+    assert!(circuit);
+    assert!(counts.iter().all(|(k, _)| k.ends_with('0')), "{counts:?}");
+    assert_eq!(counts.len(), 4, "{counts:?}");
+}
+
+#[test]
+fn measurement_loops_still_run_shot_by_shot() {
+    let (counts, circuit) = sampled(
+        "fn test() -> Bit {\n let mut done = false\n let q = |0>\n while not done {\n let t = |+>\n done = mv t.measure() == 1\n }\n q.x()\n mv q.measure()\n}",
+        50,
+    );
+    assert!(!circuit);
+    assert_eq!(counts, [("1".to_string(), 50)]);
 }
 
 #[test]
@@ -596,6 +635,12 @@ fn qasm_round_trip(source: &str) -> usize {
 
 #[test]
 fn qasm_reads_back_as_the_same_circuit() {
+    assert_eq!(
+        qasm_round_trip(&format!(
+            "{TELEPORT}\nfn main() {{ print(sample 1000 {{ test() }}) }}"
+        )),
+        1
+    );
     let jobs = qasm_round_trip(
         "rev fn tee(q: mut Qubit) { q.t() }
         fn main() {
@@ -615,8 +660,17 @@ fn qasm_reads_back_as_the_same_circuit() {
                 adj q.u(0.4, 0.5, 0.6)
                 mv q.measure()
             }
-            print(a, b)
+            let c = sample 300 {
+                let x = |+>
+                let y = |+>
+                let z = |0>
+                let p = mv x.measure()
+                let r = mv y.measure()
+                if p != r or not (p == 1) { z.x() } else { z.h() }
+                (p, r, mv z.measure())
+            }
+            print(a, b, c)
         }",
     );
-    assert_eq!(jobs, 2);
+    assert_eq!(jobs, 3);
 }

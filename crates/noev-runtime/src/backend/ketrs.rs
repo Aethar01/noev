@@ -7,7 +7,7 @@ use noev_sema::prelude::Gate;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 
-use super::{Backend, BackendError, Circuit, Counts, Instruction, Op, Pauli, Session};
+use super::{Backend, BackendError, Circuit, Condition, Counts, Instruction, Op, Pauli, Session};
 
 /// The most qubits a statevector holds: 2^30 amplitudes take 16 GiB.
 const MAX_QUBITS: usize = 30;
@@ -37,26 +37,10 @@ impl Backend for Ketrs {
         if circuit.qubits > MAX_QUBITS || circuit.clbits > 64 {
             return None;
         }
-        let mut converted = ketrs::Circuit::with_clbits(circuit.qubits, circuit.clbits);
-        for instruction in &circuit.instructions {
-            match instruction {
-                Instruction::Gate(op) => {
-                    let operation = match operation(op) {
-                        Ok(operation) => operation,
-                        Err(e) => return Some(Err(e)),
-                    };
-                    if let Err(e) = converted.push(operation) {
-                        return Some(Err(sim_error(e)));
-                    }
-                }
-                &Instruction::Measure { qubit, clbit } => {
-                    converted.measure(qubit, clbit);
-                }
-                &Instruction::Reset(qubit) => {
-                    converted.reset(qubit);
-                }
-            }
-        }
+        let converted = match convert(circuit, &circuit.instructions) {
+            Ok(converted) => converted,
+            Err(e) => return Some(Err(e)),
+        };
         let mut rng = SmallRng::seed_from_u64(seed);
         Some(
             Statevector::zero(circuit.qubits)
@@ -64,6 +48,57 @@ impl Backend for Ketrs {
                 .map(|counts| counts.into_iter().collect())
                 .map_err(sim_error),
         )
+    }
+}
+
+/// The ketrs circuit for `instructions`, on `circuit`'s qubits and classical bits.
+fn convert(
+    circuit: &Circuit,
+    instructions: &[Instruction],
+) -> Result<ketrs::Circuit, BackendError> {
+    let mut converted = ketrs::Circuit::with_clbits(circuit.qubits, circuit.clbits);
+    for instruction in instructions {
+        match instruction {
+            Instruction::Gate(op) => {
+                converted.push(operation(op)?).map_err(sim_error)?;
+            }
+            &Instruction::Measure { qubit, clbit } => {
+                converted.measure(qubit, clbit);
+            }
+            &Instruction::Reset(qubit) => {
+                converted.reset(qubit);
+            }
+            Instruction::If {
+                condition,
+                then,
+                otherwise,
+            } => {
+                let instruction = ketrs::Instruction::IfElse {
+                    condition: expr(condition),
+                    then: Box::new(convert(circuit, then)?),
+                    otherwise: Box::new(convert(circuit, otherwise)?),
+                };
+                converted.push_instruction(instruction).map_err(sim_error)?;
+            }
+        }
+    }
+    Ok(converted)
+}
+
+/// A condition as a ketrs classical expression, which is 0 or 1.
+fn expr(condition: &Condition) -> ketrs::Expr {
+    let binary = |op, a: &Condition, b: &Condition| ketrs::Expr::Binary {
+        op,
+        left: Box::new(expr(a)),
+        right: Box::new(expr(b)),
+    };
+    match condition {
+        Condition::Const(b) => ketrs::Expr::Value(u64::from(*b)),
+        Condition::Clbit(k) => ketrs::Expr::Bit(*k),
+        Condition::Not(c) => ketrs::Expr::Not(Box::new(expr(c))),
+        Condition::And(a, b) => binary(ketrs::BinaryOp::And, a, b),
+        Condition::Or(a, b) => binary(ketrs::BinaryOp::Or, a, b),
+        Condition::Xor(a, b) => binary(ketrs::BinaryOp::NotEqual, a, b),
     }
 }
 

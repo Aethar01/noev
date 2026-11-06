@@ -308,6 +308,11 @@ pub enum Terminator {
         then: Block,
         /// Where to go when false.
         otherwise: Block,
+        /// For an `if` on a measurement result that becomes an `if` in a circuit
+        /// (`spec/execution.md` §4): the block where both branches continue. The branches
+        /// only apply gates, so while a circuit is recorded both can be recorded, each up to
+        /// here.
+        join: Option<Block>,
     },
     /// Call a function and continue at `next`.
     Call {
@@ -563,9 +568,11 @@ impl Program {
                 cond,
                 then,
                 otherwise,
+                join,
             } => {
+                let join = join.map_or(String::new(), |j| format!(" (circuit if, join bb{})", j.0));
                 format!(
-                    "branch {} ? bb{} : bb{}",
+                    "branch {} ? bb{} : bb{}{join}",
                     operand_text(cond),
                     then.0,
                     otherwise.0

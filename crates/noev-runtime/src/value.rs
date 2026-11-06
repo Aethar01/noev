@@ -3,6 +3,8 @@
 use std::fmt;
 use std::rc::Rc;
 
+use crate::backend::Condition;
+
 /// A value held by a local or computed by an expression.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -30,6 +32,9 @@ pub enum Value {
     Distribution(Rc<Distribution>),
     /// While a circuit is being recorded: the result of measurement number `k`, not yet known.
     Clbit(usize),
+    /// While a circuit is being recorded: logic on measurement results, not yet known; a
+    /// `Bit` if the flag is set, else a `Bool`.
+    Cond(Rc<Condition>, bool),
 }
 
 /// How often each result occurred in repeated runs.
@@ -130,7 +135,7 @@ impl Value {
     /// Whether the value holds measurement results not yet known.
     pub fn has_clbits(&self) -> bool {
         match self {
-            Value::Clbit(_) => true,
+            Value::Clbit(_) | Value::Cond(..) => true,
             Value::Aggregate(items) => items.iter().any(Value::has_clbits),
             _ => false,
         }
@@ -141,11 +146,64 @@ impl Value {
     pub fn with_clbits(&self, bits: u64) -> Value {
         match self {
             Value::Clbit(k) => Value::Bit(*k < 64 && (bits >> k) & 1 == 1),
+            Value::Cond(c, true) => Value::Bit(c.eval(bits)),
+            Value::Cond(c, false) => Value::Bool(c.eval(bits)),
             Value::Aggregate(items) => {
                 Value::Aggregate(items.iter().map(|v| v.with_clbits(bits)).collect())
             }
             other => other.clone(),
         }
+    }
+
+    /// The condition a recorded measurement result, or logic on them, stands for; `None` for a
+    /// value that is already known.
+    pub fn condition(&self) -> Option<Condition> {
+        match self {
+            Value::Clbit(k) => Some(Condition::Clbit(*k)),
+            Value::Cond(c, _) => Some((**c).clone()),
+            _ => None,
+        }
+    }
+
+    /// A `Bit` or `Bool`, known or not, as a condition; `None` for anything else.
+    fn as_condition(&self) -> Option<(Condition, bool)> {
+        match self {
+            Value::Bit(b) => Some((Condition::Const(*b), true)),
+            Value::Bool(b) => Some((Condition::Const(*b), false)),
+            Value::Clbit(k) => Some((Condition::Clbit(*k), true)),
+            Value::Cond(c, bit) => Some(((**c).clone(), *bit)),
+            _ => None,
+        }
+    }
+
+    /// Logic on values at least one of which is a recorded measurement result: the result
+    /// as a condition, or `None` if this is not logic on bits and booleans. `op` is a binary
+    /// operator, or `None` for `not`/`~` on `self` alone.
+    pub fn symbolic_logic(
+        &self,
+        op: Option<noev_syntax::ast::BinaryOp>,
+        other: Option<&Value>,
+    ) -> Option<Value> {
+        use noev_syntax::ast::BinaryOp::*;
+        if !self.has_clbits() && !other.is_some_and(Value::has_clbits) {
+            return None;
+        }
+        let (a, bit) = self.as_condition()?;
+        let Some(op) = op else {
+            return Some(Value::Cond(Rc::new(Condition::negate(a)), bit));
+        };
+        let (b, _) = other?.as_condition()?;
+        let (condition, bit) = match op {
+            Eq => (Condition::negate(Condition::xor(a, b)), false),
+            NotEq => (Condition::xor(a, b), false),
+            And => (Condition::and(a, b), false),
+            Or => (Condition::or(a, b), false),
+            BitAnd => (Condition::and(a, b), bit),
+            BitOr => (Condition::or(a, b), bit),
+            BitXor => (Condition::xor(a, b), bit),
+            _ => return None,
+        };
+        Some(Value::Cond(Rc::new(condition), bit))
     }
 
     /// Every qubit in the value, in order: elements and fields left to right.
@@ -174,6 +232,7 @@ impl fmt::Display for Value {
             Value::Ref(_) => write!(f, "<reference>"),
             Value::Distribution(d) => write!(f, "{d}"),
             Value::Clbit(k) => write!(f, "<measurement {k}>"),
+            Value::Cond(..) => write!(f, "<measurement logic>"),
             Value::Aggregate(items)
                 if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Bit(_))) =>
             {

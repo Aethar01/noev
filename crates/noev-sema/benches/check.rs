@@ -1,4 +1,4 @@
-//! Throughput benchmarks for type and ownership checking. Run with `cargo bench -p noev-sema`.
+//! Throughput benchmarks for type, ownership and circuit checking. Run with `cargo bench -p noev-sema`.
 //!
 //! Each UI test program is parsed once, then checked many times; repeating programs within
 //! one file would define every function twice. Dependency-free, like the syntax benchmark:
@@ -69,4 +69,36 @@ fn main() {
         }
     });
     report("ownership", time);
+
+    // Circuits are only checked in programs that pass the other checks.
+    let valid: Vec<_> = parsed
+        .iter()
+        .zip(&typed)
+        .filter(|(p, t)| {
+            p.diagnostics.is_empty()
+                && noev_sema::check(&p.ast).1.is_empty()
+                && noev_sema::check_ownership(&p.ast, t).is_empty()
+        })
+        .collect();
+    let valid_bytes: usize = sources
+        .iter()
+        .zip(&parsed)
+        .filter(|(_, p)| valid.iter().any(|(v, _)| std::ptr::eq(*v, *p)))
+        .map(|(s, _)| s.len())
+        .sum::<usize>()
+        * repeats;
+    let time = fastest(10, || {
+        for _ in 0..repeats {
+            for (p, t) in &valid {
+                black_box(noev_sema::check_circuits(black_box(&p.ast), black_box(t)));
+            }
+        }
+    });
+    let mib = valid_bytes as f64 / (1024.0 * 1024.0);
+    println!(
+        "{:<9} {:>8.1} MiB/s  ({:.2} ms for {mib:.2} MiB of valid programs)",
+        "circuits",
+        mib / time.as_secs_f64(),
+        time.as_secs_f64() * 1e3,
+    );
 }

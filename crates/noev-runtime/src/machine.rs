@@ -200,7 +200,7 @@ impl<'p> Machine<'p> {
         }
         self.frames.push(locals);
         let control_depth = (self.controls.len(), self.control_marks.len());
-        let result = self.run_blocks(function);
+        let result = self.run_blocks(function, 0, None);
         // A `return` from inside a `ctrl` block leaves its controls behind.
         self.controls.truncate(control_depth.0);
         self.control_marks.truncate(control_depth.1);
@@ -209,9 +209,18 @@ impl<'p> Machine<'p> {
         Ok(std::mem::replace(&mut frame[0], Value::Unit))
     }
 
-    fn run_blocks(&mut self, function: &'p Function) -> Result<()> {
-        let mut block = 0;
+    /// Runs `function`'s blocks from `start` until it returns, or until it reaches `stop`.
+    fn run_blocks(
+        &mut self,
+        function: &'p Function,
+        start: usize,
+        stop: Option<usize>,
+    ) -> Result<()> {
+        let mut block = start;
         loop {
+            if Some(block) == stop {
+                return Ok(());
+            }
             let current = &function.blocks[block];
             for stmt in &current.stmts {
                 self.stmt(stmt)?;
@@ -222,6 +231,24 @@ impl<'p> Machine<'p> {
                     cond,
                     then,
                     otherwise,
+                    join: Some(join),
+                } if matches!(self.mode, Mode::Build(_))
+                    && let Some(condition) = self.operand(cond)?.condition() =>
+                {
+                    self.record_if(
+                        function,
+                        condition,
+                        then.index(),
+                        otherwise.index(),
+                        join.index(),
+                    )?;
+                    join.index()
+                }
+                Terminator::Branch {
+                    cond,
+                    then,
+                    otherwise,
+                    ..
                 } => {
                     if self.truth(cond)? {
                         then.index()
@@ -274,6 +301,40 @@ impl<'p> Machine<'p> {
                 }
             };
         }
+    }
+
+    /// Records an `if` on a measurement result into the circuit: each branch, up to where they
+    /// join. The compiler only marks branches that apply gates, so both can run here.
+    fn record_if(
+        &mut self,
+        function: &'p Function,
+        condition: crate::backend::Condition,
+        then: usize,
+        otherwise: usize,
+        join: usize,
+    ) -> Result<()> {
+        let branch = |machine: &mut Self, start: usize| -> Result<Vec<Instruction>> {
+            let outer = match &mut machine.mode {
+                Mode::Build(recording) => std::mem::take(&mut recording.circuit.instructions),
+                _ => unreachable!("only while recording"),
+            };
+            let result = machine.run_blocks(function, start, Some(join));
+            let Mode::Build(recording) = &mut machine.mode else {
+                unreachable!("still recording")
+            };
+            let inner = std::mem::replace(&mut recording.circuit.instructions, outer);
+            result.map(|()| inner)
+        };
+        let then = branch(self, then)?;
+        let otherwise = branch(self, otherwise)?;
+        if let Mode::Build(recording) = &mut self.mode {
+            recording.circuit.instructions.push(Instruction::If {
+                condition,
+                then,
+                otherwise,
+            });
+        }
+        Ok(())
     }
 
     /// The value a local starts with: aggregates are built out so their parts can be
@@ -396,9 +457,13 @@ impl Machine<'_> {
 
     fn concrete(&self, value: Value) -> Value {
         match value {
-            Value::Clbit(_) => {
+            Value::Clbit(_) | Value::Cond(_, true) => {
                 self.needs_values.set(true);
                 Value::Bit(false)
+            }
+            Value::Cond(_, false) => {
+                self.needs_values.set(true);
+                Value::Bool(false)
             }
             Value::Aggregate(items) if items.iter().any(Value::has_clbits) => {
                 Value::Aggregate(items.into_iter().map(|v| self.concrete(v)).collect())
@@ -720,13 +785,31 @@ impl Machine<'_> {
     fn rvalue(&self, value: &Rvalue) -> Result<Value> {
         Ok(match value {
             Rvalue::Use(op) => self.operand(op)?,
+            Rvalue::Unary(UnOp::Not | UnOp::BitNot, x)
+                if let Some(v) = self.operand(x)?.symbolic_logic(None, None) =>
+            {
+                v
+            }
             Rvalue::Unary(op, x) => unary(*op, self.value(x)?)?,
+            Rvalue::Binary(op, a, b)
+                if let Some(v) = self
+                    .operand(a)?
+                    .symbolic_logic(Some(*op), Some(&self.operand(b)?)) =>
+            {
+                v
+            }
             Rvalue::Binary(op, a, b) => binary(*op, self.value(a)?, self.value(b)?)?,
             Rvalue::Aggregate(ops) => {
                 Value::Aggregate(ops.iter().map(|o| self.operand(o)).collect::<Result<_>>()?)
             }
             Rvalue::Repeat(op, n) => Value::Aggregate(vec![self.operand(op)?; *n as usize]),
             Rvalue::Ref { place, .. } => Value::Ref(self.resolve(place)?),
+            // `Bool(b)` and `Bit(flag)` keep a recorded result symbolic.
+            Rvalue::Convert(target @ (Ty::BOOL | Ty::BIT), op)
+                if let Some(condition) = self.operand(op)?.condition() =>
+            {
+                Value::Cond(Rc::new(condition), *target == Ty::BIT)
+            }
             Rvalue::Convert(target, op) => convert(*target, self.value(op)?)?,
             Rvalue::Math(math, ops) => {
                 let args = ops

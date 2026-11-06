@@ -183,6 +183,16 @@ the program's output:
 - `noev run --circuits=DIR` saves every circuit a run sends to its backend, as OpenQASM 3
   ([runtime.md](runtime.md) §7).
 
+The current compiler turns part of the rule into circuits. An `if` on a measurement result
+becomes an `if` in the circuit when its branches only apply gates (directly, through `ctrl`,
+or by calling functions that only apply gates) and compute classical values of their own. A
+circuit that needs more runs shot by shot for now, with the warning saying why:
+
+- a `while` whose condition depends on a measurement result;
+- a branch on a measurement result that creates qubits, measures, frees qubits, prints,
+  changes a variable from outside the branch, or leaves it early (`return`, `break`);
+- an `if` on a measurement result that gives a value (`let x = if m { … } else { … }`).
+
 One more case runs shot by shot on a simulator: a run that calls `release`. The simulator
 checks `release`'s claim that the qubit is in \|0⟩ ([ownership.md](ownership.md) §11), which
 needs each shot's state. The warning says so; `discard`, which resets first, keeps the run

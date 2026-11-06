@@ -375,8 +375,15 @@ fn successors_mut(term: &mut Terminator) -> Vec<&mut Block> {
         | Terminator::Call { next, .. }
         | Terminator::Assert { next, .. } => vec![next],
         Terminator::Branch {
-            then, otherwise, ..
-        } => vec![then, otherwise],
+            then,
+            otherwise,
+            join,
+            ..
+        } => {
+            let mut blocks = vec![then, otherwise];
+            blocks.extend(join.as_mut());
+            blocks
+        }
         Terminator::Return | Terminator::Unreachable => vec![],
     }
 }
@@ -862,6 +869,7 @@ impl Builder<'_> {
                 then,
                 otherwise,
             } => {
+                let circuit_if = self.circuits.is_feedback_if(id);
                 let cond = self.operand(cond);
                 let (then_block, else_block, join) =
                     (self.new_block(), self.new_block(), self.new_block());
@@ -870,6 +878,7 @@ impl Builder<'_> {
                         cond,
                         then: then_block,
                         otherwise: else_block,
+                        join: circuit_if.then_some(join),
                     },
                     then_block,
                 );
@@ -890,6 +899,7 @@ impl Builder<'_> {
                         cond,
                         then: body_block,
                         otherwise: exit,
+                        join: None,
                     },
                     body_block,
                 );
@@ -997,9 +1007,16 @@ impl Builder<'_> {
         }
     }
 
-    /// `a and b`, `a or b`: `b` is only evaluated when needed.
+    /// `a and b`, `a or b`: `b` is only evaluated when needed. When evaluating `b` can have no
+    /// effect, both are evaluated and combined without a branch, which keeps a condition on
+    /// measurement results one value while a circuit is recorded.
     fn short_circuit(&mut self, op: ast::BinaryOp, lhs: ExprId, rhs: ExprId, dest: Option<Place>) {
         let dest = dest.unwrap_or_else(|| self.temp(Ty::BOOL));
+        if noev_sema::circuit::is_pure(self.ast, rhs) {
+            let (a, b) = (self.operand(lhs), self.operand(rhs));
+            self.assign(dest, Rvalue::Binary(op, a, b));
+            return;
+        }
         let a = self.operand(lhs);
         self.assign(dest.clone(), Rvalue::Use(a));
         let (rest, join) = (self.new_block(), self.new_block());
@@ -1013,6 +1030,7 @@ impl Builder<'_> {
                 cond: Operand::Copy(dest.clone()),
                 then,
                 otherwise,
+                join: None,
             },
             rest,
         );
@@ -1052,6 +1070,7 @@ impl Builder<'_> {
                 cond: Operand::Copy(more),
                 then: body_block,
                 otherwise: exit,
+                join: None,
             },
             body_block,
         );

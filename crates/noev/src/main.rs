@@ -266,8 +266,8 @@ fn plan(checked: &Checked) -> String {
                 "a measurement result is {what} (line {})",
                 line(*span)
             ))
-        } else if info.feedback {
-            Some("conditions on measurement results are not compiled yet".to_string())
+        } else if let Some((span, why)) = &info.feedback_unsupported {
+            Some(format!("{why}, not compiled yet (line {})", line(*span)))
         } else {
             info.releases
                 .map(|span| format!("the simulator checks its `release` (line {})", line(span)))

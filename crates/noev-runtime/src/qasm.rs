@@ -7,7 +7,7 @@ use std::fmt::Write;
 
 use noev_sema::prelude::Gate;
 
-use crate::backend::{Circuit, Instruction, Op};
+use crate::backend::{Circuit, Condition, Instruction, Op};
 
 /// The OpenQASM 3 program for `circuit`. `header` lines go first, as comments.
 pub fn to_qasm3(circuit: &Circuit, header: &[String]) -> String {
@@ -21,18 +21,59 @@ pub fn to_qasm3(circuit: &Circuit, header: &[String]) -> String {
         let _ = writeln!(out, "bit[{}] c;", circuit.clbits);
     }
     out.push('\n');
-    for instruction in &circuit.instructions {
+    instructions(&mut out, &circuit.instructions, 0);
+    out
+}
+
+fn instructions(out: &mut String, list: &[Instruction], depth: usize) {
+    let indent = "    ".repeat(depth);
+    for instruction in list {
+        out.push_str(&indent);
         match instruction {
-            Instruction::Gate(op) => gate(&mut out, op),
+            Instruction::Gate(op) => gate(out, op),
             Instruction::Measure { qubit, clbit } => {
                 let _ = writeln!(out, "c[{clbit}] = measure q[{qubit}];");
             }
             Instruction::Reset(qubit) => {
                 let _ = writeln!(out, "reset q[{qubit}];");
             }
+            Instruction::If {
+                condition,
+                then,
+                otherwise,
+            } => {
+                let _ = writeln!(out, "if ({}) {{", condition_text(condition));
+                instructions(out, then, depth + 1);
+                if otherwise.is_empty() {
+                    let _ = writeln!(out, "{indent}}}");
+                } else {
+                    let _ = writeln!(out, "{indent}}} else {{");
+                    instructions(out, otherwise, depth + 1);
+                    let _ = writeln!(out, "{indent}}}");
+                }
+            }
         }
     }
-    out
+}
+
+fn condition_text(condition: &Condition) -> String {
+    // Operands that are themselves operations go in brackets.
+    let operand = |c: &Condition| match c {
+        Condition::Const(_) | Condition::Clbit(_) => condition_text(c),
+        Condition::Not(inner) if matches!(**inner, Condition::Clbit(_)) => condition_text(c),
+        _ => format!("({})", condition_text(c)),
+    };
+    match condition {
+        Condition::Const(b) => b.to_string(),
+        Condition::Clbit(k) => format!("c[{k}] == 1"),
+        Condition::Not(c) => match **c {
+            Condition::Clbit(k) => format!("c[{k}] == 0"),
+            _ => format!("!{}", operand(c)),
+        },
+        Condition::And(a, b) => format!("{} && {}", operand(a), operand(b)),
+        Condition::Or(a, b) => format!("{} || {}", operand(a), operand(b)),
+        Condition::Xor(a, b) => format!("{} != {}", operand(a), operand(b)),
+    }
 }
 
 fn gate(out: &mut String, op: &Op) {

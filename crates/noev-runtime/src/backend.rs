@@ -41,6 +41,82 @@ pub enum Instruction {
     },
     /// Return a qubit to \|0⟩.
     Reset(usize),
+    /// Classical control: run `then` if `condition` holds, else `otherwise`.
+    If {
+        /// A condition on classical bits measured earlier.
+        condition: Condition,
+        /// The steps when it holds.
+        then: Vec<Instruction>,
+        /// The steps when it does not.
+        otherwise: Vec<Instruction>,
+    },
+}
+
+/// A condition on a circuit's classical bits: logic on measurement results.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Condition {
+    /// A constant.
+    Const(bool),
+    /// Classical bit `k`.
+    Clbit(usize),
+    /// Not.
+    Not(Box<Condition>),
+    /// Both.
+    And(Box<Condition>, Box<Condition>),
+    /// Either.
+    Or(Box<Condition>, Box<Condition>),
+    /// Exactly one.
+    Xor(Box<Condition>, Box<Condition>),
+}
+
+impl Condition {
+    /// `not c`, simplified.
+    pub fn negate(c: Condition) -> Condition {
+        match c {
+            Condition::Const(b) => Condition::Const(!b),
+            Condition::Not(inner) => *inner,
+            c => Condition::Not(Box::new(c)),
+        }
+    }
+
+    /// `a and b`, simplified.
+    pub fn and(a: Condition, b: Condition) -> Condition {
+        match (a, b) {
+            (Condition::Const(true), c) | (c, Condition::Const(true)) => c,
+            (Condition::Const(false), _) | (_, Condition::Const(false)) => Condition::Const(false),
+            (a, b) => Condition::And(Box::new(a), Box::new(b)),
+        }
+    }
+
+    /// `a or b`, simplified.
+    pub fn or(a: Condition, b: Condition) -> Condition {
+        match (a, b) {
+            (Condition::Const(false), c) | (c, Condition::Const(false)) => c,
+            (Condition::Const(true), _) | (_, Condition::Const(true)) => Condition::Const(true),
+            (a, b) => Condition::Or(Box::new(a), Box::new(b)),
+        }
+    }
+
+    /// `a != b`, simplified.
+    pub fn xor(a: Condition, b: Condition) -> Condition {
+        match (a, b) {
+            (Condition::Const(false), c) | (c, Condition::Const(false)) => c,
+            (Condition::Const(true), c) | (c, Condition::Const(true)) => Condition::negate(c),
+            (a, b) => Condition::Xor(Box::new(a), Box::new(b)),
+        }
+    }
+
+    /// Its value when classical bit `k` is bit `k` of `bits`.
+    pub fn eval(&self, bits: u64) -> bool {
+        match self {
+            Condition::Const(b) => *b,
+            Condition::Clbit(k) => *k < 64 && (bits >> k) & 1 == 1,
+            Condition::Not(c) => !c.eval(bits),
+            Condition::And(a, b) => a.eval(bits) && b.eval(bits),
+            Condition::Or(a, b) => a.eval(bits) || b.eval(bits),
+            Condition::Xor(a, b) => a.eval(bits) != b.eval(bits),
+        }
+    }
 }
 
 /// A run recorded as a circuit: what goes to a circuit-level backend.

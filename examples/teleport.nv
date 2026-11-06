@@ -1,0 +1,40 @@
+// Quantum teleportation: a qubit's state moves to another qubit using two measurements and
+// corrections that depend on them.
+//
+//     noev run examples/teleport.nv
+//     noev run examples/teleport.nv --circuits=out/    # the circuit, as OpenQASM 3
+//
+// The corrections are `if`s on measurement results that only apply gates, so the whole run
+// is one circuit with classical control (spec/execution.md §4): it is simulated once for all
+// shots. Undoing the preparation on the receiving qubit gives 0 every time.
+
+fn teleported(theta: Float) -> (Bit, Bit, Bit) {
+    let message = |0>
+    message.ry(theta)
+
+    // A Bell pair shared between sender and receiver.
+    let sender = |+>
+    let receiver = |0>
+    ctrl sender { receiver.x() }
+
+    // The sender measures the message and their half of the pair.
+    ctrl message { sender.x() }
+    message.h()
+    let m1 = mv message.measure()
+    let m2 = mv sender.measure()
+
+    // The receiver corrects.
+    if m2 == 1 { receiver.x() }
+    if m1 == 1 { receiver.z() }
+
+    receiver.ry(-theta)
+    (m1, m2, mv receiver.measure())
+}
+
+fn main() {
+    let theta = 1.2
+    let d = sample 10000 { teleported(theta) }
+    print(d)
+    let failures = d.shots() - d.count((0, 0, 0)) - d.count((0, 1, 0)) - d.count((1, 0, 0)) - d.count((1, 1, 0))
+    print("receiver wrong in {failures} of {d.shots()} runs")
+}

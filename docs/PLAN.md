@@ -298,6 +298,7 @@ program never breaks existing code; the reverse does.
 | Sampling            | `sample n { … } -> Distribution<T>` in the language, no CLI command: a block that runs `n` times, so every call still runs once where it is written | Decided  |
 | Generic syntax      | Angle brackets: `Distribution<T>` | Decided  |
 | Compilation         | Native code linked to a Noev runtime; code generators (Cranelift, LLVM) swappable behind the IR; QIR for export and linking (`spec/runtime.md`) | Decided  |
+| Classical control   | `if`s on measurement results whose branches only apply gates become `if`s in the circuit; measurement-dependent loops and richer branches run shot by shot for now, reported | Decided  |
 | Quantum backends    | One interface, two levels: circuit (jobs) and gate (operation by operation); ketrs first | Decided  |
 | Unconsumed qubits   | Compile error now; goal is implicit free when provably \|0⟩ | Decided  |
 
