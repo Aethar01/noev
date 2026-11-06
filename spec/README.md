@@ -9,7 +9,9 @@ compiler is wrong, or the spec is changed on purpose.
 | [grammar.md](grammar.md)       | Lexical structure and syntax                              |
 | [types.md](types.md)           | Types, linearity, literals, conversions                   |
 | [ownership.md](ownership.md)   | Moves, borrows, consumption, reversible contexts, errors  |
-| [prelude.md](prelude.md)       | Built-in gates, measurement and math functions            |
+| [core.md](core.md)             | Intrinsics: built-in gates, measurement, observables, maths |
+| [std.md](std.md)               | The standard library, with a reference definition in Noev for each item |
+| [modules.md](modules.md)       | Modules, imports, visibility and packages (Reserved)      |
 | [interop.md](interop.md)       | Calling Noev from other languages, and foreign functions (Reserved) |
 
 The conformance suite in `tests/` is part of the spec. Each rule in

@@ -26,8 +26,8 @@ pattern, not an identifier.
 Reserved keywords cannot be used as identifiers:
 
 ```
-and  assert  break  continue  else  extern  false  fn  for  if  impl  in  let  mut  not
-or  ref  return  self  Self  struct  trait  true  type  unsafe  while
+and  as  assert  break  continue  else  extern  false  fn  for  if  impl  in  let  mut
+not  or  pub  ref  return  self  Self  struct  trait  true  type  unsafe  use  while
 ```
 
 Contextual keywords are keywords only in the positions listed. Everywhere else they are
@@ -41,6 +41,7 @@ ordinary identifiers, so `let adj = build_graph(edges)` is valid.
 | `ctrl`  | it starts a statement and is followed by a place and, eventually, `{` |
 | `with`  | it starts a statement and is directly followed by `{`       |
 | `do`    | it directly follows the closing `}` of a `with` block       |
+| `pkg`, `super` | they start a path and are followed by `::` (Reserved; see [modules.md](modules.md)) |
 
 ### Literals
 
@@ -452,5 +453,5 @@ fn main() {
   single calls.
 - **Closures.** If added, the `|x| …` form can coexist with kets, because a ket contains
   only `0 1 + -` and ends in `>`. Not needed for v0.1.
-- **Modules and imports.** Not in v0.1. One `.nv` file is one program; `main` is the entry
-  point when one exists.
+- **Modules and imports.** Specified in [modules.md](modules.md); Reserved. In v0.1 one
+  `.nv` file is one program, and `main` is the entry point when one exists.

@@ -29,6 +29,11 @@ macro_rules! ids {
             pub fn index(self) -> usize {
                 self.0.get() as usize - 1
             }
+
+            /// The id of the node at `index` in its array.
+            pub fn from_index(index: usize) -> Self {
+                Self::new(index)
+            }
         }
     )*};
 }

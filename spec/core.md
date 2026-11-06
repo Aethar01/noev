@@ -1,6 +1,20 @@
-# Prelude
+# Core
 
-Types, methods and functions available in every program without imports.
+The intrinsics: operations the compiler and runtime implement directly. Everything else
+that comes with Noev is in the standard library ([std.md](std.md)), defined in terms of
+these. Both are in scope in every program without imports (see [std.md](std.md) §1).
+
+**What belongs in core.** An operation is an intrinsic if either:
+
+1. Noev code cannot express it: creating and measuring qubits, `reset`, `release`, maths
+   such as `sin`, conversions, the Pauli operators; or
+2. the compiler or hardware must recognise it by name, even though it could be derived.
+   Mathematically `{h, t, ctrl x}` is enough for any circuit, but defining `x` as
+   `u(PI, 0, PI)` would make the optimiser and the OpenQASM backend reverse-engineer it,
+   lose the simulator's fast special cases, and lose hardware native gates. So the gates of
+   OpenQASM's standard gate library are intrinsics.
+
+Anything that meets neither condition belongs in the standard library.
 
 ## 1. Gates
 
@@ -41,14 +55,16 @@ Not reversible, so not allowed in a reversible context.
 | --------------------------------------- | ----------------------------------------------- |
 | `fn measure(mv self) -> Bit`            | Measure in the Z basis; consumes the qubit      |
 | `fn reset(mut self) -> mut Self`        | Return to \|0⟩; the qubit stays usable          |
-| `fn discard(mv self)`                   | Reset and release; consumes the qubit           |
 | `unsafe fn release(mv self)`            | Release without a reset, trusting the qubit is in \|0⟩ (see [ownership.md](ownership.md) §11) |
+
+`discard`, which resets and releases, is in the standard library.
 
 `[Qubit; N]` also has `fn measure(mv self) -> [Bit; N]`, which measures every qubit and
 consumes the array. (This is the `Measure` trait once traits exist; see
-[types.md](types.md) §6.)
+[types.md](types.md) §6.) It is an intrinsic because writing it in Noev needs generics over
+the length `N`, and moving elements out with a loop index is not allowed (N012).
 
-Also as free functions: `measure(mv q)`, `reset(q)`, `discard(mv q)`.
+Also as free functions: `measure(mv q)`, `reset(q)`.
 
 ## 3. Measurement tests
 
@@ -64,8 +80,6 @@ measured as \|+⟩.
 | `Y(i: Int) -> Observable`                | Pauli Y on qubit `i`                         |
 | `Z(i: Int) -> Observable`                | Pauli Z on qubit `i`                         |
 | `I() -> Observable`                      | The identity (for constant offsets)          |
-| `P(i: Int, b: Bit) -> Observable`        | Projector onto \|b⟩ for qubit `i`: `0.5 * (I() + Z(i))` for `b = 0`, `0.5 * (I() - Z(i))` for `b = 1` |
-| `PX(i: Int, b: Bit) -> Observable`       | Projector onto \|+⟩ (`b = 0`) or \|−⟩ (`b = 1`) for qubit `i`, built from `X(i)` the same way |
 | `a + b`, `a - b`, `-a`                   | Sums                                         |
 | `c * a`, `a * c` with `c: Float`         | Scaling                                      |
 | `a * b`                                  | Product; the factors must act on different qubits (a qubit is acted on if any term has a non-identity Pauli on it), so the result is Hermitian |
@@ -73,13 +87,9 @@ measured as \|+⟩.
 ```noev
 let ising = -1.0 * Z(0) * Z(1) + 0.5 * (X(0) + X(1))
 let energy = <ansatz(theta)| ising |ansatz(theta)>
-
-let p11 = <ansatz(theta)| P(0, 1) * P(1, 1) |ansatz(theta)>   // probability of measuring 11
 ```
 
-Projectors are ordinary observables (sums of Paulis), so the probability of an outcome is an
-expectation value. A product of single-qubit projectors on different qubits projects onto
-the corresponding multi-qubit state.
+Projectors `P` and `PX` are built from these in the standard library.
 
 ## 5. Math
 

@@ -26,6 +26,7 @@ pub enum TokenKind {
 
     // Reserved keywords
     And,
+    As,
     Assert,
     Break,
     Continue,
@@ -41,6 +42,7 @@ pub enum TokenKind {
     Mut,
     Not,
     Or,
+    Pub,
     Ref,
     Return,
     /// `self`
@@ -52,6 +54,7 @@ pub enum TokenKind {
     True,
     Type,
     Unsafe,
+    Use,
     While,
 
     // Operators
@@ -120,6 +123,7 @@ impl TokenKind {
         use TokenKind::*;
         Some(match text {
             b"and" => And,
+            b"as" => As,
             b"assert" => Assert,
             b"break" => Break,
             b"continue" => Continue,
@@ -135,6 +139,7 @@ impl TokenKind {
             b"mut" => Mut,
             b"not" => Not,
             b"or" => Or,
+            b"pub" => Pub,
             b"ref" => Ref,
             b"return" => Return,
             b"self" => SelfValue,
@@ -144,6 +149,7 @@ impl TokenKind {
             b"true" => True,
             b"type" => Type,
             b"unsafe" => Unsafe,
+            b"use" => Use,
             b"while" => While,
             _ => return None,
         })

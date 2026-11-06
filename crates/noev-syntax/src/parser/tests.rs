@@ -292,6 +292,18 @@ fn helpful_errors() {
         ["`extern` functions are not supported yet"]
     );
     assert_eq!(
+        errors("fn f(x: Int) -> Float { x as Float }"),
+        ["Noev has no `as` casts"]
+    );
+    assert_eq!(
+        errors("pub fn f() {}"),
+        ["`pub` is not supported yet: every program is one module"]
+    );
+    assert_eq!(
+        errors("use std::observables::P\nfn f() {}"),
+        ["`use` is not supported yet: every program is one module"]
+    );
+    assert_eq!(
         errors("fn g() { let extern = 1 }"),
         ["`extern` is a reserved keyword and cannot be used as a name"]
     );

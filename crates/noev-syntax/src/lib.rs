@@ -15,5 +15,5 @@ pub use diagnostic::{Diagnostic, Severity};
 pub use lexer::{Lexed, lex};
 pub use parser::{Parsed, parse};
 pub use span::Span;
-pub use symbol::{Interner, Symbol};
+pub use symbol::{FxHashMap, Interner, Symbol};
 pub use token::{Token, TokenKind};

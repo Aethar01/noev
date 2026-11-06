@@ -242,7 +242,7 @@ impl Parser<'_> {
         loop {
             match self.kind() {
                 Eof => return,
-                Fn | Struct | Trait | Impl | Unsafe | Extern if depth == 0 => return,
+                Fn | Struct | Trait | Impl | Unsafe | Extern | Pub | Use if depth == 0 => return,
                 Ident if depth == 0 && self.nth_is_word(0, "rev") && self.nth(1).kind == Fn => {
                     return;
                 }
@@ -291,8 +291,33 @@ impl Parser<'_> {
         }
     }
 
+    /// Reports `pub`, which needs modules, and skips it so the item is still parsed.
+    fn skip_pub(&mut self) {
+        if self.at(TokenKind::Pub) {
+            let span = self.bump().span;
+            self.error(
+                span,
+                "`pub` is not supported yet: every program is one module",
+            )
+            .with_help_mut("see spec/modules.md for what is planned");
+        }
+    }
+
     fn item(&mut self) -> Option<ItemId> {
+        self.skip_pub();
         let start = self.span();
+        if self.at(TokenKind::Use) {
+            self.error(
+                start,
+                "`use` is not supported yet: every program is one module",
+            )
+            .with_help_mut("see spec/modules.md for what is planned");
+            self.recover_statement();
+            return Some(self.ast.push_item(Item {
+                kind: ItemKind::Error,
+                span: start.to(self.prev_span()),
+            }));
+        }
         let kind = match self.kind() {
             _ if self.at_fn_start() => ItemKind::Fn(self.fn_decl(true)),
             TokenKind::Struct => self.struct_def(),
@@ -458,6 +483,7 @@ impl Parser<'_> {
                 if matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
                     break;
                 }
+                self.skip_pub();
                 if self.at_fn_start() {
                     let method = self.fn_decl(true);
                     self.ast.push_to(method);
@@ -876,6 +902,16 @@ impl Parser<'_> {
     /// as `min`.
     fn binary(&mut self, min: u8) -> ExprId {
         let mut lhs = self.unary();
+        while self.at(TokenKind::As) {
+            let span = self.bump().span;
+            let ty = self.ty();
+            let ty_span = self.ast.ty(ty).span;
+            let target = self.text(ty_span).to_string();
+            self.error(span.to(ty_span), "Noev has no `as` casts")
+                .with_help_mut(format!(
+                    "convert with `{target}(…)`; lossy conversions are methods, such as `x.round()`"
+                ));
+        }
         while let Some((op, prec)) = binary_op(self.kind()) {
             if prec < min {
                 break;

@@ -13,3 +13,7 @@ noev-syntax = { path = "../noev-syntax" }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "check"
+harness = false

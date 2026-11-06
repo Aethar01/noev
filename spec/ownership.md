@@ -274,7 +274,7 @@ control it, invert it with `adj`, and uncompute it.
 nothing needs to be written. Declaring `rev fn` turns the inference into a promise: the
 compiler reports N013 inside the function if its body stops being reversible, rather than at
 some distant caller. Once Noev has modules, functions visible outside their module must state
-`rev` explicitly to be usable as reversible.
+`rev` explicitly to be usable as reversible ([modules.md](modules.md) §5).
 
 ### N013: irreversible operation in a reversible context
 

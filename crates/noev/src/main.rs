@@ -114,19 +114,17 @@ fn check(file: &Path, format: MessageFormat) -> ExitCode {
         }
     };
     let parsed = noev_syntax::parse(&source);
-    report::print(
-        &file.display().to_string(),
-        &source,
-        &parsed.diagnostics,
-        format,
-    );
-    let failed = parsed
-        .diagnostics
+    let (_typed, type_errors) = noev_sema::check(&parsed.ast);
+    let mut diagnostics = parsed.diagnostics;
+    diagnostics.extend(type_errors);
+    diagnostics.sort_by_key(|d| d.span.start);
+    report::print(&file.display().to_string(), &source, &diagnostics, format);
+    let failed = diagnostics
         .iter()
         .any(|d| d.severity == noev_syntax::Severity::Error);
     if matches!(format, MessageFormat::Human) && !failed {
         anstream::eprintln!(
-            "{NOTE}note:{NOTE:#} only syntax was checked; type and ownership checks are not implemented yet"
+            "{NOTE}note:{NOTE:#} syntax and types were checked; ownership checks are not implemented yet"
         );
     }
     if failed {

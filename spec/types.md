@@ -87,8 +87,9 @@ compiler may skip the measurement and release the qubits directly (see
 ### Observables and expectation values
 
 `Observable` is a classical, copyable type: a real-weighted sum of products of Pauli
-operators, built with the prelude functions `X(i)`, `Y(i)`, `Z(i)` and `I()` and the
-operators `+`, `-` and `*` (see [prelude.md](prelude.md) §4).
+operators, built with the core functions `X(i)`, `Y(i)`, `Z(i)` and `I()` and the
+operators `+`, `-` and `*` (see [core.md](core.md) §4), and the standard library's projectors
+`P` and `PX` ([std.md](std.md) §3).
 
 `<ψ| H |ψ>` has type `Float`, where `H: Observable` and `ψ` is a preparation whose type is
 pure quantum. Pauli indices refer to the qubits of `ψ`'s value in order: for a struct, its

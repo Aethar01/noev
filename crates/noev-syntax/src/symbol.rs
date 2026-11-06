@@ -7,10 +7,13 @@ use std::hash::{BuildHasherDefault, Hasher};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Symbol(u32);
 
+/// A `HashMap` using [`FxHasher`], for the compiler's internal tables.
+pub type FxHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
+
 /// Maps identifier text to [`Symbol`]s and back.
 #[derive(Debug, Default)]
 pub struct Interner {
-    map: HashMap<Box<str>, Symbol, BuildHasherDefault<FxHasher>>,
+    map: FxHashMap<Box<str>, Symbol>,
     names: Vec<Box<str>>,
 }
 
@@ -41,7 +44,7 @@ impl Interner {
 /// default on short keys, and not resistant to collision attacks, which a compiler does not
 /// need.
 #[derive(Default)]
-struct FxHasher {
+pub struct FxHasher {
     hash: u64,
 }
 

@@ -132,7 +132,7 @@ circuit generation.
 | #  | Milestone                    | Description                                                                                | Status  |
 | -- | ---------------------------- | ------------------------------------------------------------------------------------------ | ------- |
 | 1  | Parser                       | Read `.nv` files, build an AST                                                             | ☑ Done |
-| 2  | Basic types                  | `Int`, `Float`, `Bool`, `Bit`, `Qubit`, tuples, arrays, structs                            | ☐ Todo |
+| 2  | Basic types                  | `Int`, `Float`, `Bool`, `Bit`, `Qubit`, tuples, arrays, structs                            | ☑ Done |
 | 3  | Ownership checker            | Rules N001–N020 in `spec/ownership.md` (`with`/`do` reserved)                              | ☐ Todo |
 | 4  | Quantum IR                   | Allocation, gates, measurement, classical dependencies                                     | ☐ Todo |
 | 5  | Circuit generation           | Export to OpenQASM 3                                                                       | ☐ Todo |
@@ -193,7 +193,10 @@ noev/
 │   ├── grammar.md             #   lexical structure and syntax (EBNF)
 │   ├── types.md               #   types, linearity, literals
 │   ├── ownership.md           #   ownership rules and error codes
-│   └── prelude.md             #   built-in gates, measurement, math
+│   ├── core.md                #   intrinsics: gates, measurement, observables, maths
+│   ├── std.md                 #   standard library, with reference definitions in Noev
+│   ├── modules.md             #   modules, imports, visibility, packages (reserved)
+│   └── interop.md             #   calling into and out of Noev (reserved)
 ├── crates/
 │   ├── noev-syntax/           # tokens, lexer, parser, AST, spans
 │   ├── noev-sema/             # name resolution, type checker, ownership checker
@@ -207,7 +210,8 @@ noev/
 └── docs/                      # PLAN.md, design notes
 ```
 
-Later, not v0.1: `std/` (a prelude written in Noev), `editors/` (tree-sitter grammar,
+Later, not v0.1: `std/` (the standard library as Noev source; until then it is implemented
+natively, see `spec/std.md`), `editors/` (tree-sitter grammar,
 VS Code syntax), `noev-lsp`.
 
 Long-term goal: a self-hosting compiler written in Noev. The Rust implementation is the
@@ -370,6 +374,8 @@ control electronics with tight latency limits); see `spec/interop.md` §5.
 
 ### Language
 
+- Modules and packages (`spec/modules.md`): files are modules, `use` imports, `pub`
+  visibility, `noev.toml` packages. Needs per-file span offsets first.
 - Traits and generics (`spec/types.md` §6), with generic code assuming values may be linear.
 - `with`/`do` compute–use–uncompute blocks, and automatic release of qubits proven to be in
   \|0⟩ (`spec/ownership.md` §9).
