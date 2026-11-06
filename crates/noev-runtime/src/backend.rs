@@ -150,6 +150,12 @@ pub trait Backend {
         shots: usize,
         seed: u64,
     ) -> Option<Result<Counts, BackendError>>;
+
+    /// Whether it runs what it is given. An [`Exporter`] only records circuits: their results
+    /// stay unknown, and nothing runs gate by gate.
+    fn executes(&self) -> bool {
+        true
+    }
 }
 
 /// One run on a gate-level backend. Operations arrive as the program reaches them. Nothing is
@@ -234,5 +240,37 @@ impl Backend for Recorder<'_> {
             self.jobs.borrow_mut().push((circuit.clone(), shots));
         }
         result
+    }
+}
+
+/// A backend that runs nothing: it keeps every circuit job it is given, with its shots, so
+/// circuits can be saved without simulating them. This is how `noev build --emit=qasm3` works.
+#[derive(Default)]
+pub struct Exporter {
+    /// The circuits recorded so far, in order, and how many shots each asked for.
+    pub jobs: std::cell::RefCell<Vec<(Circuit, usize)>>,
+}
+
+impl Backend for Exporter {
+    fn name(&self) -> &str {
+        "export"
+    }
+
+    fn session(&self, _seed: u64) -> Option<Box<dyn Session>> {
+        None
+    }
+
+    fn run_circuit(
+        &self,
+        circuit: &Circuit,
+        shots: usize,
+        _seed: u64,
+    ) -> Option<Result<Counts, BackendError>> {
+        self.jobs.borrow_mut().push((circuit.clone(), shots));
+        Some(Ok(Vec::new()))
+    }
+
+    fn executes(&self) -> bool {
+        false
     }
 }

@@ -47,6 +47,9 @@ pub struct Distribution {
     /// Whether it came from one simulation of a circuit rather than shot by shot. Not visible
     /// to programs; for tests and reports.
     pub from_circuit: bool,
+    /// Whether its circuit was only recorded, as when exporting circuits without running
+    /// them: then its results are unknown.
+    pub not_run: bool,
 }
 
 /// One result of a `Distribution`.
@@ -68,6 +71,7 @@ impl Distribution {
             outcomes,
             shots,
             from_circuit: false,
+            not_run: false,
         }
     }
 
@@ -83,6 +87,9 @@ impl Distribution {
 impl fmt::Display for Distribution {
     /// One line per outcome: result, count and percentage, aligned.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.not_run {
+            return write!(f, "<{} shots, not run>", self.shots);
+        }
         let width = self
             .outcomes
             .iter()

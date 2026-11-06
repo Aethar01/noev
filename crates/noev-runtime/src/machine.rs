@@ -39,13 +39,26 @@ pub struct RuntimeError {
     pub message: String,
     /// Where, when known.
     pub span: Option<Span>,
+    /// Whether, rather than failing, the program needed a result that a backend which only
+    /// records circuits does not have (`spec/runtime.md` §7).
+    pub unknown: bool,
 }
 
 impl RuntimeError {
-    fn new(message: impl Into<String>) -> Self {
+    /// A failure.
+    pub fn new(message: impl Into<String>) -> Self {
         RuntimeError {
             message: message.into(),
             span: None,
+            unknown: false,
+        }
+    }
+
+    /// The program needs a result that is not known because circuits are only recorded.
+    pub fn unknown(message: impl Into<String>) -> Self {
+        RuntimeError {
+            unknown: true,
+            ..RuntimeError::new(message)
         }
     }
 }
@@ -182,8 +195,12 @@ impl<'p> Machine<'p> {
     /// The backend's gate-level session, for running operations one at a time.
     fn session(&mut self) -> Result<&mut dyn Session> {
         let name = self.backend.name();
+        let executes = self.backend.executes();
         match &mut self.session {
             Some(session) => Ok(session.as_mut()),
+            None if !executes => Err(RuntimeError::unknown(
+                "the program runs a quantum operation outside a `sample`",
+            )),
             None => Err(RuntimeError::new(format!(
                 "`{name}` only runs circuits, and this run is not one (see `noev build --emit=plan`)"
             ))),
@@ -286,8 +303,8 @@ impl<'p> Machine<'p> {
                 Terminator::Assert { cond, next, span } => {
                     if !self.truth(cond)? {
                         return Err(RuntimeError {
-                            message: "assertion failed".into(),
                             span: Some(*span),
+                            ..RuntimeError::new("assertion failed")
                         });
                     }
                     next.index()
@@ -837,6 +854,11 @@ impl Machine<'_> {
                 let Value::Distribution(dist) = self.operand(&ops[0])? else {
                     return Err(RuntimeError::new("expected a distribution"));
                 };
+                if dist.not_run && *method != DistMethod::Shots {
+                    return Err(RuntimeError::unknown(
+                        "the program uses the results of a `sample`",
+                    ));
+                }
                 let key = |m: &Self, i: usize| -> Result<String> {
                     Ok(format::display(m.program, &m.value(&ops[i])?, *elem))
                 };

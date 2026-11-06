@@ -168,6 +168,7 @@ backends comes with the C ABI.
 | `binary`  | An executable linked to the runtime and a backend (the default, later)     |
 | `object`  | A native object file, to link yourself                                    |
 | `qir`     | QIR                                                                       |
+| `qasm3`   | Every circuit the program sends to a backend, as OpenQASM 3 (below)       |
 | `ir`      | Noev IR, for inspecting the compiler                                      |
 | `plan`    | How each repeated run executes ([execution.md](execution.md) §5)          |
 
@@ -175,11 +176,24 @@ backends comes with the C ABI.
 
 ### Saving circuits
 
-Circuits are built while the program runs (§3), so they are saved from a run, not a build:
-`noev run FILE --circuits=DIR` writes every circuit job the run sends to its backend as
-OpenQASM 3, `DIR/circuit-1.qasm`, `DIR/circuit-2.qasm`, … in the order they ran, each with
-its shot count in a comment. These are exactly what a circuit-level backend receives. Runs
-that go shot by shot send no circuit; `--emit=plan` says which they are.
+A circuit is built by the program's classical code (§3), but building it does not need it
+to run: so circuits can be saved without a simulator or a quantum computer, however large
+they are.
+
+- `noev build FILE --emit=qasm3 [-o DIR]` runs only the classical code. Each circuit is
+  recorded instead of run and written as OpenQASM 3: `DIR/circuit-1.qasm`, `circuit-2.qasm`,
+  … in the order the program makes them, each with its shot count in a comment, or all on
+  standard output without `-o`. What the program prints is dropped.
+- The export stops, without failing, where the program first needs something only running
+  gives: the results of a `sample` (anything but `shots()`), or a quantum operation outside
+  a `sample`. Circuits made after that point may depend on those results, so they need a
+  run. A `sample` that runs shot by shot has no circuit, so it is skipped (its results are
+  unknown too).
+- `noev run FILE --circuits=DIR` runs the program on its backend and saves the same files,
+  including circuits that depend on earlier results.
+
+These files are exactly what a circuit-level backend receives. `--emit=plan` says which
+runs are circuits.
 
 ## 8. Open questions
 

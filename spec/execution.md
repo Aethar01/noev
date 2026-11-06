@@ -180,8 +180,8 @@ the program's output:
   will run shot by shot, pointing at the line that makes it so.
 - `noev build --emit=plan` lists every `sample` block and how it runs, then every function
   with quantum operations and whether it is a circuit, and why not when it is not.
-- `noev run --circuits=DIR` saves every circuit a run sends to its backend, as OpenQASM 3
-  ([runtime.md](runtime.md) §7).
+- `noev build --emit=qasm3` saves every circuit as OpenQASM 3 without running anything, and
+  `noev run --circuits=DIR` saves them from a run ([runtime.md](runtime.md) §7).
 
 The current compiler turns part of the rule into circuits. An `if` on a measurement result
 becomes an `if` in the circuit when its branches only apply gates (directly, through `ctrl`,

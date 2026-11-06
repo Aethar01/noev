@@ -29,10 +29,7 @@ pub fn sample(
     key: impl Fn(&Value) -> String,
 ) -> Result<Distribution, RuntimeError> {
     if shots == 0 {
-        return Err(RuntimeError {
-            message: "`sample` needs at least one shot".into(),
-            span: None,
-        });
+        return Err(RuntimeError::new("`sample` needs at least one shot"));
     }
     let mut seeds = SmallRng::seed_from_u64(seed);
     let mut counts: BTreeMap<String, Outcome> = BTreeMap::new();
@@ -57,6 +54,13 @@ pub fn sample(
         }
         let mut dist = Distribution::new(counts.into_values().collect(), shots);
         dist.from_circuit = true;
+        dist.not_run = !backend.executes();
+        return Ok(dist);
+    }
+    // A run that goes shot by shot has no circuit to record.
+    if !backend.executes() {
+        let mut dist = Distribution::new(Vec::new(), shots);
+        dist.not_run = true;
         return Ok(dist);
     }
 
@@ -116,10 +120,7 @@ fn sample_circuit(
     let Some(counts) = backend.run_circuit(&circuit, shots, seeds.random()) else {
         return Ok(None);
     };
-    let counts = counts.map_err(|e| RuntimeError {
-        message: e.0,
-        span: None,
-    })?;
+    let counts = counts.map_err(|e| RuntimeError::new(e.0))?;
 
     let mut outcomes = Vec::with_capacity(counts.len());
     if !replay {

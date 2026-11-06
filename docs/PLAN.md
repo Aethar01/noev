@@ -229,7 +229,8 @@ CLI:
 ```
 noev check examples/bell.nv
 noev build examples/bell.nv --emit=plan
-noev run   examples/bell.nv --circuits=out/
+noev build examples/bell.nv --emit=qasm3 -o out/
+noev run   examples/bell.nv
 ```
 
 ## 7. First target program: Bell pair

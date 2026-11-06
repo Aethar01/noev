@@ -24,20 +24,16 @@ pub fn run_main(
     seed: u64,
     output: Output,
 ) -> Result<(), RuntimeError> {
-    let main = program.main.ok_or_else(|| RuntimeError {
-        message: "the program has no `fn main()`".into(),
-        span: None,
-    })?;
+    let main = program
+        .main
+        .ok_or_else(|| RuntimeError::new("the program has no `fn main()`"))?;
     let output = Rc::new(RefCell::new(output));
     let mut machine = Machine::new(program, backend, seed).with_output(output.clone());
     let result = machine.call(main, Vec::new()).map(|_| ());
     let mut output = output.borrow_mut();
     let flushed = output.stdout.flush().and_then(|()| output.stderr.flush());
     result?;
-    flushed.map_err(|e| RuntimeError {
-        message: format!("cannot write output: {e}"),
-        span: None,
-    })
+    flushed.map_err(|e| RuntimeError::new(format!("cannot write output: {e}")))
 }
 
 /// How often each result of a program occurred.

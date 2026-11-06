@@ -674,3 +674,38 @@ fn qasm_reads_back_as_the_same_circuit() {
     );
     assert_eq!(jobs, 3);
 }
+
+#[test]
+fn circuits_are_exported_without_simulating_them() {
+    // 40 qubits: far beyond a statevector, but recording the circuit needs no simulation.
+    let program = compile(
+        "fn main() {
+            let d = sample 1000 {
+                let r = [|0>; 40]
+                r[0].h()
+                for i in 0..39 {
+                    ctrl r[i] { r[i + 1].x() }
+                }
+                mv r
+            }
+            print(d.shots())
+            print(d.count([0; 40]))
+        }",
+    );
+    let exporter = noev_runtime::backend::Exporter::default();
+    let error = run_main(
+        &program,
+        &exporter,
+        0,
+        Output {
+            stdout: Box::new(Buffer::default()),
+            stderr: Box::new(Buffer::default()),
+        },
+    )
+    .unwrap_err();
+    // `shots` is known; `count` needs the results.
+    assert!(error.unknown, "{error:?}");
+    let jobs = exporter.jobs.borrow();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!((jobs[0].0.qubits, jobs[0].0.clbits, jobs[0].1), (40, 40, 1000));
+}
