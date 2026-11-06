@@ -1,0 +1,10 @@
+// N007: moving out of a reference.
+
+fn measure_lent(q: mut Qubit) -> Bit {
+    mv q.measure()                  //~ N007
+}
+
+fn chain_ends_in_measure() -> Bit {
+    let q = |0>
+    q.h().measure()                 //~ N007
+}

@@ -1,0 +1,43 @@
+// N015: classical data changed through a binding not declared `let mut`.
+
+struct Experiment {
+    angle: Float
+    state: Qubit
+
+    fn new(angle: Float) -> Self {
+        Experiment { angle, state: |0> }
+    }
+
+    fn rotate(mut self) -> mut Self {
+        self.state.ry(self.angle)
+        mut self
+    }
+
+    fn finish(mv self) -> Bit {
+        mv self.state.measure()
+    }
+}
+
+fn reassign() -> Int {
+    let x = 0
+    x = 1                           //~ N015
+    x
+}
+
+fn compound_assign() -> Int {
+    let x = 0
+    x += 1                          //~ N015
+    x
+}
+
+fn classical_field() -> Bit {
+    let e = Experiment::new(0.5)
+    e.angle = 1.0                   //~ N015
+    mv e.finish()
+}
+
+fn mut_self_on_hybrid() -> Bit {
+    let e = Experiment::new(0.5)
+    e.rotate()                      //~ N015
+    mv e.finish()
+}

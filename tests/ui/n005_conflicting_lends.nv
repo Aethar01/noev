@@ -1,0 +1,41 @@
+// N005: two lends of the same place are in use together.
+
+struct Pair {
+    a: Qubit
+    b: Qubit
+}
+
+fn swap_with_itself() {
+    let a = |0>
+    swap(a, a)                      //~ N005
+    mv a.discard()
+}
+
+fn constant_index_twice() {
+    let r = |00>
+    swap(r[0], r[0])                //~ N005
+    let bits = mv r.measure()
+}
+
+fn stored_lend() {
+    let q = |0>
+    {
+        let r = q.h()
+        q.s()                       //~ N005
+        r.x()
+    }
+    mv q.discard()
+}
+
+fn gate_on_control() {
+    let a = |+>
+    ctrl a { a.x() }                //~ N005
+    mv a.discard()
+}
+
+fn control_overlaps_field() {
+    let p = Pair { a: |+>, b: |0> }
+    ctrl p { p.a.x() }              //~ N005
+    mv p.a.discard()
+    mv p.b.discard()
+}

@@ -1,0 +1,19 @@
+// N009: a linear value is moved in some branches but not others.
+
+fn if_without_else(flag: Bool) {
+    let q = |+>
+    if flag {                       //~ N009
+        mv q.discard()
+    }
+}
+
+fn if_else_mismatch(flag: Bool) -> Bit {
+    let q = |+>
+    let b = |0>
+    if flag {                       //~ N009
+        mv q.discard()
+    } else {
+        b.x()
+    }
+    mv b.measure()
+}

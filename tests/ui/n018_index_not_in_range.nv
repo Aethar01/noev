@@ -1,0 +1,15 @@
+// N018: an index into a qubit array is not proven in range.
+
+fn ladder_off_by_one() -> [Bit; 4] {
+    let r = |0000>
+    for i in 0..4 {
+        ctrl r[i] { r[i + 1].x() }  //~ N018
+    }
+    mv r.measure()
+}
+
+fn unchecked_parameter(i: Int) -> [Bit; 4] {
+    let r = |0000>
+    r[i].h()                        //~ N018
+    mv r.measure()
+}

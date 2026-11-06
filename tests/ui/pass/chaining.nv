@@ -1,0 +1,24 @@
+fn chain() -> Bit {
+    let q = |0>
+    q.h().s().rx(0.25)
+    q
+        .t()
+        .z()
+    mv q.measure()
+}
+
+fn stored_lend() -> Bit {
+    let q = |0>
+    {
+        let r = q.h()
+        r.x()
+    }
+    mv q.measure()
+}
+
+fn free_functions() -> Bit {
+    let q = |0>
+    h(q)
+    ry(q, Float::PI / 4.0)
+    measure(mv q)
+}

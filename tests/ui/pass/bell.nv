@@ -1,0 +1,10 @@
+fn bell_pair() -> (Bit, Bit) {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    (mv a.measure(), mv b.measure())
+}
+
+fn main() {
+    let (a, b) = bell_pair()
+}

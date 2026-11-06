@@ -1,0 +1,7 @@
+// N004: `mv` where the callee only lends.
+
+fn gate_with_mv() {
+    let q = |0>
+    h(mv q)                         //~ N004
+    mv q.discard()
+}

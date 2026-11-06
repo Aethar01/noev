@@ -1,0 +1,17 @@
+// N010: a linear value declared outside a loop is moved inside it.
+
+fn for_loop() {
+    let q = |0>
+    for i in 0..3 {
+        mv q.discard()              //~ N010
+    }
+}
+
+fn while_loop(n: Int) {
+    let q = |0>
+    let mut k = n
+    while k > 0 {
+        let b = mv q.measure()      //~ N010
+        k -= 1
+    }
+}

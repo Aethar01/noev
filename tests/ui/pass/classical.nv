@@ -1,0 +1,28 @@
+fn collatz_steps(start: Int) -> Int {
+    let mut n = start
+    let mut steps = 0
+    while n != 1 {
+        if n % 2 == 0 { n /= 2 } else { n = 3 * n + 1 }
+        steps += 1
+    }
+    steps
+}
+
+fn main() {
+    let s = collatz_steps(27)
+    let big = s > 100 and not s == 111
+    let either = big or s < 0
+    let total = s
+        + 1
+    let f = Float(s) * Float::PI
+    let k = f.round()
+    let b: Bit = 1
+    let flag = Bool(b)
+    let bits = 0xff & 0b1010 | 3 ^ ~0; let shifted = bits << 2
+    let adj = 3
+    let rev = adj + 1
+    for i in 0..10 {
+        if i == 5 { break }
+        if i % 2 == 0 { continue }
+    }
+}

@@ -1,0 +1,22 @@
+// N002: a place is used after it was moved.
+
+fn gate_after_measure() {
+    let q = |0>
+    let b = mv q.measure()
+    q.x()                           //~ N002
+}
+
+fn moved_twice() {
+    let q = |0>
+    let a = mv q
+    let b = mv q                    //~ N002
+    mv a.discard()
+}
+
+fn field_after_whole_move() {
+    let p = (|0>, |1>)
+    let moved = mv p
+    p.0.h()                         //~ N002
+    mv moved.0.discard()
+    mv moved.1.discard()
+}

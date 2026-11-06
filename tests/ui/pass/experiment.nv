@@ -1,0 +1,40 @@
+struct Experiment {
+    angle: Float
+    state: Qubit
+
+    fn new(angle: Float) -> Self {
+        Experiment { angle, state: |0> }
+    }
+
+    fn rotate(mut self) -> mut Self {
+        self.state.ry(self.angle)
+        mut self
+    }
+
+    fn finish(mv self) -> Bit {
+        mv self.state.measure()
+    }
+}
+
+fn run(angle: Float) -> Bit {
+    let mut e = Experiment::new(angle)
+    e.rotate().rotate()
+    mv e.finish()
+}
+
+fn partial_move() -> Float {
+    let e = Experiment::new(0.5)
+    let b = mv e.state.measure()
+    e.angle
+}
+
+fn describe(e: ref Experiment) -> Float {
+    e.angle
+}
+
+fn gate_on_field() -> Bit {
+    let e = Experiment::new(0.25)
+    e.state.h()
+    let a = describe(e)
+    mv e.finish()
+}

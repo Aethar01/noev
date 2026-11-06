@@ -1,0 +1,17 @@
+// N014: `adj` on something that is not reversible.
+
+fn coin(q: mut Qubit) {
+    q.reset()
+}
+
+fn invert_reset() {
+    let q = |0>
+    adj q.reset()                   //~ N014
+    mv q.discard()
+}
+
+fn invert_irreversible_fn() {
+    let q = |0>
+    adj coin(q)                     //~ N014
+    mv q.discard()
+}

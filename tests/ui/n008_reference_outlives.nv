@@ -1,0 +1,10 @@
+// N008: a reference outlives the value it refers to.
+
+struct Counter {
+    q: Qubit
+
+    fn local(ref self) -> mut Int {
+        let mut t = 0
+        mut t                       //~ N008
+    }
+}

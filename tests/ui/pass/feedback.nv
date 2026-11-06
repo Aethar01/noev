@@ -1,0 +1,21 @@
+fn conditional_flip() -> Bit {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    let m = mv a.measure()
+    if m {
+        b.x()
+    }
+    mv b.measure()
+}
+
+fn repeat_until_one() -> Int {
+    let mut tries = 0
+    let mut done = false
+    while not done {
+        let q = |+>
+        done = Bool(mv q.measure())
+        tries += 1
+    }
+    tries
+}

@@ -1,0 +1,19 @@
+// N017: two lends of one array whose indices are not proven different.
+
+fn reverse_naive() -> [Bit; 4] {
+    let r = |0000>
+    for i in 0..4 {
+        swap(r[i], r[3 - i])        //~ N017
+    }
+    mv r.measure()
+}
+
+fn unrelated_loops() -> [Bit; 4] {
+    let r = |0000>
+    for i in 0..4 {
+        for j in 0..4 {
+            ctrl r[i] { r[j].x() }  //~ N017
+        }
+    }
+    mv r.measure()
+}

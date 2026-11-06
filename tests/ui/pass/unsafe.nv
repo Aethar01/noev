@@ -1,0 +1,15 @@
+unsafe fn trusted(q: Qubit) {
+    unsafe { mv q.release() }
+}
+
+fn fresh_release() {
+    let q = |0>
+    unsafe { mv q.release() }
+}
+
+fn uncomputed() {
+    let q = |0>
+    q.x()
+    q.x()
+    unsafe { trusted(mv q) }
+}

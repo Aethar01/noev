@@ -1,0 +1,27 @@
+fn majority(a: mut Qubit, b: mut Qubit, c: mut Qubit) {
+    ctrl c { b.x(); a.x() }
+    ctrl a, b { c.x() }
+}
+
+rev fn ladder(r: mut [Qubit; 4]) {
+    for i in 0..3 {
+        ctrl r[i] { r[i + 1].x() }
+    }
+}
+
+fn main() {
+    let r = |110>
+    let out = |0>
+    majority(r[0], r[1], r[2])
+    ctrl r[2] { out.x() }
+    adj majority(r[0], r[1], r[2])
+    adj out.s()
+    let bits = mv r.measure()
+    let b = mv out.measure()
+
+    let g = |0000>
+    g[0].h()
+    ladder(g)
+    adj ladder(g)
+    let gs = mv g.measure()
+}

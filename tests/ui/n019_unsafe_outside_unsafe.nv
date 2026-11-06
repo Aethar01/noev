@@ -1,0 +1,19 @@
+// N019: an unsafe operation outside `unsafe`.
+
+unsafe fn trusted(q: Qubit) {
+    unsafe { mv q.release() }
+}
+
+fn release_without_unsafe() {
+    let q = |0>
+    mv q.release()                  //~ N019
+}
+
+fn unsafe_fn_without_unsafe() {
+    let q = |0>
+    trusted(mv q)                   //~ N019
+}
+
+unsafe fn body_is_not_unsafe_block(q: Qubit) {
+    mv q.release()                  //~ N019
+}

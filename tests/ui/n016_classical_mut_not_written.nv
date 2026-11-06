@@ -1,0 +1,11 @@
+// N016: classical data lent for changing without writing `mut`.
+
+fn bump(n: mut Int) {
+    n += 1
+}
+
+fn implicit_classical_change() -> Int {
+    let mut count = 0
+    bump(count)                     //~ N016
+    count
+}

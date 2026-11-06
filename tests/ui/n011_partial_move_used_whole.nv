@@ -1,0 +1,33 @@
+// N011: a partially moved value is used as a whole.
+
+struct Experiment {
+    angle: Float
+    state: Qubit
+
+    fn new(angle: Float) -> Self {
+        Experiment { angle, state: |0> }
+    }
+
+    fn rotate(mut self) -> mut Self {
+        self.state.ry(self.angle)
+        mut self
+    }
+
+    fn finish(mv self) -> Bit {
+        mv self.state.measure()
+    }
+}
+
+fn rotate_after_partial_move() -> Bit {
+    let mut e = Experiment::new(0.5)
+    let b = mv e.state.measure()
+    let a = e.angle
+    e.rotate()                      //~ N011
+    b
+}
+
+fn finish_after_partial_move() -> Bit {
+    let e = Experiment::new(0.5)
+    let b = mv e.state.measure()
+    mv e.finish()                   //~ N011
+}

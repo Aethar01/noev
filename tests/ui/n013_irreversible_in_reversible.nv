@@ -1,0 +1,26 @@
+// N013: an irreversible operation in a reversible context.
+
+rev fn declared_reversible(q: mut Qubit) {
+    q.h()
+    q.reset()                       //~ N013
+}
+
+fn coin(q: mut Qubit) {
+    q.reset()
+}
+
+fn not_reversible_in_ctrl() {
+    let a = |+>
+    let b = |0>
+    ctrl a { coin(b) }              //~ N013
+    mv a.discard()
+    mv b.discard()
+}
+
+fn reset_in_ctrl() {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.reset() }            //~ N013
+    mv a.discard()
+    mv b.discard()
+}

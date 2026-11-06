@@ -1,0 +1,22 @@
+fn flip(q: mut Qubit) {
+    q.x()
+}
+
+fn bump(n: mut Int) {
+    n += 1
+}
+
+fn peek(n: ref Int) -> Int {
+    n
+}
+
+fn main() {
+    let q = |0>
+    flip(q)
+    flip(mut q)
+    let mut n = 0
+    bump(mut n)
+    let m = peek(n)
+    let k = peek(ref n)
+    mv q.discard()
+}

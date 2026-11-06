@@ -1,0 +1,7 @@
+// N006: a place is moved while it is lent.
+
+fn move_while_lent() -> Bit {
+    let q = |0>
+    let r = ref q
+    mv q.measure()                  //~ N006
+}

@@ -1,0 +1,32 @@
+// N001: a linear value moves without `mv`.
+
+fn take(q: Qubit) {
+    mv q.discard()
+}
+
+fn let_binding() {
+    let a = |0>
+    let b = a                       //~ N001
+    mv b.discard()
+}
+
+fn owned_argument() {
+    let a = |0>
+    take(a)                         //~ N001
+}
+
+fn consuming_receiver() -> Bit {
+    let a = |0>
+    a.measure()                     //~ N001
+}
+
+fn into_tuple() -> (Qubit, Qubit) {
+    let a = |0>
+    let b = |1>
+    (a, mv b)                       //~ N001
+}
+
+fn returned() -> Qubit {
+    let q = |+>
+    q                               //~ N001
+}

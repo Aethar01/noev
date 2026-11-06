@@ -1,0 +1,18 @@
+// N003: a linear value is still owned when its scope ends.
+
+fn never_consumed() {
+    let q = |+>
+    q.h()
+}                                   //~ N003
+
+fn early_return(stop: Bool) {
+    let q = |0>
+    if stop {
+        return                      //~ N003
+    }
+    mv q.discard()
+}
+
+fn discarded_final_value() {
+    |0>                             //~ N003
+}

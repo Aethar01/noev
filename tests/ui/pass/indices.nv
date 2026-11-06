@@ -1,0 +1,53 @@
+fn ghz() -> [Bit; 4] {
+    let r = |0000>
+    r[0].h()
+    for i in 0..3 {
+        ctrl r[i] { r[i + 1].x() }
+    }
+    mv r.measure()
+}
+
+fn brickwork() -> [Bit; 6] {
+    let r = |000000>
+    for i in 0..3 {
+        ctrl r[2 * i] { r[2 * i + 1].x() }
+    }
+    mv r.measure()
+}
+
+fn qft() -> [Bit; 4] {
+    let r = |0000>
+    for i in 0..4 {
+        r[i].h()
+        for j in i + 1..4 {
+            ctrl r[j] { r[i].p(Float::PI / Float(1 << (j - i))) }
+        }
+    }
+    mv r.measure()
+}
+
+fn reverse() -> [Bit; 4] {
+    let r = |0000>
+    for i in 0..4 {
+        if i != 3 - i {
+            swap(r[i], r[3 - i])
+        }
+    }
+    mv r.measure()
+}
+
+fn asserted(i: Int, j: Int) -> [Bit; 4] {
+    let r = |0000>
+    assert i >= 0 and i < 4 and j >= 0 and j < 4
+    assert i != j
+    swap(r[i], r[j])
+    mv r.measure()
+}
+
+fn constant_elements() -> Bit {
+    let r = |00>
+    swap(r[0], r[1])
+    let first = mv r[0].measure()
+    mv r[1].discard()
+    first
+}
