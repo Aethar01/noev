@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["Elliott Ashby"]
+repository = "https://github.com/Aethar01/noev"
 publish = false
 
 [workspace.lints.rust]
