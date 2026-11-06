@@ -180,6 +180,8 @@ the program's output:
   will run shot by shot, pointing at the line that makes it so.
 - `noev build --emit=plan` lists every `sample` block and how it runs, then every function
   with quantum operations and whether it is a circuit, and why not when it is not.
+- `noev run --circuits=DIR` saves every circuit a run sends to its backend, as OpenQASM 3
+  ([runtime.md](runtime.md) §7).
 
 One more case runs shot by shot on a simulator: a run that calls `release`. The simulator
 checks `release`'s claim that the qubit is in \|0⟩ ([ownership.md](ownership.md) §11), which

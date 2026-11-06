@@ -1,6 +1,6 @@
 [package]
 name = "noev-runtime"
-description = "Executes Noev programs on the ketrs simulator."
+description = "Executes Noev programs, on ketrs or another quantum backend."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -168,9 +168,18 @@ backends comes with the C ABI.
 | `binary`  | An executable linked to the runtime and a backend (the default, later)     |
 | `object`  | A native object file, to link yourself                                    |
 | `qir`     | QIR                                                                       |
-| `qasm3`   | OpenQASM 3, for programs or runs that are circuits                        |
 | `ir`      | Noev IR, for inspecting the compiler                                      |
 | `plan`    | How each repeated run executes ([execution.md](execution.md) §5)          |
+
+`binary`, `object` and `qir` are not implemented yet. `--emit` is required until `binary` is.
+
+### Saving circuits
+
+Circuits are built while the program runs (§3), so they are saved from a run, not a build:
+`noev run FILE --circuits=DIR` writes every circuit job the run sends to its backend as
+OpenQASM 3, `DIR/circuit-1.qasm`, `DIR/circuit-2.qasm`, … in the order they ran, each with
+its shot count in a comment. These are exactly what a circuit-level backend receives. Runs
+that go shot by shot send no circuit; `--emit=plan` says which they are.
 
 ## 8. Open questions
 

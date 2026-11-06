@@ -135,7 +135,7 @@ circuit generation.
 | 2  | Basic types                  | `Int`, `Float`, `Bool`, `Bit`, `Qubit`, tuples, arrays, structs                            | ☑ Done |
 | 3  | Ownership checker            | Rules N001–N022 in `spec/ownership.md` (`with`/`do` reserved)                              | ☑ Done |
 | 4  | Quantum IR                   | Allocation, gates, measurement, classical dependencies                                     | ☑ Done |
-| 5  | Circuits                     | Closed runs that are circuits (`spec/execution.md`) compiled to ketrs circuits and OpenQASM 3 | ◐ In progress (ketrs circuits done; OpenQASM 3 export to do) |
+| 5  | Circuits                     | Closed runs that are circuits (`spec/execution.md`) compiled to ketrs circuits and OpenQASM 3 | ☑ Done |
 | 6  | Execution                    | Interpreter on ketrs, circuits sampled through ketrs, `noev run` | ☑ Done |
 | 7  | Expectation values           | `<ψ\| H \|ψ>` with observables, exact on ketrs where possible                               | ☐ Todo |
 | 8  | Backend interface            | The interpreter drives ketrs through the runtime's backend interface (`spec/runtime.md`), at circuit and gate level | ☑ Done |
@@ -206,8 +206,8 @@ noev/
 ├── crates/
 │   ├── noev-syntax/           # tokens, lexer, parser, AST, spans
 │   ├── noev-sema/             # name resolution, type checker, ownership checker
-│   ├── noev-ir/               # quantum IR, lowering from AST, OpenQASM 3 emitter
-│   ├── noev-runtime/          # executes IR on ketrs
+│   ├── noev-ir/               # quantum IR, lowering from AST
+│   ├── noev-runtime/          # interpreter, backend interface (ketrs), OpenQASM 3 output
 │   └── noev/                  # CLI binary: check / build / run, diagnostics rendering
 ├── examples/                  # hello.nv, bell.nv, hybrid.nv
 ├── tests/
@@ -228,8 +228,8 @@ CLI:
 
 ```
 noev check examples/bell.nv
-noev build examples/bell.nv --emit=qasm3
-noev run   examples/bell.nv --shots=1000
+noev build examples/bell.nv --emit=plan
+noev run   examples/bell.nv --circuits=out/
 ```
 
 ## 7. First target program: Bell pair

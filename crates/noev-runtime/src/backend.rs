@@ -118,3 +118,45 @@ pub trait Session {
 
 /// A Pauli operator, for expectation values.
 pub use crate::value::Pauli;
+
+/// A backend that keeps a copy of every circuit job it is given, with its shots, then passes
+/// the job on to `inner`. This is how `noev run --circuits` saves them.
+pub struct Recorder<'b> {
+    /// The backend that runs everything.
+    pub inner: &'b dyn Backend,
+    /// The circuits run so far, in order, and how many shots each had.
+    pub jobs: std::cell::RefCell<Vec<(Circuit, usize)>>,
+}
+
+impl<'b> Recorder<'b> {
+    /// A recorder in front of `inner`.
+    pub fn new(inner: &'b dyn Backend) -> Self {
+        Recorder {
+            inner,
+            jobs: Default::default(),
+        }
+    }
+}
+
+impl Backend for Recorder<'_> {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn session(&self, seed: u64) -> Option<Box<dyn Session>> {
+        self.inner.session(seed)
+    }
+
+    fn run_circuit(
+        &self,
+        circuit: &Circuit,
+        shots: usize,
+        seed: u64,
+    ) -> Option<Result<Counts, BackendError>> {
+        let result = self.inner.run_circuit(circuit, shots, seed);
+        if result.is_some() {
+            self.jobs.borrow_mut().push((circuit.clone(), shots));
+        }
+        result
+    }
+}

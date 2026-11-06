@@ -5,7 +5,7 @@ use std::io::Write;
 use std::rc::Rc;
 
 use noev_runtime::sampling::sample;
-use noev_runtime::{Counts, Ketrs, Output, RuntimeError, run, run_main};
+use noev_runtime::{Backend, Counts, Ketrs, Output, RuntimeError, run, run_main};
 
 fn compile(source: &str) -> noev_ir::Program {
     let parsed = noev_syntax::parse(source);
@@ -479,7 +479,7 @@ struct OneLevel {
     circuits: bool,
 }
 
-impl noev_runtime::Backend for OneLevel {
+impl Backend for OneLevel {
     fn name(&self) -> &str {
         if self.circuits {
             "circuits-only"
@@ -489,7 +489,11 @@ impl noev_runtime::Backend for OneLevel {
     }
 
     fn session(&self, seed: u64) -> Option<Box<dyn noev_runtime::backend::Session>> {
-        if self.circuits { None } else { Ketrs.session(seed) }
+        if self.circuits {
+            None
+        } else {
+            Ketrs.session(seed)
+        }
     }
 
     fn run_circuit(
@@ -506,7 +510,7 @@ impl noev_runtime::Backend for OneLevel {
     }
 }
 
-fn main_on(source: &str, backend: &dyn noev_runtime::Backend) -> Result<String, RuntimeError> {
+fn main_on(source: &str, backend: &dyn Backend) -> Result<String, RuntimeError> {
     let program = compile(source);
     let out = Buffer::default();
     run_main(
@@ -557,4 +561,62 @@ fn circuit_only_backends_take_circuits() {
 fn gate_only_backends_run_circuits_shot_by_shot() {
     let out = main_on(BELL_MAIN, &OneLevel { circuits: false }).unwrap();
     assert_eq!(out, "0 2000\n");
+}
+
+/// Every circuit job of `source`'s `main`, as OpenQASM 3, read back by ketrs's own parser
+/// and sampled: each must give the same counts as the circuit it was written from.
+fn qasm_round_trip(source: &str) -> usize {
+    let program = compile(source);
+    let backend = noev_runtime::backend::Recorder::new(&Ketrs);
+    run_main(
+        &program,
+        &backend,
+        5,
+        Output {
+            stdout: Box::new(Buffer::default()),
+            stderr: Box::new(Buffer::default()),
+        },
+    )
+    .unwrap();
+    let jobs = backend.jobs.borrow();
+    for (circuit, shots) in jobs.iter() {
+        let text = noev_runtime::qasm::to_qasm3(circuit, &[]);
+        let parsed = ketrs::qasm::parse(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+        let mut rng = <rand::rngs::SmallRng as rand::SeedableRng>::seed_from_u64(9);
+        let read_back: Vec<(u64, usize)> = ketrs::Statevector::zero(parsed.n_qubits())
+            .sample_circuit(&parsed, *shots, &mut rng)
+            .unwrap()
+            .into_iter()
+            .collect();
+        let direct = Ketrs.run_circuit(circuit, *shots, 9).unwrap().unwrap();
+        assert_eq!(read_back, direct, "{text}");
+    }
+    jobs.len()
+}
+
+#[test]
+fn qasm_reads_back_as_the_same_circuit() {
+    let jobs = qasm_round_trip(
+        "rev fn tee(q: mut Qubit) { q.t() }
+        fn main() {
+            let theta = 0.7
+            let a = sample 500 {
+                let r = |0+1>
+                r[0].ry(theta).s()
+                ctrl r[1] { r[0].x() }
+                ctrl r[0], r[1] { r[2].rz(1.25) }
+                adj tee(r[2])
+                r[1].swap(r[2])
+                mv r
+            }
+            let b = sample 300 {
+                let q = |+>
+                q.u(0.1, 0.2, 0.3)
+                adj q.u(0.4, 0.5, 0.6)
+                mv q.measure()
+            }
+            print(a, b)
+        }",
+    );
+    assert_eq!(jobs, 2);
 }
