@@ -131,7 +131,7 @@ circuit generation.
 
 | #  | Milestone                    | Description                                                                                | Status  |
 | -- | ---------------------------- | ------------------------------------------------------------------------------------------ | ------- |
-| 1  | Parser                       | Read `.nv` files, build an AST                                                             | ☐ Todo |
+| 1  | Parser                       | Read `.nv` files, build an AST                                                             | ☑ Done |
 | 2  | Basic types                  | `Int`, `Float`, `Bool`, `Bit`, `Qubit`, tuples, arrays, structs                            | ☐ Todo |
 | 3  | Ownership checker            | Rules N001–N020 in `spec/ownership.md` (`with`/`do` reserved)                              | ☐ Todo |
 | 4  | Quantum IR                   | Allocation, gates, measurement, classical dependencies                                     | ☐ Todo |
@@ -263,6 +263,7 @@ contribution should not just be quantum variables or a borrow checker. Research 
 - Hardware-specific optimisers
 - Explicit lifetimes, generics and references in struct fields (v0.1 borrow-checks references with elided lifetimes only)
 - A general-purpose standard library
+- Interop with other languages (planned in §11)
 
 ## 10. Design decisions
 
@@ -346,3 +347,31 @@ alternatives:
 Rust 1.99 stable (≥ 1.88, edition 2024, matching ketrs). rustup lives in
 `~/.local/share/rustup` (`RUSTUP_HOME`, set by the fish config). Non-fish shells that
 don't set it have no toolchain, so set `RUSTUP_HOME` when running cargo from bash.
+
+## 11. After v0.1
+
+Planned once milestones 1–7 are done, roughly in this order.
+
+### Interop (`spec/interop.md`)
+
+Only classical values cross the boundary; the host never holds a qubit.
+
+1. **Rust embedding API with host functions.** A Rust program loads a Noev program, calls its
+   functions, and provides `extern fn`s, checked against their declarations when the program
+   is loaded. Small, because the runtime is already a Rust library, and safe, so no `unsafe`.
+2. **Python bindings** on top of it (PyO3, as in `ketrs-py`). Reaches most of the quantum
+   audience: Python optimisers driving Noev expectation values.
+3. **C, both ways:** `extern "C"` imports called inside `unsafe`, and a `noev.h` API for C and
+   C++ hosts. Imports need native compilation or `libffi`; easiest after the QIR/LLVM backend.
+4. **Inline OpenQASM** for hardware-specific gates (`unsafe`).
+
+Hardware targets will need a rule for foreign calls made while qubits are alive (they run on
+control electronics with tight latency limits); see `spec/interop.md` §5.
+
+### Language
+
+- Traits and generics (`spec/types.md` §6), with generic code assuming values may be linear.
+- `with`/`do` compute–use–uncompute blocks, and automatic release of qubits proven to be in
+  \|0⟩ (`spec/ownership.md` §9).
+- Non-lexical lifetimes, explicit lifetimes, and references in structs.
+

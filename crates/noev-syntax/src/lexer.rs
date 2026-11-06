@@ -447,8 +447,22 @@ mod tests {
     }
 
     #[test]
+    fn newline_after_closing_angle_is_kept() {
+        assert_eq!(
+            kinds("f(x)>\ny"),
+            [Ident, LParen, Ident, RParen, Gt, Newline, Ident]
+        );
+        assert_eq!(kinds("|+->\ny"), [Ket, Newline, Ident]);
+    }
+
+    #[test]
     fn leading_minus_starts_a_statement() {
         assert_eq!(kinds("a\n-b"), [Ident, Newline, Minus, Ident]);
+    }
+
+    #[test]
+    fn leading_less_than_starts_a_statement() {
+        assert_eq!(kinds("a\n<p()| h |p()>")[..3], [Ident, Newline, Lt]);
     }
 
     #[test]

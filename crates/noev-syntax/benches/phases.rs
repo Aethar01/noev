@@ -59,4 +59,9 @@ fn main() {
         black_box(noev_syntax::lex(black_box(&source)));
     });
     report("lex", &source, time);
+
+    let time = fastest(10, || {
+        black_box(noev_syntax::parse(black_box(&source)));
+    });
+    report("parse", &source, time);
 }

@@ -1,10 +1,14 @@
 //! The `noev` command-line interface.
 
-use std::path::PathBuf;
+mod report;
+
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand, ValueEnum};
+
+const NOTE: anstyle::Style = AnsiColor::Cyan.on_default().effects(Effects::BOLD);
 
 /// Help colours, matching Cargo's.
 const STYLES: Styles = Styles::styled()
@@ -92,11 +96,47 @@ enum Emit {
 }
 
 fn main() -> ExitCode {
-    let name = match Cli::parse().command {
-        Command::Check { .. } => "check",
-        Command::Build { .. } => "build",
-        Command::Run { .. } => "run",
+    match Cli::parse().command {
+        Command::Check { file, messages } => check(&file, messages.message_format),
+        Command::Build { .. } => not_implemented("build"),
+        Command::Run { .. } => not_implemented("run"),
+    }
+}
+
+/// Checks `file`, printing its diagnostics. Exits with 0 when there are no errors, 1 when
+/// there are, and 2 when the file could not be checked at all.
+fn check(file: &Path, format: MessageFormat) -> ExitCode {
+    let source = match std::fs::read_to_string(file) {
+        Ok(source) => source,
+        Err(error) => {
+            anstream::eprintln!("noev: cannot read {}: {error}", file.display());
+            return ExitCode::from(2);
+        }
     };
-    eprintln!("noev: `{name}` is not implemented yet");
+    let parsed = noev_syntax::parse(&source);
+    report::print(
+        &file.display().to_string(),
+        &source,
+        &parsed.diagnostics,
+        format,
+    );
+    let failed = parsed
+        .diagnostics
+        .iter()
+        .any(|d| d.severity == noev_syntax::Severity::Error);
+    if matches!(format, MessageFormat::Human) && !failed {
+        anstream::eprintln!(
+            "{NOTE}note:{NOTE:#} only syntax was checked; type and ownership checks are not implemented yet"
+        );
+    }
+    if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn not_implemented(command: &str) -> ExitCode {
+    anstream::eprintln!("noev: `{command}` is not implemented yet");
     ExitCode::from(2)
 }

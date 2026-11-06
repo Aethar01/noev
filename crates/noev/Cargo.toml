@@ -18,6 +18,8 @@ noev-sema = { path = "../noev-sema" }
 noev-ir = { path = "../noev-ir" }
 noev-runtime = { path = "../noev-runtime" }
 clap = { version = "4.6.7", features = ["derive"] }
+anstream = "1"
+anstyle = "1"
 
 [lints]
 workspace = true

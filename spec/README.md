@@ -10,6 +10,7 @@ compiler is wrong, or the spec is changed on purpose.
 | [types.md](types.md)           | Types, linearity, literals, conversions                   |
 | [ownership.md](ownership.md)   | Moves, borrows, consumption, reversible contexts, errors  |
 | [prelude.md](prelude.md)       | Built-in gates, measurement and math functions            |
+| [interop.md](interop.md)       | Calling Noev from other languages, and foreign functions (Reserved) |
 
 The conformance suite in `tests/` is part of the spec. Each rule in
 [ownership.md](ownership.md) has an error code, and each code has at least one compile-fail

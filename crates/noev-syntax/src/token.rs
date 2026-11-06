@@ -30,6 +30,7 @@ pub enum TokenKind {
     Break,
     Continue,
     Else,
+    Extern,
     False,
     Fn,
     For,
@@ -123,6 +124,7 @@ impl TokenKind {
             b"break" => Break,
             b"continue" => Continue,
             b"else" => Else,
+            b"extern" => Extern,
             b"false" => False,
             b"fn" => Fn,
             b"for" => For,
@@ -157,12 +159,23 @@ impl TokenKind {
     }
 
     /// Whether a line break after this token can end a statement.
+    ///
+    /// `>` closes an expectation value (`|ψ>`) as well as being a comparison, and `->` can
+    /// end a closing ket such as `|+->`, so line breaks after them are kept. The parser skips
+    /// them where an operand must follow, as in `a >` at the end of a line.
     pub(crate) fn ends_expression(self) -> bool {
         use TokenKind::*;
-        self.ends_operand() || matches!(self, SelfType | RBrace | Break | Continue | Return)
+        self.ends_operand()
+            || matches!(
+                self,
+                SelfType | RBrace | Break | Continue | Return | Gt | Arrow
+            )
     }
 
     /// Whether a line starting with this token continues the previous line.
+    ///
+    /// `-` and `<` are not included: a line starting with them begins a new statement,
+    /// since `-x` and `<ψ| H |ψ>` can start one.
     pub(crate) fn continues_line(self) -> bool {
         use TokenKind::*;
         matches!(
@@ -188,7 +201,6 @@ impl TokenKind {
                 | Shr
                 | EqEq
                 | NotEq
-                | Lt
                 | Le
                 | Gt
                 | Ge

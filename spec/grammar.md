@@ -26,8 +26,8 @@ pattern, not an identifier.
 Reserved keywords cannot be used as identifiers:
 
 ```
-and  assert  break  continue  else  false  fn  for  if  impl  in  let  mut  not  or
-ref  return  self  Self  struct  trait  true  type  unsafe  while
+and  assert  break  continue  else  extern  false  fn  for  if  impl  in  let  mut  not
+or  ref  return  self  Self  struct  trait  true  type  unsafe  while
 ```
 
 Contextual keywords are keywords only in the positions listed. Everywhere else they are
@@ -100,11 +100,16 @@ Semicolons are optional. A line break ends a statement when all of these hold:
 1. the innermost enclosing bracket is not `(` or `[` (line breaks directly inside those are
    ignored; inside a `{ … }` nested within them, they count again);
 2. the last token on the line can end an expression: an identifier, a literal, a ket,
-   `self`, `Self`, `)`, `]`, `}`, `break`, `continue` or `return`;
+   `self`, `Self`, `)`, `]`, `}`, `break`, `continue`, `return`, or `>` or `->` (which can
+   close an expectation value's ket);
 3. the next line does not start with a token that can only continue an expression: `.`,
-   a binary operator other than `-`, `else`, or `do`.
+   a binary operator other than `-` and `<`, `else`, or `do`.
 
-A line starting with `-` or `(` begins a new statement. To continue an expression across
+Where an operand must follow (after a comparison operator, or after `->` in a function
+signature), a line break is skipped, so `a >` at the end of a line continues onto the next.
+
+A line starting with `-`, `<` or `(` begins a new statement (`-x`, `<ψ| H |ψ>` and `(a, b)`
+can all start one). To continue an expression across
 lines, end the line with the operator or wrap it in parentheses. A `;` can always be written,
 and separates statements on one line.
 
@@ -126,7 +131,7 @@ Terminals are quoted. `sep` is a line break (as defined above), `;` or `,` where
 
 ```ebnf
 program     = { item } ;
-item        = struct_def | fn_def | trait_def | impl_def ;
+item        = struct_def | fn_def | trait_def | impl_def | extern_def ;
 
 struct_def  = "struct" IDENT "{" { member ( sep | "," ) } "}" ;
 member      = field | fn_def ;
@@ -142,6 +147,7 @@ trait_item  = fn_sig | fn_def | "type" IDENT ;
 fn_sig      = [ "unsafe" ] [ "rev" ] "fn" IDENT "(" [ params ] ")" [ "->" type ] ;
 impl_def    = "impl" path "for" type "{" { impl_item sep } "}" ;     (* Reserved *)
 impl_item   = fn_def | "type" IDENT "=" type ;
+extern_def  = "extern" fn_sig | "extern" STRING "{" { fn_sig sep } "}" ;   (* Reserved *)
 ```
 
 A struct holds its fields and its methods together:
@@ -162,7 +168,8 @@ without one are **associated functions**, called as `Type::name(…)`.
 The receiver states how the method takes the value, using the same words as call sites:
 `mv self` takes ownership, `ref self` borrows to read, `mut self` borrows to change.
 
-Traits and `impl … for …` blocks are Reserved: their syntax is specified so that it can be
+`extern` declares host and C functions; see [interop.md](interop.md). Traits and
+`impl … for …` blocks are Reserved: their syntax is specified so that it can be
 parsed, but they need generics, which come after v0.1. See [types.md](types.md) §6.
 
 ### Types
