@@ -212,7 +212,7 @@ noev/
 ├── examples/                  # hello.nv, bell.nv, hybrid.nv
 ├── tests/
 │   ├── ui/                    # .nv programs + expected diagnostics (compile-fail and pass)
-│   └── run/                   # .nv programs + expected measurement distributions
+│   └── run/                   # .nv programs + their exact expected output (deterministic by the language)
 └── docs/                      # PLAN.md, design notes
 ```
 

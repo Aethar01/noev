@@ -1,0 +1,25 @@
+// A struct holding a classical angle and a qubit, with methods that chain.
+
+struct Experiment {
+    angle: Float
+    state: Qubit
+
+    fn new(angle: Float) -> Self {
+        Experiment { angle, state: |0> }
+    }
+
+    fn rotate(mut self) -> mut Self {
+        self.state.ry(self.angle)
+        mut self
+    }
+
+    fn finish(mv self) -> Bit {
+        mv self.state.measure()
+    }
+}
+
+fn main() {
+    let mut e = Experiment::new(Float::PI / 2.0)
+    e.rotate().rotate()
+    print(mv e.finish())
+}

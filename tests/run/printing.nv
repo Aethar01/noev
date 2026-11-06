@@ -1,0 +1,17 @@
+// What `print` shows for each type, and interpolation with format specs.
+
+struct P {
+    x: Int
+    y: Float
+}
+
+fn main() {
+    let r = |01>
+    let bits = mv r.measure()
+    print("bits:", bits, 3, -1.0, true, (1, 2.5), [4, 5], P { x: 1, y: 2.0 })
+    print()
+    let n = 5
+    let f = 0.126
+    print("n={n:>3} f={f:.2} b={n:08b} hex={255:x} {{literal} {Float::PI:+.3}")
+    eprint("this goes to standard error")
+}

@@ -1,0 +1,11 @@
+// Kets read left to right; bras measure in their own basis.
+
+fn main() {
+    let r = |101>
+    print(mv r.measure())
+    let plus = |+>
+    let minus = |->
+    print(<+| mv plus, <+| mv minus)
+    let pair = |1+>
+    print(<1+| mv pair)
+}

@@ -1,0 +1,37 @@
+// `sample` blocks with certain outcomes, a circuit with feedback through a helper, and
+// values read from around the block.
+
+fn correct(q: mut Qubit, flip: Bit) {
+    if flip == 1 { q.x() }
+}
+
+// Whatever `a` measures, `b` ends up in |1>.
+fn always_one() -> Bit {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    let m = mv a.measure()
+    correct(b, m)
+    b.x()
+    mv b.measure()
+}
+
+fn main() {
+    let d = sample 1000 { always_one() }
+    print(d)
+    print(d.shots(), d.count(1), d.probability(0), d.most_likely())
+    let flip = true
+    let n = 3
+    let e = sample 50 {
+        let q = |0>
+        if flip { q.x() }
+        (mv q.measure(), n)
+    }
+    print(e)
+    let r = sample 20 {
+        let pair = |00>
+        pair[1].x()
+        mv pair
+    }
+    print(r)
+}

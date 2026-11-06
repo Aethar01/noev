@@ -1,0 +1,13 @@
+// Expectation values of eigenstates, which are exact even when estimated.
+
+fn ones() -> [Qubit; 2] {
+    let r = |11>
+    mv r
+}
+
+fn main() {
+    print("{<0| Z(0) |0>:.6}")
+    print("{<1| Z(0) |1>:.6}")
+    print("{<+| X(0) |+>:.6}")
+    print("{<ones()| 0.5 * Z(0) * Z(1) - 2.0 * Z(1) + 0.25 * I() |ones()> within 0.1:.6}")
+}

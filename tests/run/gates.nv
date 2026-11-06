@@ -1,0 +1,45 @@
+// Gates, `adj`, `ctrl` with several controls, and a reversible function undone.
+
+fn majority(a: mut Qubit, b: mut Qubit, c: mut Qubit) {
+    ctrl c { b.x(); a.x() }
+    ctrl a, b { c.x() }
+}
+
+fn rot(q: mut Qubit) {
+    q.ry(0.7)
+    q.rz(0.3)
+    q.h()
+}
+
+fn main() {
+    // Toffoli truth table.
+    for a in 0..2 {
+        for b in 0..2 {
+            let x = |0>
+            let y = |0>
+            let t = |0>
+            if a == 1 { x.x() }
+            if b == 1 { y.x() }
+            ctrl x, y { t.x() }
+            print(mv x.measure(), mv y.measure(), mv t.measure())
+        }
+    }
+    // Fredkin.
+    let f = |110>
+    ctrl f[0] { swap(f[1], f[2]) }
+    print(mv f.measure())
+    // adj undoes.
+    let q = |+>
+    q.t()
+    adj q.t()
+    q.h()
+    print(mv q.measure())
+    let p = |0>
+    rot(p)
+    adj rot(p)
+    print(mv p.measure())
+    let m = |110>
+    majority(m[0], m[1], m[2])
+    adj majority(m[0], m[1], m[2])
+    print(mv m.measure())
+}
