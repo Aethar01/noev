@@ -53,17 +53,22 @@ and generics, `with`/`do`, interop). Expect changes before 1.0.
   ([`spec/runtime.md`](spec/runtime.md)). `noev export` writes a program's circuits as
   OpenQASM 3 without simulating anything.
 
-## Install
+## Build
 
 Noev needs Rust 1.88 or later.
 
 ```
-cargo install --git https://github.com/Aethar01/noev noev
+git clone https://github.com/Aethar01/noev
+cd noev
+cargo build --release
 ```
 
+The compiler is then `target/release/noev`; the examples below call it `noev`.
+
 The [ketrs](https://crates.io/crates/ketrs) simulator is built in through the `ketrs`
-feature, on by default. `--no-default-features` builds Noev without a simulator: it still
-checks, builds and exports programs, but `noev run` needs `--backend=export`.
+feature, on by default. `cargo build --release --no-default-features` builds Noev without a
+simulator: it still checks, builds and exports programs, but `noev run` needs
+`--backend=export`.
 
 ## Use
 

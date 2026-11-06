@@ -7,12 +7,16 @@ and [nvim-treesitter](https://github.com/nvim-treesitter/nvim-treesitter) (`main
 
 ## Setup
 
-With a checkout of this repository at `~/Projects/noev`, and `noev` on your `PATH`
-(`cargo install --path crates/noev`):
+With a checkout of this repository at `~/Projects/noev`, built with `cargo build --release`:
 
 ```lua
 -- This directory: filetype, queries, the language server's config.
 vim.opt.rtp:append(vim.fn.expand('~/Projects/noev/editors/nvim'))
+
+-- The language server is part of the compiler you built.
+vim.lsp.config('noev', {
+  cmd = { vim.fn.expand('~/Projects/noev/target/release/noev'), 'lsp' },
+})
 
 -- The parser, built by nvim-treesitter from the checkout.
 vim.api.nvim_create_autocmd('User', {
