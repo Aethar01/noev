@@ -26,6 +26,11 @@ fn into_tuple() -> (Qubit, Qubit) {
     (a, mv b)                       //~ N001
 }
 
+fn bra_without_mv() -> Bool {
+    let q = |0>
+    <1| q                           //~ N001
+}
+
 fn returned() -> Qubit {
     let q = |+>
     q                               //~ N001

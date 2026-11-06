@@ -50,6 +50,7 @@ ordinary identifiers, so `let adj = build_graph(edges)` is valid.
 | Float    | `1.0`, `3.14`, `1e-3`, `2.5e6`       | A `.` must be followed by a digit  |
 | Bool     | `true`, `false`                      |                                    |
 | Ket      | `\|0>`, `\|1>`, `\|+>`, `\|->`, `\|01>`, `\|+0->` | See below             |
+| Bra      | `<0\|`, `<1\|`, `<+\|`, `<-\|`, `<01\|`           | See below             |
 
 There is no separate `Bit` literal. The integer literals `0` and `1` have type `Bit` where
 the context requires it (see [types.md](types.md)).
@@ -61,7 +62,8 @@ whitespace inside. It creates freshly prepared qubits (see [types.md](types.md))
 
 `|` is also the bitwise-or operator. The two never conflict, because a ket is only
 recognised **where an operand can start**. The lexer treats `|` as the start of a ket unless
-the previous token ends an operand: an identifier, a literal, a ket, `self`, `)` or `]`.
+the previous token, on the same line, ends an operand: an identifier, a literal, a ket,
+`self`, `)` or `]`. At the start of a line, `|` begins a ket if it forms one.
 
 ```noev
 let q = |0>         // operand position: ket
@@ -70,6 +72,13 @@ let n = (a) |0> b   // after `)`: `|`, `0`, `>`, so bitwise or then comparison
 ```
 
 Inside a ket, `+-` does not lex as `+` and `-` (or `->`); the ket is one token.
+
+### Bra literals
+
+A bra literal is `<`, then one or more of the characters `0 1 + -`, then `|`, with no
+whitespace inside. Like a ket, it is only recognised where an operand can start, so
+`a < 0|b` is still a comparison followed by bitwise or. Bras are used for measurement tests
+and expectation values (§2, Bras and expectation values).
 
 ### Operators and punctuation
 
@@ -88,7 +97,8 @@ Inside a ket, `+-` does not lex as `+` and `-` (or `->`); the ket is one token.
 
 Semicolons are optional. A line break ends a statement when all of these hold:
 
-1. it is not inside `(…)` or `[…]` (line breaks inside brackets are ignored);
+1. the innermost enclosing bracket is not `(` or `[` (line breaks directly inside those are
+   ignored; inside a `{ … }` nested within them, they count again);
 2. the last token on the line can end an expression: an identifier, a literal, a ket,
    `self`, `Self`, `)`, `]`, `}`, `break`, `continue` or `return`;
 3. the next line does not start with a token that can only continue an expression: `.`,
@@ -227,7 +237,8 @@ not_expr    = "not" not_expr | binary ;
 binary      = unary { BINOP unary } ;              (* precedence below *)
 unary       = { "-" | "~" } postfix
             | ( "mv" | "ref" | "mut" ) place { method_call }
-            | "adj" postfix ;                       (* must end in a single call *)
+            | "adj" postfix                         (* must end in a single call *)
+            | BRA unary ;                           (* measurement test *)
 postfix     = primary { "." IDENT | "." INT | "[" expr "]" | method_call | "(" args ")" } ;
 method_call = "." IDENT "(" args ")" ;
 args        = [ expr { "," expr } [ "," ] ] ;
@@ -240,7 +251,12 @@ primary     = INT | FLOAT | "true" | "false" | KET
             | "(" expr "," [ expr { "," expr } [ "," ] ] ")"           (* tuple *)
             | "[" [ expr { "," expr } [ "," ] ] "]"                    (* array *)
             | "[" expr ";" expr "]"                                     (* array repeat *)
+            | expectation
             | if_expr | for_expr | while_expr | ctrl_stmt | with_stmt | unsafe_block | block ;
+expectation = "<" prep "|" observable "|" prep ">"
+            | BRA observable "|" KET_BODY ">" ;     (* <+| h |+> *)
+prep        = postfix ;                             (* a call or a ket *)
+observable  = binary ;                              (* without `|` or comparisons at top level *)
 path        = ( IDENT | "self" | "Self" ) { "::" IDENT } ;
 field_init  = IDENT [ ":" expr ] ;                  (* `angle` is short for `angle: angle` *)
 
@@ -296,6 +312,38 @@ Every gate is also a free function, for circuit-style code: `h(q)`, `ry(q, theta
 `swap(a, b)`, `measure(mv q)`. Functions acting on qubits take the qubits first and
 classical parameters after.
 
+### Bras and expectation values
+
+A bra followed by a qubit value is a **measurement test**: `<s| mv q` measures `q` in the
+basis containing `s`, consumes it, and is `true` if the outcome was `s` (see
+[types.md](types.md) §3).
+
+```noev
+let hit = <1| mv q          // Z basis
+if <+| mv a { … }           // X basis
+let all = <01| mv r         // r: [Qubit; 2], true when r[0] is 0 and r[1] is 1
+```
+
+A bra, an observable and a ket together are an **expectation value** `<ψ| H |ψ>`, written as
+in physics:
+
+```noev
+let energy = <ansatz(theta)| h |ansatz(theta)>
+let zero = <+| Z(0) |+>
+```
+
+`ψ` is a **preparation**: a function call or a ket literal, which the runtime may evaluate
+many times. Both sides must be the same expression (transition amplitudes `<φ| H |ψ>` are not
+supported). The observable is an expression whose top level contains no `|` and no
+comparison, so the `|` and `>` that close it are unambiguous. Inside the closing ket, `|`
+always starts the preparation, even after an operand.
+
+To tell the two forms apart, the parser reads an observable-shaped expression after the
+bra. If `|` follows, the expression is an expectation value. Otherwise it is a measurement
+test, and the expression must be a single operand (`<1| mv q`), so `<1| mv q and ok` means
+`(<1| mv q) and ok`. A `<` that does not form a bra literal, in operand position, always
+starts an expectation value.
+
 ### Conversions
 
 Converting between types looks like calling the target type: `Float(n)`, `Bit(true)`,
@@ -310,7 +358,7 @@ Highest first. Binary operators are left-associative; comparisons cannot be chai
 | Level | Operators                                        |
 | ----- | ------------------------------------------------ |
 | 1     | `.` field and method, `[]` index, `()` call, `::` path |
-| 2     | unary `-` `~`, `mv`, `ref`, `mut`, `adj`         |
+| 2     | unary `-` `~`, `mv`, `ref`, `mut`, `adj`, bra test |
 | 3     | `*` `/` `%`                                      |
 | 4     | `+` `-`                                          |
 | 5     | `<<` `>>`                                        |

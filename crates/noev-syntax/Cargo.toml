@@ -11,3 +11,7 @@ publish.workspace = true
 [dependencies]
 [lints]
 workspace = true
+
+[[bench]]
+name = "phases"
+harness = false

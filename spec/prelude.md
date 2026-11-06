@@ -50,7 +50,38 @@ consumes the array. (This is the `Measure` trait once traits exist; see
 
 Also as free functions: `measure(mv q)`, `reset(q)`, `discard(mv q)`.
 
-## 3. Math
+## 3. Measurement tests
+
+Measurement in the X basis, and tests against specific states, are written with bras (see
+[grammar.md](grammar.md) §2, Bras and expectation values): `<+| mv q` is `true` if `q` is
+measured as \|+⟩.
+
+## 4. Observables
+
+| Function / operator                      | Meaning                                      |
+| ---------------------------------------- | -------------------------------------------- |
+| `X(i: Int) -> Observable`                | Pauli X on qubit `i` of the preparation      |
+| `Y(i: Int) -> Observable`                | Pauli Y on qubit `i`                         |
+| `Z(i: Int) -> Observable`                | Pauli Z on qubit `i`                         |
+| `I() -> Observable`                      | The identity (for constant offsets)          |
+| `P(i: Int, b: Bit) -> Observable`        | Projector onto \|b⟩ for qubit `i`: `0.5 * (I() + Z(i))` for `b = 0`, `0.5 * (I() - Z(i))` for `b = 1` |
+| `PX(i: Int, b: Bit) -> Observable`       | Projector onto \|+⟩ (`b = 0`) or \|−⟩ (`b = 1`) for qubit `i`, built from `X(i)` the same way |
+| `a + b`, `a - b`, `-a`                   | Sums                                         |
+| `c * a`, `a * c` with `c: Float`         | Scaling                                      |
+| `a * b`                                  | Product; the factors must act on different qubits (a qubit is acted on if any term has a non-identity Pauli on it), so the result is Hermitian |
+
+```noev
+let ising = -1.0 * Z(0) * Z(1) + 0.5 * (X(0) + X(1))
+let energy = <ansatz(theta)| ising |ansatz(theta)>
+
+let p11 = <ansatz(theta)| P(0, 1) * P(1, 1) |ansatz(theta)>   // probability of measuring 11
+```
+
+Projectors are ordinary observables (sums of Paulis), so the probability of an outcome is an
+expectation value. A product of single-qubit projectors on different qubits projects onto
+the corresponding multi-qubit state.
+
+## 5. Math
 
 Methods on `Float`: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2(self, x)`, `sqrt`,
 `exp`, `ln`, `abs`, `min(self, other)`, `max(self, other)`. `Int` has `abs`, `min` and
@@ -63,10 +94,12 @@ Constants: `Float::PI`, `Float::TAU`, `Float::E`.
 
 All of these are pure, so they may be called in reversible contexts.
 
-## 4. Open questions
+## 6. Open questions
 
 - **Measuring without consuming.** `measure` consumes the qubit. Repeated mid-circuit
   measurement (error-correction syndromes, for example) would prefer something like
   `fn measure_reset(mut self) -> Bit` that leaves the qubit in \|0⟩.
-- **Other measurement bases**, such as `measure_x`.
+- **Estimation settings.** How many runs an estimated expectation value uses (on hardware,
+  or when the preparation measures), and how to set it per expectation or per program.
+- **Y-basis bras** (`<i|`, `<-i|`), alongside Y-basis kets.
 - **Printing and output** for classical results, beyond the CLI's result histogram.

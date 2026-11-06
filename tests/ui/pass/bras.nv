@@ -1,0 +1,39 @@
+fn ansatz(theta: Float) -> [Qubit; 2] {
+    let r = |00>
+    r[0].ry(theta)
+    ctrl r[0] { r[1].x() }
+    mv r
+}
+
+fn measurement_tests() -> Bool {
+    let q = |+>
+    let plus = <+| mv q
+    let r = |01>
+    let pair = <01| mv r
+    let c = |1>
+    plus and pair and <1| mv c
+}
+
+fn energy(theta: Float) -> Float {
+    let h = -1.0 * Z(0) * Z(1) + 0.5 * (X(0) + X(1))
+    <ansatz(theta)| h |ansatz(theta)>
+}
+
+fn probability_of_11(theta: Float) -> Float {
+    <ansatz(theta)| P(0, 1) * P(1, 1) |ansatz(theta)>
+}
+
+fn plus_state() -> Float {
+    <+| Z(0) |+>
+}
+
+fn main() {
+    let e = energy(0.3)
+    let z = plus_state()
+    let p = probability_of_11(0.3)
+    let ok = measurement_tests()
+    let q = |0>
+    if <0| mv q {
+        let fine = true
+    }
+}

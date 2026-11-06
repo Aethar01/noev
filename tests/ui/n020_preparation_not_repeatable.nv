@@ -1,0 +1,23 @@
+// N020: the preparation in an expectation value cannot be run repeatedly.
+
+fn prep(q: mut Qubit) -> Qubit {
+    q.h()
+    |+>
+}
+
+fn counted(n: mut Int) -> Qubit {
+    n += 1
+    |0>
+}
+
+fn outside_qubit() -> Float {
+    let q = |0>
+    let e = <prep(q)| Z(0) |prep(q)>        //~ N020
+    mv q.discard()
+    e
+}
+
+fn classical_mut_lend() -> Float {
+    let mut n = 0
+    <counted(mut n)| Z(0) |counted(mut n)>  //~ N020
+}

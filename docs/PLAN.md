@@ -71,6 +71,8 @@ programmer never picks physical qubit locations.
 | Feature                      | Syntax                                          |
 | ---------------------------- | ----------------------------------------------- |
 | Create qubits                | Ket literals `\|0>`, `\|+>`, `\|01>`               |
+| Measurement tests            | Bras: `<1\| mv q` (Z basis), `<+\| mv q` (X basis) → `Bool` |
+| Expectation values           | `<ansatz(t)\| h \|ansatz(t)>` → `Float`         |
 | Gates                        | Methods `q.h().s().ry(t)`, or free `h(q)`       |
 | Ownership words              | `mv x` give away, `ref x` lend to read, `mut x` lend to change |
 | Implicit lending             | `ref` always; `mut` for pure quantum values (`h(q)`); classical `bump(mut n)` stays written |
@@ -115,7 +117,7 @@ q.x()                  // ERROR N002: use after move (q consumed by measure)
 Also: borrow errors (`swap(a, a)`, `ctrl a { a.x() }`, references outliving their value),
 qubits that go out of scope without being consumed (measured, discarded, or returned),
 irreversible operations in reversible code, and classical changes not written out. The full
-list, with error codes N001–N019, is in
+list, with error codes N001–N020, is in
 [`spec/ownership.md`](../spec/ownership.md).
 
 Later goal: safe automatic uncomputation, where the compiler proves temporary quantum data
@@ -131,10 +133,11 @@ circuit generation.
 | -- | ---------------------------- | ------------------------------------------------------------------------------------------ | ------- |
 | 1  | Parser                       | Read `.nv` files, build an AST                                                             | ☐ Todo |
 | 2  | Basic types                  | `Int`, `Float`, `Bool`, `Bit`, `Qubit`, tuples, arrays, structs                            | ☐ Todo |
-| 3  | Ownership checker            | Rules N001–N019 in `spec/ownership.md` (`with`/`do` reserved)                              | ☐ Todo |
+| 3  | Ownership checker            | Rules N001–N020 in `spec/ownership.md` (`with`/`do` reserved)                              | ☐ Todo |
 | 4  | Quantum IR                   | Allocation, gates, measurement, classical dependencies                                     | ☐ Todo |
 | 5  | Circuit generation           | Export to OpenQASM 3                                                                       | ☐ Todo |
 | 6  | Execution                    | Run on a simulator, expose results via the `noev` CLI                                      | ☐ Todo |
+| 7  | Expectation values           | `<ψ\| H \|ψ>` with observables, exact on ketrs where possible                               | ☐ Todo |
 
 **Priority:** build the type system and ownership checker (milestones 1–3) first, before any
 simulator. A compiler that accepts valid quantum programs and rejects physically invalid
@@ -146,7 +149,7 @@ resource operations gives the project its technical identity from day one.
 | ----------------------- | ------------------------------------- |
 | Compiler implementation | Rust                                  |
 | Source extension        | `.nv` (provisional)                   |
-| Lexer / parser          | `logos` (lexer) + `chumsky` (parser)  |
+| Lexer / parser          | Hand-written (recursive descent, Pratt for expressions) |
 | Diagnostics             | `ariadne` (source-annotated errors)   |
 | Type system             | Static, with linear quantum ownership |
 | Export backend          | OpenQASM 3                            |
@@ -154,9 +157,19 @@ resource operations gives the project its technical identity from day one.
 | Later backend           | QIR / LLVM                            |
 | CLI                     | `noev`, arguments parsed with `clap`  |
 
-- **Parser:** `chumsky` gives error recovery (report several errors per file, not just the
-  first), and `ariadne` is from the same author, so spans flow straight into readable
-  diagnostics. Ownership errors are the product, so error quality matters from day one.
+- **Parser:** hand-written, for speed, full control over error recovery (report several
+  errors per file, not just the first), and Noev's context-sensitive lexing (kets, line
+  breaks). `ariadne` renders diagnostics; it only runs when there are errors, so it costs
+  nothing on the fast path. Ownership errors are the product, so error quality matters from
+  day one.
+- **Performance is a feature.** The compiler must stay fast as it grows:
+  - flat data: tokens and syntax-tree nodes in contiguous arrays addressed by `u32` indices,
+    spans as `u32` byte offsets, identifiers interned; no per-node heap allocation;
+  - one linear pass per phase where possible, no backtracking in the parser;
+  - benchmarks for each phase from the start (lexing, parsing, checking), run on large
+    generated programs, so regressions are caught when they happen;
+  - avoid heavy generic or macro machinery in the compiler itself, to keep its own build
+    fast.
 - **Execution:** the runtime walks Noev IR and drives `ketrs::Statevector` directly
   (`measure`, `reset` and gates exist there), rather than round-tripping through QASM text.
   Programs whose measurements are all terminal with no classical feedback build one
@@ -258,7 +271,7 @@ program never breaks existing code; the reverse does.
 
 | Decision            | Choice                                                    | Status   |
 | ------------------- | --------------------------------------------------------- | -------- |
-| Parser              | `logos` + `chumsky`, diagnostics with `ariadne`           | Decided  |
+| Parser              | Hand-written lexer and parser, diagnostics with `ariadne` | Decided  |
 | Simulator           | `ketrs`, driven directly from IR                          | Decided  |
 | Project structure   | Language project: `spec/` + Cargo workspace (§6)          | Decided  |
 | Standalone language | Own compiler and syntax; not a Rust superset or rustc fork (below) | Decided  |

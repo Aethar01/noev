@@ -47,6 +47,9 @@ logical qubit. The compiler and runtime decide which physical qubit that is.
 
 `let b: Bit = 1` and `if m == 1 { … }` with `m: Bit` both work through the literal rule.
 
+A bra is not a value on its own; it only appears in a measurement test or an expectation
+value (below).
+
 ### Ket literals
 
 Each character prepares one fresh qubit:
@@ -68,6 +71,48 @@ released automatically (see [ownership.md](ownership.md) §9).
 
 The array repeat form `[|0>; N]` evaluates the ket `N` times, giving `N` independent fresh
 qubits. For any other linear value, `[x; N]` is an error, since it would copy `x`.
+
+### Measurement tests
+
+`<s| x` measures `x` and has type `Bool`. `x` must be a `Qubit` when `s` has one character,
+or `[Qubit; N]` when `s` has `N` characters. Each character picks the basis for its qubit:
+`0` and `1` measure in the Z basis, `+` and `-` in the X basis. The result is `true` when
+every qubit's outcome matches its character. `x` is consumed, as with `measure`.
+
+The probability of `true` is |⟨s|ψ⟩|², so the notation means what it does in physics. When
+the compiler can prove `x` is exactly in \|s⟩, the result is certainly `true`, and the
+compiler may skip the measurement and release the qubits directly (see
+[ownership.md](ownership.md) §9).
+
+### Observables and expectation values
+
+`Observable` is a classical, copyable type: a real-weighted sum of products of Pauli
+operators, built with the prelude functions `X(i)`, `Y(i)`, `Z(i)` and `I()` and the
+operators `+`, `-` and `*` (see [prelude.md](prelude.md) §4).
+
+`<ψ| H |ψ>` has type `Float`, where `H: Observable` and `ψ` is a preparation whose type is
+pure quantum. Pauli indices refer to the qubits of `ψ`'s value in order: for a struct, its
+fields in declaration order; for arrays and tuples, their elements. An index outside that
+range is a compile error.
+
+The value is ⟨ψ|H|ψ⟩. A simulator computes it exactly when `ψ` contains no measurement;
+otherwise, and on hardware, it is estimated by averaging over repeated runs of `ψ`.
+
+### How the two forms relate
+
+Mathematically, a measurement test is a special case of an expectation value:
+|⟨s|ψ⟩|² = ⟨ψ| (|s⟩⟨s|) |ψ⟩, the expectation of the projector onto \|s⟩. The forms differ in
+what a quantum computer can physically return:
+
+| Form          | Acts on                               | Returns                                   |
+| ------------- | ------------------------------------- | ----------------------------------------- |
+| `<s\| mv q`   | a qubit that exists now, consuming it | one sample of \|s⟩⟨s\|: a random `Bool`   |
+| `<ψ\| H \|ψ>` | a preparation, re-run as needed      | the average of `H`: a `Float`              |
+
+So `<11| mv r` draws once from the distribution whose probability of `true` is
+`<ψ| P(0, 1) * P(1, 1) |ψ>`. The amplitude ⟨s|ψ⟩ itself cannot be observed, so Noev has no
+`<s|ψ>` form: in standard notation it means the amplitude, and giving it any other meaning
+would mislead.
 
 ## 4. Conversions
 

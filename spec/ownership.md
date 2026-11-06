@@ -497,11 +497,31 @@ mv q.release()          // error[N019]: `release` is unsafe: it trusts that `q` 
 `unsafe` is N019. The body of an `unsafe fn` is not itself an `unsafe` block; unsafe
 operations inside it still need one, so each claim is visible where it is made.
 
-## 12. Open questions
+## 12. Bras and preparations
+
+A measurement test `<s| x` consumes `x` like `measure`: a place needs `mv` (N001), and it is
+not allowed in a reversible context (N013).
+
+An expectation value `<ψ| H |ψ>` runs the preparation `ψ` as many times as the estimate
+needs, each time creating and consuming its qubits internally. So `ψ` must be repeatable:
+
+### N020: preparation is not repeatable
+
+```noev
+let q = |+>
+let e = <prep(q)| Z(0) |prep(q)>     // error[N020]: `prep` is run many times, but `q` exists once
+                                     //   help: create the qubits inside `prep`
+```
+
+The arguments of a preparation must be classical (copyable) values: no qubits, no `mv`, and
+no `mut` lends. A ket literal is always repeatable. Expectation values are not allowed in a
+reversible context (N013).
+
+## 13. Open questions
 
 None currently.
 
-## 13. Error code index
+## 14. Error code index
 
 | Code | Error                                              |
 | ---- | -------------------------------------------------- |
@@ -524,3 +544,4 @@ None currently.
 | N017 | Indices not proven different                       |
 | N018 | Qubit index not proven in range                    |
 | N019 | Unsafe operation outside `unsafe`                  |
+| N020 | Preparation is not repeatable                      |
