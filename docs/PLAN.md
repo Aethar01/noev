@@ -138,6 +138,7 @@ circuit generation.
 | 5  | Circuits                     | Closed runs that are circuits (`spec/execution.md`) compiled to ketrs circuits and OpenQASM 3 | ◐ In progress (ketrs circuits done; OpenQASM 3 export to do) |
 | 6  | Execution                    | Interpreter on ketrs, circuits sampled through ketrs, `noev run` | ☑ Done |
 | 7  | Expectation values           | `<ψ\| H \|ψ>` with observables, exact on ketrs where possible                               | ☐ Todo |
+| 8  | Backend interface            | The interpreter drives ketrs through the runtime's backend interface (`spec/runtime.md`), at circuit and gate level | ☐ Todo |
 
 **Priority:** build the type system and ownership checker (milestones 1–3) first, before any
 simulator. A compiler that accepts valid quantum programs and rejects physically invalid
@@ -152,9 +153,9 @@ resource operations gives the project its technical identity from day one.
 | Lexer / parser          | Hand-written (recursive descent, Pratt for expressions) |
 | Diagnostics             | `ariadne` (source-annotated errors)   |
 | Type system             | Static, with linear quantum ownership |
-| Export backend          | OpenQASM 3                            |
-| Execution               | [`ketrs`](../../ketrs) (own simulator, path dependency) |
-| Later backend           | QIR / LLVM                            |
+| Export                  | OpenQASM 3; QIR later                 |
+| Execution               | [`ketrs`](../../ketrs) (own simulator, path dependency), behind the runtime's backend interface |
+| Native code (after v0.1) | Cranelift and LLVM, behind one code-generation interface (`spec/runtime.md`) |
 | CLI                     | `noev`, arguments parsed with `clap`  |
 
 - **Parser:** hand-written, for speed, full control over error recovery (report several
@@ -175,6 +176,11 @@ resource operations gives the project its technical identity from day one.
   simulation for all shots (ketrs shares the work before the first mid-circuit measurement).
   Runs that are not circuits are interpreted shot by shot on a `ketrs::Statevector`. The same
   circuit builder emits OpenQASM 3, and later QIR for hardware.
+- **Compilation** (`spec/runtime.md`): programs compile to native code (Cranelift or LLVM,
+  swappable) linked to the Noev runtime, which sends quantum work to a backend at circuit
+  level (whole jobs, as hardware takes them today) or gate level (simulators, and future
+  machines that control qubits gate by gate in real time). The interpreter uses the same
+  runtime interface.
 
 ## 6. Repository layout
 
@@ -194,6 +200,7 @@ noev/
 │   ├── ownership.md           #   ownership rules and error codes
 │   ├── core.md                #   intrinsics: gates, measurement, observables, maths
 │   ├── std.md                 #   standard library, with reference definitions in Noev
+│   ├── runtime.md             #   code generators, the runtime and quantum backends (design)
 │   ├── modules.md             #   modules, imports, visibility, packages (reserved)
 │   └── interop.md             #   calling into and out of Noev (reserved)
 ├── crates/
@@ -290,6 +297,8 @@ program never breaks existing code; the reverse does.
 | Strings, formatting | `String` with value semantics; `{expr:spec}` interpolation checked at compile time | Decided  |
 | Sampling            | `sample n { … } -> Distribution<T>` in the language, no CLI command: a block that runs `n` times, so every call still runs once where it is written | Decided  |
 | Generic syntax      | Angle brackets: `Distribution<T>` | Decided  |
+| Compilation         | Native code linked to a Noev runtime; code generators (Cranelift, LLVM) swappable behind the IR; QIR for export and linking (`spec/runtime.md`) | Decided  |
+| Quantum backends    | One interface, two levels: circuit (jobs) and gate (operation by operation); ketrs first | Decided  |
 | Unconsumed qubits   | Compile error now; goal is implicit free when provably \|0⟩ | Decided  |
 
 ### References: Rust's model, Noev's spelling
@@ -360,6 +369,16 @@ don't set it have no toolchain, so set `RUSTUP_HOME` when running cargo from bas
 
 Planned once milestones 1–7 are done, roughly in this order.
 
+### Compilation (`spec/runtime.md`)
+
+1. **Runtime C ABI**, shaped like QIR's, with the interpreter moved onto it.
+2. **Cranelift code generator** and `noev build --emit=binary|object`; compiled programs
+   tested against the interpreter.
+3. **QIR export** (`--emit=qir`): base profile for circuits, adaptive profile for classical
+   control.
+4. **LLVM code generator**, optionally emitting QIR calls so programs link to QIR runtimes.
+5. **Hardware backends** at circuit level, and compile-time checks against a target.
+
 ### Interop (`spec/interop.md`)
 
 Only classical values cross the boundary; the host never holds a qubit.
@@ -370,7 +389,8 @@ Only classical values cross the boundary; the host never holds a qubit.
 2. **Python bindings** on top of it (PyO3, as in `ketrs-py`). Reaches most of the quantum
    audience: Python optimisers driving Noev expectation values.
 3. **C, both ways:** `extern "C"` imports called inside `unsafe`, and a `noev.h` API for C and
-   C++ hosts. Imports need native compilation or `libffi`; easiest after the QIR/LLVM backend.
+   C++ hosts. Imports need native compilation or `libffi`; easiest after native code
+   generation.
 4. **Inline OpenQASM** for hardware-specific gates (`unsafe`).
 
 Hardware targets will need a rule for foreign calls made while qubits are alive (they run on
