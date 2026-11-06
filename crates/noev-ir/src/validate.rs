@@ -188,7 +188,8 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         let errors = noev_sema::check_ownership(&parsed.ast, &typed);
         assert!(errors.is_empty(), "{errors:?}");
-        lower(&parsed.ast, &typed, source)
+        let (circuits, _) = noev_sema::check_circuits(&parsed.ast, &typed);
+        lower(&parsed.ast, &typed, &circuits, source)
     }
 
     #[test]

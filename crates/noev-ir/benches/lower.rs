@@ -19,7 +19,8 @@ fn main() {
         .map(|s| {
             let parsed = noev_syntax::parse(s);
             let (typed, _) = noev_sema::check(&parsed.ast);
-            (s, parsed, typed)
+            let (circuits, _) = noev_sema::check_circuits(&parsed.ast, &typed);
+            (s, parsed, typed, circuits)
         })
         .collect();
     let repeats = 500;
@@ -30,8 +31,13 @@ fn main() {
         .map(|_| {
             let start = Instant::now();
             for _ in 0..repeats {
-                for (source, parsed, typed) in &checked {
-                    black_box(noev_ir::lower(black_box(&parsed.ast), typed, source));
+                for (source, parsed, typed, circuits) in &checked {
+                    black_box(noev_ir::lower(
+                        black_box(&parsed.ast),
+                        typed,
+                        circuits,
+                        source,
+                    ));
                 }
             }
             start.elapsed()

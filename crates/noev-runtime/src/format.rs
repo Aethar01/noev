@@ -219,7 +219,8 @@ mod tests {
     fn empty_program() -> Program {
         let parsed = noev_syntax::parse("");
         let (typed, _) = noev_sema::check(&parsed.ast);
-        noev_ir::lower(&parsed.ast, &typed, "")
+        let (circuits, _) = noev_sema::check_circuits(&parsed.ast, &typed);
+        noev_ir::lower(&parsed.ast, &typed, &circuits, "")
     }
 
     #[test]

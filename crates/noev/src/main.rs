@@ -186,6 +186,7 @@ struct Checked {
     source: String,
     parsed: noev_syntax::Parsed,
     typed: noev_sema::Typed,
+    circuits: noev_sema::Circuits,
 }
 
 /// Reads and checks `file`, printing its diagnostics. Fails with exit status 1 when there
@@ -203,10 +204,13 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
     let mut diagnostics = parsed.diagnostics.clone();
     // Ownership is only meaningful for a well-typed program, and circuits for one that
     // passes ownership checking.
+    let mut circuits = noev_sema::Circuits::default();
     if diagnostics.is_empty() && type_errors.is_empty() {
         diagnostics.extend(noev_sema::check_ownership(&parsed.ast, &typed));
         if diagnostics.is_empty() {
-            diagnostics.extend(noev_sema::check_circuits(&parsed.ast, &typed).1);
+            let (found, warnings) = noev_sema::check_circuits(&parsed.ast, &typed);
+            circuits = found;
+            diagnostics.extend(warnings);
         }
     }
     diagnostics.extend(type_errors);
@@ -222,6 +226,7 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
         source,
         parsed,
         typed,
+        circuits,
     })
 }
 
@@ -231,7 +236,12 @@ fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) 
         Ok(checked) => checked,
         Err(code) => return code,
     };
-    let program = noev_ir::lower(&checked.parsed.ast, &checked.typed, &checked.source);
+    let program = noev_ir::lower(
+        &checked.parsed.ast,
+        &checked.typed,
+        &checked.circuits,
+        &checked.source,
+    );
     let text = match emit {
         Emit::Ir => program.to_string(),
         Emit::Plan => plan(&checked),
@@ -259,7 +269,12 @@ fn export(
     output: Option<&Path>,
     format: MessageFormat,
 ) -> ExitCode {
-    let program = &noev_ir::lower(&checked.parsed.ast, &checked.typed, &checked.source);
+    let program = &noev_ir::lower(
+        &checked.parsed.ast,
+        &checked.typed,
+        &checked.circuits,
+        &checked.source,
+    );
     let exporter = noev_runtime::backend::Exporter::default();
     // What the program prints depends on results that are not known, so it is dropped.
     let sink = noev_runtime::Output {
@@ -355,7 +370,12 @@ fn run(
     if backend == BackendChoice::Export {
         return export(file, &checked, circuits, format);
     }
-    let program = noev_ir::lower(&checked.parsed.ast, &checked.typed, &checked.source);
+    let program = noev_ir::lower(
+        &checked.parsed.ast,
+        &checked.typed,
+        &checked.circuits,
+        &checked.source,
+    );
     let seed = seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -395,7 +415,7 @@ fn run(
 /// quantum operations.
 fn plan(checked: &Checked) -> String {
     let ast = &checked.parsed.ast;
-    let (circuits, _) = noev_sema::check_circuits(ast, &checked.typed);
+    let circuits = &checked.circuits;
     let lines = report::Lines::new(&checked.source);
     let line = |span: noev_syntax::Span| lines.line_col(span.start).0;
     // Why a run is not sampled from one simulation, if it is not.

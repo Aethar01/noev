@@ -14,8 +14,9 @@ use noev_syntax::{Ast, Span};
 
 use crate::ir::*;
 
-/// Lowers every function of a checked program. `source` supplies the text of kets and bras.
-pub fn lower(syntax: &Ast, typed: &Typed, source: &str) -> Program {
+/// Lowers every function of a checked program, given which of its runs are circuits
+/// ([`noev_sema::check_circuits`]). `source` supplies the text of kets and bras.
+pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &str) -> Program {
     let struct_names = typed
         .types
         .structs
@@ -35,7 +36,6 @@ pub fn lower(syntax: &Ast, typed: &Typed, source: &str) -> Program {
         .collect();
     // Lowering creates reference types for implicit lends, so it works on its own copy.
     let mut types = typed.types.clone();
-    let (circuits, _) = noev_sema::check_circuits(syntax, typed);
     let mut functions = Vec::with_capacity(syntax.all_fns().len());
     // `sample` runs become functions of their own, numbered after the program's.
     let mut runs = Vec::new();
@@ -56,7 +56,7 @@ pub fn lower(syntax: &Ast, typed: &Typed, source: &str) -> Program {
         }
         let shared = Shared {
             types: &mut types,
-            circuits: &circuits,
+            circuits,
             runs: &mut runs,
             first_run: syntax.all_fns().len() as u32,
         };
