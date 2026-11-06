@@ -223,6 +223,16 @@ After an `if`, every linear place must be moved in all branches or in none. An `
 `else` counts as having an empty `else`. Otherwise the program could not know whether the
 qubit still needs consuming.
 
+The right operand of `and` and `or` only runs when the left one does not decide the result,
+so it counts as a branch too:
+
+```noev
+let q = |0>
+let both = flag and <1| mv q
+                        // error[N009]: `q` is only moved when the right side of `and` runs
+                        //   help: measure it first, in its own `let`
+```
+
 ### N010: moved inside a loop
 
 ```noev

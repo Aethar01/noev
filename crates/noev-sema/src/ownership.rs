@@ -729,6 +729,34 @@ impl Owner<'_> {
                 self.expr(operand, Use::Read);
                 Vec::new()
             }
+            ExprKind::Binary {
+                op: op @ (BinaryOp::And | BinaryOp::Or),
+                lhs,
+                rhs,
+            } => {
+                self.expr(lhs, Use::Read);
+                // The right side only sometimes runs, so moving qubits there is a branch.
+                let before = self.moved.len();
+                self.expr(rhs, Use::Read);
+                let moved: Vec<Moved> = self.moved[before..].to_vec();
+                for m in moved {
+                    let ty = self.place_ty(&m.place);
+                    if self.typed.types.linearity(ty) == Kind::Copyable {
+                        continue;
+                    }
+                    let name = self.place_text(&m.place);
+                    self.error(
+                        "N009",
+                        m.span,
+                        format!(
+                            "`{name}` is only moved when the right side of `{}` runs",
+                            op.as_str()
+                        ),
+                    )
+                    .help = Some("measure it first, in its own `let`".into());
+                }
+                Vec::new()
+            }
             ExprKind::Binary { lhs, rhs, .. } => {
                 self.expr(lhs, Use::Read);
                 self.expr(rhs, Use::Read);

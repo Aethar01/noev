@@ -78,7 +78,7 @@ pub struct StructDef {
 }
 
 /// Every type used by a program.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Types {
     kinds: Vec<TyKind>,
     map: FxHashMap<TyKind, Ty>,

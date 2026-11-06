@@ -87,8 +87,10 @@ pub struct FnInfo {
     pub owner: Option<StructId>,
     /// Its parameters as locals, in order, after `self`.
     pub params: Vec<LocalId>,
-    /// `self`, for methods.
+    /// `self`, for methods whose body uses it.
     pub self_local: Option<LocalId>,
+    /// The receiver's type (`Self`, `ref Self` or `mut Self`), for methods.
+    pub receiver_ty: Option<Ty>,
 }
 
 /// Everything the type checker learned about a program.
@@ -245,6 +247,7 @@ impl Checker<'_> {
                 owner: None,
                 params: Vec::new(),
                 self_local: None,
+                receiver_ty: None,
             })
             .collect();
 
@@ -392,17 +395,19 @@ impl Checker<'_> {
             self.scope.clear();
             self.loops = 0;
 
-            // `self` is only interned if some body uses it; if none does, nothing needs it.
-            if let (Some(receiver), Some(self_ty), Some(name)) =
-                (decl.receiver, self.self_ty, self.ast.symbols.get("self"))
-            {
+            if let (Some(receiver), Some(self_ty)) = (decl.receiver, self.self_ty) {
                 let ty = match receiver.kind {
                     OwnKind::Mv => self_ty,
                     OwnKind::Ref => self.t.types.reference(false, self_ty),
                     OwnKind::Mut => self.t.types.reference(true, self_ty),
                 };
-                let local = self.declare(name, ty, false, receiver.span);
-                self.t.fns[f.index()].self_local = Some(local);
+                self.t.fns[f.index()].receiver_ty = Some(ty);
+                // `self` is only interned if some body uses it; if none does, no body can
+                // refer to it, so it needs no local.
+                if let Some(name) = self.ast.symbols.get("self") {
+                    let local = self.declare(name, ty, false, receiver.span);
+                    self.t.fns[f.index()].self_local = Some(local);
+                }
             }
             let mut params = Vec::new();
             for (param, &ty) in ast.list(decl.params).iter().zip(&info.sig.params) {

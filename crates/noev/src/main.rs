@@ -48,7 +48,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Emit::Qasm3)]
         emit: Emit,
 
-        /// Where to write the output (default: next to the source file)
+        /// Where to write the output (default: standard output)
         #[arg(short, long, value_name = "PATH")]
         output: Option<PathBuf>,
 
@@ -93,29 +93,53 @@ enum MessageFormat {
 enum Emit {
     /// OpenQASM 3 source
     Qasm3,
+    /// Noev's intermediate representation, for inspecting the compiler
+    Ir,
 }
 
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Command::Check { file, messages } => check(&file, messages.message_format),
-        Command::Build { .. } => not_implemented("build"),
+        Command::Check { file, messages } => match front_end(&file, messages.message_format) {
+            Ok(_) => {
+                if matches!(messages.message_format, MessageFormat::Human) {
+                    anstream::eprintln!(
+                        "{NOTE}note:{NOTE:#} syntax, types and ownership were checked"
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(code) => code,
+        },
+        Command::Build {
+            file,
+            emit,
+            output,
+            messages,
+        } => build(&file, emit, output.as_deref(), messages.message_format),
         Command::Run { .. } => not_implemented("run"),
     }
 }
 
-/// Checks `file`, printing its diagnostics. Exits with 0 when there are no errors, 1 when
-/// there are, and 2 when the file could not be checked at all.
-fn check(file: &Path, format: MessageFormat) -> ExitCode {
+/// A program that passed every check.
+struct Checked {
+    source: String,
+    parsed: noev_syntax::Parsed,
+    typed: noev_sema::Typed,
+}
+
+/// Reads and checks `file`, printing its diagnostics. Fails with exit status 1 when there
+/// are errors, and 2 when the file could not be read.
+fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
     let source = match std::fs::read_to_string(file) {
         Ok(source) => source,
         Err(error) => {
             anstream::eprintln!("noev: cannot read {}: {error}", file.display());
-            return ExitCode::from(2);
+            return Err(ExitCode::from(2));
         }
     };
     let parsed = noev_syntax::parse(&source);
     let (typed, type_errors) = noev_sema::check(&parsed.ast);
-    let mut diagnostics = parsed.diagnostics;
+    let mut diagnostics = parsed.diagnostics.clone();
     // Ownership is only meaningful for a well-typed program.
     if diagnostics.is_empty() && type_errors.is_empty() {
         diagnostics.extend(noev_sema::check_ownership(&parsed.ast, &typed));
@@ -126,13 +150,39 @@ fn check(file: &Path, format: MessageFormat) -> ExitCode {
     let failed = diagnostics
         .iter()
         .any(|d| d.severity == noev_syntax::Severity::Error);
-    if matches!(format, MessageFormat::Human) && !failed {
-        anstream::eprintln!("{NOTE}note:{NOTE:#} syntax, types and ownership were checked");
-    }
     if failed {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
+        return Err(ExitCode::from(1));
+    }
+    Ok(Checked {
+        source,
+        parsed,
+        typed,
+    })
+}
+
+/// Compiles `file` and writes the requested output to `output`, or to stdout.
+fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) -> ExitCode {
+    let checked = match front_end(file, format) {
+        Ok(checked) => checked,
+        Err(code) => return code,
+    };
+    let program = noev_ir::lower(&checked.parsed.ast, &checked.typed, &checked.source);
+    let text = match emit {
+        Emit::Ir => program.to_string(),
+        Emit::Qasm3 => return not_implemented("build --emit=qasm3"),
+    };
+    match output {
+        Some(path) => match std::fs::write(path, text) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                anstream::eprintln!("noev: cannot write {}: {error}", path.display());
+                ExitCode::from(2)
+            }
+        },
+        None => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
     }
 }
 

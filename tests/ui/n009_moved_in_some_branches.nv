@@ -7,6 +7,11 @@ fn if_without_else(flag: Bool) {
     }
 }
 
+fn right_side_of_and(flag: Bool) -> Bool {
+    let q = |0>
+    flag and <1| mv q               //~ N009
+}
+
 fn if_else_mismatch(flag: Bool) -> Bit {
     let q = |+>
     let b = |0>

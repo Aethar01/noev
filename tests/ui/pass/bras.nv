@@ -11,7 +11,8 @@ fn measurement_tests() -> Bool {
     let r = |01>
     let pair = <01| mv r
     let c = |1>
-    plus and pair and <1| mv c
+    let last = <1| mv c
+    plus and pair and last
 }
 
 fn energy(theta: Float) -> Float {

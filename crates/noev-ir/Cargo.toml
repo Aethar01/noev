@@ -14,3 +14,7 @@ noev-sema = { path = "../noev-sema" }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "lower"
+harness = false
