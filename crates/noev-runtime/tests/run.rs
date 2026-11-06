@@ -707,5 +707,8 @@ fn circuits_are_exported_without_simulating_them() {
     assert!(error.unknown, "{error:?}");
     let jobs = exporter.jobs.borrow();
     assert_eq!(jobs.len(), 1);
-    assert_eq!((jobs[0].0.qubits, jobs[0].0.clbits, jobs[0].1), (40, 40, 1000));
+    assert_eq!(
+        (jobs[0].0.qubits, jobs[0].0.clbits, jobs[0].1),
+        (40, 40, 1000)
+    );
 }

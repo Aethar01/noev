@@ -229,7 +229,7 @@ CLI:
 ```
 noev check examples/bell.nv
 noev build examples/bell.nv --emit=plan
-noev build examples/bell.nv --emit=qasm3 -o out/
+noev export examples/bell.nv -o out/
 noev run   examples/bell.nv
 ```
 

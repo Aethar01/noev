@@ -168,7 +168,6 @@ backends comes with the C ABI.
 | `binary`  | An executable linked to the runtime and a backend (the default, later)     |
 | `object`  | A native object file, to link yourself                                    |
 | `qir`     | QIR                                                                       |
-| `qasm3`   | Every circuit the program sends to a backend, as OpenQASM 3 (below)       |
 | `ir`      | Noev IR, for inspecting the compiler                                      |
 | `plan`    | How each repeated run executes ([execution.md](execution.md) §5)          |
 
@@ -180,17 +179,20 @@ A circuit is built by the program's classical code (§3), but building it does n
 to run: so circuits can be saved without a simulator or a quantum computer, however large
 they are.
 
-- `noev build FILE --emit=qasm3 [-o DIR]` runs only the classical code. Each circuit is
-  recorded instead of run and written as OpenQASM 3: `DIR/circuit-1.qasm`, `circuit-2.qasm`,
-  … in the order the program makes them, each with its shot count in a comment, or all on
-  standard output without `-o`. What the program prints is dropped.
+- `noev export FILE [-o DIR]` runs only the classical code, on the **export** backend: each
+  circuit is recorded instead of run and written as OpenQASM 3, `DIR/circuit-1.qasm`,
+  `circuit-2.qasm`, … in the order the program makes them, each with its shot count in a
+  comment, or all on standard output without `-o`. What the program prints is dropped.
+  `noev run FILE --backend=export [--circuits=DIR]` is the same thing, chosen the way any
+  backend is (§5); a compiled program will take the same `--backend=export`.
+  It is not part of `noev build`, which only compiles: exporting executes the program.
 - The export stops, without failing, where the program first needs something only running
   gives: the results of a `sample` (anything but `shots()`), or a quantum operation outside
   a `sample`. Circuits made after that point may depend on those results, so they need a
   run. A `sample` that runs shot by shot has no circuit, so it is skipped (its results are
   unknown too).
-- `noev run FILE --circuits=DIR` runs the program on its backend and saves the same files,
-  including circuits that depend on earlier results.
+- `noev run FILE --circuits=DIR` runs the program on a real backend and saves the same
+  files, including circuits that depend on earlier results.
 
 These files are exactly what a circuit-level backend receives. `--emit=plan` says which
 runs are circuits.

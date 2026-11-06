@@ -49,7 +49,7 @@ enum Command {
         #[arg(long, value_enum)]
         emit: Emit,
 
-        /// Where to write the output (default: standard output); a directory for `qasm3`
+        /// Where to write the output (default: standard output)
         #[arg(short, long, value_name = "PATH")]
         output: Option<PathBuf>,
 
@@ -57,7 +57,7 @@ enum Command {
         messages: MessageOptions,
     },
 
-    /// Run a program, on the simulator for its quantum parts
+    /// Run a program, with its quantum parts on a backend (ketrs unless chosen)
     Run {
         /// The `.nv` file to run
         file: PathBuf,
@@ -66,14 +66,51 @@ enum Command {
         #[arg(long, value_name = "N")]
         seed: Option<u64>,
 
+        /// What runs the quantum parts
+        #[arg(long, value_enum, default_value_t = BackendChoice::Ketrs)]
+        backend: BackendChoice,
+
         /// Save every circuit the run sends to the backend as OpenQASM 3, one file per job,
-        /// in this directory (`build --emit=qasm3` saves them without running anything)
+        /// in this directory
         #[arg(long, value_name = "DIR")]
         circuits: Option<PathBuf>,
 
         #[command(flatten)]
         messages: MessageOptions,
     },
+
+    /// Save a program's circuits without running anything quantum (the same as
+    /// `run --backend=export`)
+    Export {
+        /// The `.nv` file
+        file: PathBuf,
+
+        /// A directory for the circuits, one file each (default: all on standard output)
+        #[arg(short, long, value_name = "DIR")]
+        output: Option<PathBuf>,
+
+        /// The circuit format
+        #[arg(long, value_enum, default_value_t = ExportFormat::Qasm3)]
+        format: ExportFormat,
+
+        #[command(flatten)]
+        messages: MessageOptions,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum BackendChoice {
+    /// The ketrs statevector simulator
+    Ketrs,
+    /// Record each circuit instead of running it, and save it; nothing quantum runs, and
+    /// what the program prints is dropped, since its results are not known
+    Export,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ExportFormat {
+    /// OpenQASM 3
+    Qasm3,
 }
 
 #[derive(clap::Args)]
@@ -93,10 +130,6 @@ enum MessageFormat {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Emit {
-    /// Every circuit the program would send to a backend, as OpenQASM 3, without running
-    /// anything quantum: one file per circuit in the `--output` directory, or all on
-    /// standard output
-    Qasm3,
     /// Noev's intermediate representation, for inspecting the compiler
     Ir,
     /// How each `sample` run and quantum function runs when repeated: sampled from one
@@ -126,9 +159,25 @@ fn main() -> ExitCode {
         Command::Run {
             file,
             seed,
+            backend,
             circuits,
             messages,
-        } => run(&file, seed, circuits.as_deref(), messages.message_format),
+        } => run(
+            &file,
+            seed,
+            backend,
+            circuits.as_deref(),
+            messages.message_format,
+        ),
+        Command::Export {
+            file,
+            output,
+            format: ExportFormat::Qasm3,
+            messages,
+        } => match front_end(&file, messages.message_format) {
+            Ok(checked) => export(&file, &checked, output.as_deref(), messages.message_format),
+            Err(code) => code,
+        },
     }
 }
 
@@ -186,7 +235,6 @@ fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) 
     let text = match emit {
         Emit::Ir => program.to_string(),
         Emit::Plan => plan(&checked),
-        Emit::Qasm3 => return export(file, &checked, &program, output, format),
     };
     match output {
         Some(path) => match std::fs::write(path, text) {
@@ -203,15 +251,15 @@ fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) 
     }
 }
 
-/// `build --emit=qasm3`: runs the program's classical code with every circuit recorded instead
-/// of run, so nothing is simulated, then writes the circuits.
+/// `noev export` and `run --backend=export`: runs the program's classical code with every
+/// circuit recorded instead of run, so nothing is simulated, then writes the circuits.
 fn export(
     file: &Path,
     checked: &Checked,
-    program: &noev_ir::Program,
     output: Option<&Path>,
     format: MessageFormat,
 ) -> ExitCode {
+    let program = &noev_ir::lower(&checked.parsed.ast, &checked.typed, &checked.source);
     let exporter = noev_runtime::backend::Exporter::default();
     // What the program prints depends on results that are not known, so it is dropped.
     let sink = noev_runtime::Output {
@@ -292,12 +340,21 @@ fn report_runtime_error(
 }
 
 /// Runs `file`'s `main` once. Standard output is only what the program prints.
-fn run(file: &Path, seed: Option<u64>, circuits: Option<&Path>, format: MessageFormat) -> ExitCode {
+fn run(
+    file: &Path,
+    seed: Option<u64>,
+    backend: BackendChoice,
+    circuits: Option<&Path>,
+    format: MessageFormat,
+) -> ExitCode {
     use std::io::{IsTerminal, Write};
     let checked = match front_end(file, format) {
         Ok(checked) => checked,
         Err(code) => return code,
     };
+    if backend == BackendChoice::Export {
+        return export(file, &checked, circuits, format);
+    }
     let program = noev_ir::lower(&checked.parsed.ast, &checked.typed, &checked.source);
     let seed = seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
