@@ -291,6 +291,20 @@ pub enum Stmt {
     },
 }
 
+/// How to record an `if` or `while` on a measurement result as classical control in a
+/// circuit, instead of taking one branch.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Control {
+    /// For an `if`, the block where both branches continue: each is recorded up to here. For
+    /// a `while`, the block that computes its condition, where the body returns.
+    pub join: Block,
+    /// The `Bit` and `Bool` variables from outside it that it changes. A circuit keeps them in
+    /// classical bits, assigned in each branch or pass.
+    pub carried: Vec<Local>,
+    /// Whether it is a `while`.
+    pub repeats: bool,
+}
+
 /// The preparation of an expectation value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Prep {
@@ -313,11 +327,9 @@ pub enum Terminator {
         then: Block,
         /// Where to go when false.
         otherwise: Block,
-        /// For an `if` on a measurement result that becomes an `if` in a circuit
-        /// (`spec/execution.md` §4): the block where both branches continue. The branches
-        /// only apply gates, so while a circuit is recorded both can be recorded, each up to
-        /// here.
-        join: Option<Block>,
+        /// For an `if` or `while` on a measurement result that becomes classical control in a
+        /// circuit (`spec/execution.md` §4): how to record it.
+        control: Option<Box<Control>>,
     },
     /// Call a function and continue at `next`.
     Call {
@@ -577,9 +589,18 @@ impl Program {
                 cond,
                 then,
                 otherwise,
-                join,
+                control,
             } => {
-                let join = join.map_or(String::new(), |j| format!(" (circuit if, join bb{})", j.0));
+                let join = control.as_ref().map_or(String::new(), |c| {
+                    let carried: Vec<String> =
+                        c.carried.iter().map(|l| format!("_{}", l.0)).collect();
+                    let kind = if c.repeats { "while" } else { "if" };
+                    format!(
+                        " (circuit {kind}, join bb{}, carries [{}])",
+                        c.join.0,
+                        carried.join(", ")
+                    )
+                });
                 format!(
                     "branch {} ? bb{} : bb{}{join}",
                     operand_text(cond),

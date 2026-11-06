@@ -172,8 +172,9 @@ impl Value {
         }
     }
 
-    /// A `Bit` or `Bool`, known or not, as a condition; `None` for anything else.
-    fn as_condition(&self) -> Option<(Condition, bool)> {
+    /// A `Bit` or `Bool`, known or not, as a condition, and whether it is a `Bit`; `None` for
+    /// anything else.
+    pub fn logic(&self) -> Option<(Condition, bool)> {
         match self {
             Value::Bit(b) => Some((Condition::Const(*b), true)),
             Value::Bool(b) => Some((Condition::Const(*b), false)),
@@ -195,11 +196,11 @@ impl Value {
         if !self.has_clbits() && !other.is_some_and(Value::has_clbits) {
             return None;
         }
-        let (a, bit) = self.as_condition()?;
+        let (a, bit) = self.logic()?;
         let Some(op) = op else {
             return Some(Value::Cond(Rc::new(Condition::negate(a)), bit));
         };
-        let (b, _) = other?.as_condition()?;
+        let (b, _) = other?.logic()?;
         let (condition, bit) = match op {
             Eq => (Condition::negate(Condition::xor(a, b)), false),
             NotEq => (Condition::xor(a, b), false),

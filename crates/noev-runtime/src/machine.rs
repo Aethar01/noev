@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 
-use crate::backend::{Backend, BackendError, Circuit, Instruction, Op, Session};
+use crate::backend::{Backend, BackendError, Circuit, Condition, Instruction, Op, Session};
 use crate::format;
 use crate::value::{Observable, Pauli, Pointer, Value};
 
@@ -100,20 +100,12 @@ pub enum Mode {
     /// Send them to the backend, one at a time.
     #[default]
     Simulate,
-    /// Record them into a circuit instead, without simulating. Measurements give a
-    /// placeholder `0`: only used for runs that are circuits, where a measurement result
-    /// cannot affect anything before the last quantum operation.
+    /// Record them into a circuit instead, without simulating. Measurement results are the
+    /// circuit's classical bits ([`Value::Clbit`]); where a known value is needed, they are
+    /// taken from the recording's `known` outcome, or are a placeholder `0`. Only used for runs
+    /// that are circuits, where a measurement result cannot affect anything before the last
+    /// quantum operation except through classical control in the circuit.
     Build(Recording),
-    /// Skip them, and take measurement results from `bits`, in order: re-runs a circuit's
-    /// classical code for one sampled outcome.
-    Replay {
-        /// The outcome, measurement `k` at bit `k`.
-        bits: u64,
-        /// How many measurements have been made.
-        next: usize,
-        /// How many qubits have been handed out (indices only; there is no state).
-        qubits: usize,
-    },
 }
 
 /// A circuit being recorded in [`Mode::Build`].
@@ -123,6 +115,22 @@ pub struct Recording {
     pub circuit: Circuit,
     /// Released and measured qubits, and whether each needs a reset before reuse.
     free: Vec<(usize, bool)>,
+    /// One outcome of the circuit, classical bit `k` at bit `k`, when re-running its classical
+    /// code for that outcome. Recording the same way again keeps the bits numbered the same.
+    pub known: Option<u64>,
+    /// How many recorded loops enclose the current point: a qubit allocated in a loop's body
+    /// may have been used in the previous pass, so it is reset.
+    loops: u32,
+}
+
+impl Recording {
+    /// A recording that re-runs a circuit's classical code for one outcome.
+    pub fn knowing(bits: u64) -> Self {
+        Recording {
+            known: Some(bits),
+            ..Recording::default()
+        }
+    }
 }
 
 /// Recorded circuits use fresh qubits up to this many, so their measurements can all come at
@@ -273,18 +281,14 @@ impl<'p> Machine<'p> {
                     cond,
                     then,
                     otherwise,
-                    join: Some(join),
-                } if matches!(self.mode, Mode::Build(_))
-                    && let Some(condition) = self.operand(cond)?.condition() =>
-                {
-                    self.record_if(
-                        function,
-                        condition,
-                        then.index(),
-                        otherwise.index(),
-                        join.index(),
-                    )?;
-                    join.index()
+                    control: Some(control),
+                } if matches!(self.mode, Mode::Build(_)) => {
+                    match self.record_control(function, block, cond, *then, *otherwise, control)? {
+                        Some(next) => next.index(),
+                        // Not on a measurement result here: an ordinary branch.
+                        None if self.truth(cond)? => then.index(),
+                        None => otherwise.index(),
+                    }
                 }
                 Terminator::Branch {
                     cond,
@@ -345,38 +349,150 @@ impl<'p> Machine<'p> {
         }
     }
 
-    /// Records an `if` on a measurement result into the circuit: each branch, up to where they
-    /// join. The compiler only marks branches that apply gates, so both can run here.
-    fn record_if(
+    /// Records an `if` or `while` on a measurement result as classical control in the circuit
+    /// (`Control`), returning where to continue; `None` if its condition does not depend on a
+    /// measurement result in this call, so it is an ordinary branch.
+    ///
+    /// The variables it changes live in classical bits: assigned at the end of each branch,
+    /// or before a loop and at the end of each pass. An `if` records both branches, each up
+    /// to where they join; a `while` records its body once, up to where it returns to the
+    /// condition.
+    fn record_control(
         &mut self,
         function: &'p Function,
-        condition: crate::backend::Condition,
-        then: usize,
-        otherwise: usize,
-        join: usize,
-    ) -> Result<()> {
-        let branch = |machine: &mut Self, start: usize| -> Result<Vec<Instruction>> {
-            let outer = match &mut machine.mode {
-                Mode::Build(recording) => std::mem::take(&mut recording.circuit.instructions),
-                _ => unreachable!("only while recording"),
+        head: usize,
+        cond: &Operand,
+        then: Block,
+        otherwise: Block,
+        control: &Control,
+    ) -> Result<Option<Block>> {
+        let carried: Vec<Place> = control.carried.iter().map(|&l| Place::local(l)).collect();
+        if !control.repeats {
+            let Some(condition) = self.operand(cond)?.condition() else {
+                return Ok(None);
             };
-            let result = machine.run_blocks(function, start, Some(join));
-            let Mode::Build(recording) = &mut machine.mode else {
-                unreachable!("still recording")
-            };
-            let inner = std::mem::replace(&mut recording.circuit.instructions, outer);
-            result.map(|()| inner)
-        };
-        let then = branch(self, then)?;
-        let otherwise = branch(self, otherwise)?;
-        if let Mode::Build(recording) = &mut self.mode {
-            recording.circuit.instructions.push(Instruction::If {
+            let before = self.load_all(&carried)?;
+            let free = self.recording().free.clone();
+            let (mut then_steps, then_values) =
+                self.record_branch(function, then, control.join, &carried)?;
+            let then_free = std::mem::replace(&mut self.recording().free, free);
+            for (place, value) in carried.iter().zip(&before) {
+                self.store(place, value.clone())?;
+            }
+            let (mut else_steps, else_values) =
+                self.record_branch(function, otherwise, control.join, &carried)?;
+            // A qubit either branch freed is free, and may need a reset.
+            let recording = self.recording();
+            for (qubit, dirty) in then_free {
+                match recording.free.iter_mut().find(|(q, _)| *q == qubit) {
+                    Some(entry) => entry.1 |= dirty,
+                    None => recording.free.push((qubit, dirty)),
+                }
+            }
+            for (i, place) in carried.iter().enumerate() {
+                if then_values[i] == before[i] && else_values[i] == before[i] {
+                    continue;
+                }
+                let (bit, clbit) = self.new_clbit(&before[i]);
+                then_steps.push(assign(clbit, &then_values[i])?);
+                else_steps.push(assign(clbit, &else_values[i])?);
+                self.store(place, bit)?;
+            }
+            self.recording().circuit.instructions.push(Instruction::If {
                 condition,
-                then,
-                otherwise,
+                then: then_steps,
+                otherwise: else_steps,
             });
+            return Ok(Some(control.join));
         }
-        Ok(())
+
+        // A loop: each variable it changes moves into a classical bit first.
+        let mut bits = Vec::with_capacity(carried.len());
+        for place in &carried {
+            let value = self.load(place)?;
+            let (bit, clbit) = self.new_clbit(&value);
+            let step = assign(clbit, &value)?;
+            self.recording().circuit.instructions.push(step);
+            self.store(place, bit.clone())?;
+            bits.push((bit, clbit));
+        }
+        // The condition again, now in terms of those bits.
+        let block = &function.blocks[head];
+        for (stmt, &span) in block.stmts.iter().zip(&block.spans) {
+            self.stmt(stmt).map_err(|e| e.at(span))?;
+        }
+        let Some(condition) = self.operand(cond)?.condition() else {
+            return Ok(None);
+        };
+        let free = self.recording().free.clone();
+        self.recording().loops += 1;
+        let result = self.record_branch(function, then, control.join, &carried);
+        self.recording().loops -= 1;
+        let (mut body, values) = result?;
+        for ((place, (bit, clbit)), value) in carried.iter().zip(&bits).zip(&values) {
+            body.push(assign(*clbit, value)?);
+            self.store(place, bit.clone())?;
+        }
+        // The loop may run no passes, so what was free still is; everything it freed may need
+        // a reset.
+        let recording = self.recording();
+        for (qubit, _) in free {
+            if !recording.free.iter().any(|(q, _)| *q == qubit) {
+                recording.free.push((qubit, true));
+            }
+        }
+        for entry in &mut recording.free {
+            entry.1 = true;
+        }
+        recording
+            .circuit
+            .instructions
+            .push(Instruction::While { condition, body });
+        // The condition's temporaries were computed for the bits, which is what the code after
+        // the loop sees too.
+        Ok(Some(otherwise))
+    }
+
+    /// Records the blocks from `start` up to `stop` into their own list of steps, returning
+    /// them and the values of the carried variables at the end.
+    fn record_branch(
+        &mut self,
+        function: &'p Function,
+        start: Block,
+        stop: Block,
+        carried: &[Place],
+    ) -> Result<(Vec<Instruction>, Vec<Value>)> {
+        let outer = std::mem::take(&mut self.recording().circuit.instructions);
+        let result = self.run_blocks(function, start.index(), Some(stop.index()));
+        let inner = std::mem::replace(&mut self.recording().circuit.instructions, outer);
+        result?;
+        Ok((inner, self.load_all(carried)?))
+    }
+
+    fn load_all(&self, places: &[Place]) -> Result<Vec<Value>> {
+        places.iter().map(|p| self.load(p)).collect()
+    }
+
+    /// A new classical bit for a variable whose current value is `like`: the value standing
+    /// for the bit, and its index.
+    fn new_clbit(&mut self, like: &Value) -> (Value, usize) {
+        let circuit = &mut self.recording().circuit;
+        let clbit = circuit.clbits;
+        circuit.clbits += 1;
+        let is_bit = !matches!(like, Value::Bool(_) | Value::Cond(_, false));
+        let value = if is_bit {
+            Value::Clbit(clbit)
+        } else {
+            Value::Cond(Rc::new(Condition::Clbit(clbit)), false)
+        };
+        (value, clbit)
+    }
+
+    fn recording(&mut self) -> &mut Recording {
+        match &mut self.mode {
+            Mode::Build(recording) => recording,
+            Mode::Simulate => unreachable!("only while recording"),
+        }
     }
 
     /// The value a local starts with: aggregates are built out so their parts can be
@@ -498,6 +614,12 @@ impl Machine<'_> {
     }
 
     fn concrete(&self, value: Value) -> Value {
+        if let Mode::Build(Recording {
+            known: Some(bits), ..
+        }) = self.mode
+        {
+            return value.with_clbits(bits);
+        }
         match value {
             Value::Clbit(_) | Value::Cond(_, true) => {
                 self.needs_values.set(true);
@@ -609,7 +731,6 @@ impl Machine<'_> {
                             .push(Instruction::Reset(qubit));
                         Ok(())
                     }
-                    Mode::Replay { .. } => Ok(()),
                 }
             }
             Stmt::Release(place) => {
@@ -620,7 +741,6 @@ impl Machine<'_> {
                         recording.free.push((qubit, false));
                         return Ok(());
                     }
-                    Mode::Replay { .. } => return Ok(()),
                 }
                 // Simulators check `release`'s claim (spec/ownership.md §11).
                 self.session()?.release(qubit).map_err(backend_error)?;
@@ -736,19 +856,17 @@ impl Machine<'_> {
             Mode::Simulate => {}
             Mode::Build(recording) => {
                 let circuit = &mut recording.circuit;
-                if circuit.qubits < FRESH_QUBITS || recording.free.is_empty() {
-                    circuit.qubits += 1;
-                    return Ok(circuit.qubits - 1);
-                }
-                let (qubit, needs_reset) = recording.free.pop().expect("checked above");
-                if needs_reset {
+                let (qubit, needs_reset) =
+                    if circuit.qubits < FRESH_QUBITS || recording.free.is_empty() {
+                        circuit.qubits += 1;
+                        (circuit.qubits - 1, false)
+                    } else {
+                        recording.free.pop().expect("checked above")
+                    };
+                if needs_reset || recording.loops > 0 {
                     circuit.instructions.push(Instruction::Reset(qubit));
                 }
                 return Ok(qubit);
-            }
-            Mode::Replay { qubits, .. } => {
-                *qubits += 1;
-                return Ok(*qubits - 1);
             }
         }
         if let Some(qubit) = self.free.pop() {
@@ -781,11 +899,6 @@ impl Machine<'_> {
                 circuit.clbits += 1;
                 recording.free.push((qubit, true));
                 return Ok(false);
-            }
-            Mode::Replay { bits, next, .. } => {
-                let bit = *next < 64 && (*bits >> *next) & 1 == 1;
-                *next += 1;
-                return Ok(bit);
             }
         }
         let session = self.session()?;
@@ -823,9 +936,18 @@ impl Machine<'_> {
                 recording.circuit.instructions.push(Instruction::Gate(op));
                 Ok(())
             }
-            Mode::Replay { .. } => Ok(()),
         }
     }
+}
+
+/// The step that sets classical bit `clbit` to a `Bit` or `Bool` value, known or not.
+fn assign(clbit: usize, value: &Value) -> Result<Instruction> {
+    let (value, _) = value.logic().ok_or_else(|| {
+        RuntimeError::new(format!(
+            "expected a Bit or Bool to keep in a circuit, found {value:?}"
+        ))
+    })?;
+    Ok(Instruction::Assign { clbit, value })
 }
 
 fn backend_error(error: BackendError) -> RuntimeError {

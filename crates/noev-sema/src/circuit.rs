@@ -26,14 +26,21 @@ pub struct Circuits {
     pub fns: Vec<CircuitInfo>,
     /// For each `sample` expression.
     pub runs: FxHashMap<ExprId, CircuitInfo>,
-    /// Every `if` that becomes an `if` in a circuit, sorted.
-    feedback_ifs: Vec<ExprId>,
+    /// Every `if` and `while` that becomes classical control in a circuit, with the
+    /// variables it changes, sorted.
+    controls: Vec<(ExprId, Vec<LocalId>)>,
 }
 
 impl Circuits {
-    /// Whether `expr` is an `if` on a measurement result that becomes an `if` in a circuit.
-    pub fn is_feedback_if(&self, expr: ExprId) -> bool {
-        self.feedback_ifs.binary_search(&expr).is_ok()
+    /// For an `if` or `while` on a measurement result that becomes an `if` or `while` in the
+    /// circuit: the `Bit` and `Bool` variables from outside it that it changes, which the
+    /// circuit keeps in classical bits. `None` for any other expression.
+    pub fn control(&self, expr: ExprId) -> Option<&[LocalId]> {
+        let i = self
+            .controls
+            .binary_search_by_key(&expr, |(e, _)| *e)
+            .ok()?;
+        Some(&self.controls[i].1)
     }
 }
 
@@ -49,11 +56,11 @@ pub struct CircuitInfo {
     pub not_circuit: Option<(Span, String)>,
     /// Whether a condition depends on a measurement result before its last quantum operation.
     pub feedback: bool,
-    /// Why some of that feedback cannot be compiled into the circuit yet, and where: a loop on
-    /// a measurement result, or a branch that does more than apply gates.
+    /// Why some of that feedback cannot be compiled into the circuit yet, and where.
     pub feedback_unsupported: Option<(Span, String)>,
-    /// The `if`s on measurement results that become `if`s in the circuit.
-    pub feedback_ifs: Vec<ExprId>,
+    /// The `if`s and `while`s on measurement results that become classical control in the
+    /// circuit, with the variables from outside them that they change.
+    pub controls: Vec<(ExprId, Vec<LocalId>)>,
     /// Where it calls `release` (itself or through a call). The simulator checks that claim,
     /// which needs the state of every shot, so such runs are not sampled from one simulation.
     pub releases: Option<Span>,
@@ -75,7 +82,7 @@ impl CircuitInfo {
 pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
     let order = CallOrder::new(ast, typed);
     let quantum = infer_quantum(ast, typed, &order);
-    let gates_only = infer_gates_only(ast, typed, &order);
+    let recordable = infer_recordable(ast, typed, &order);
     let releases = infer_releases(ast, typed, &order);
     // A call is part of the run that makes it, so a function is only a circuit if what it
     // calls is: repeat until nothing changes, since functions can call each other.
@@ -83,7 +90,7 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
         ast,
         typed,
         quantum,
-        gates_only,
+        recordable,
         fns: vec![CircuitInfo::default(); ast.all_fns().len()],
         given: vec![None; ast.all_fns().len()],
     };
@@ -181,19 +188,19 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
             );
         }
     }
-    let mut feedback_ifs: Vec<ExprId> = cx
+    let mut controls: Vec<(ExprId, Vec<LocalId>)> = cx
         .fns
         .iter()
         .chain(cx.given.iter().flatten())
         .chain(runs.values())
-        .flat_map(|info| info.feedback_ifs.iter().copied())
+        .flat_map(|info| info.controls.iter().cloned())
         .collect();
-    feedback_ifs.sort();
-    feedback_ifs.dedup();
+    controls.sort();
+    controls.dedup();
     let circuits = Circuits {
         fns: cx.fns,
         runs,
-        feedback_ifs,
+        controls,
     };
     repeated_run_warnings(ast, typed, &circuits, &mut diagnostics);
     (circuits, diagnostics)
@@ -385,11 +392,9 @@ fn block_releases(
     None
 }
 
-/// Whether each function only applies gates and computes classical values, itself and in the
-/// functions it calls: no allocating, measuring, freeing, printing or repeated runs. Calls to
-/// such functions may appear in a branch on a measurement result that becomes part of a
-/// circuit.
-fn infer_gates_only(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<bool> {
+/// Whether each function can be recorded inside classical control of a circuit, itself and
+/// in the functions it calls: it does not print or start repeated runs.
+fn infer_recordable(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<bool> {
     let mut result = vec![true; ast.all_fns().len()];
     loop {
         let mut changed = false;
@@ -405,18 +410,9 @@ fn infer_gates_only(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<bool> {
                 children(ast, node, &mut stack);
                 let Node::Expr(e) = node else { continue };
                 only &= match ast.expr(e).kind {
-                    ExprKind::Ket
-                    | ExprKind::BraTest { .. }
-                    | ExprKind::Sample { .. }
-                    | ExprKind::Expectation { .. } => false,
+                    ExprKind::Sample { .. } | ExprKind::Expectation { .. } => false,
                     _ => match typed.callees[e.index()] {
-                        Some(Callee::Builtin(
-                            Builtin::Measure
-                            | Builtin::Reset
-                            | Builtin::Discard
-                            | Builtin::Release
-                            | Builtin::Print { .. },
-                        )) => false,
+                        Some(Callee::Builtin(Builtin::Print { .. })) => false,
                         Some(Callee::Fn(f)) => result[f.index()],
                         _ => true,
                     },
@@ -669,7 +665,7 @@ struct Context<'a> {
     /// Whether each function does quantum operations.
     quantum: Vec<bool>,
     /// Whether each function only applies gates and computes classical values.
-    gates_only: Vec<bool>,
+    recordable: Vec<bool>,
     /// What is known so far about each function, for the calls a run makes.
     fns: Vec<CircuitInfo>,
     /// The same, for a call that passes measurement results to it: its `Bit` and `Bool`
@@ -780,31 +776,45 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Why an `if` on a measurement result cannot become an `if` in the circuit, if it
-    /// cannot: its branches may only apply gates (including through calls and `ctrl`), and
-    /// compute classical values of their own.
-    fn unsupported_feedback(
+    /// Whether an `if` or `while` on a measurement result can become classical control in
+    /// the circuit: the variables from outside it that it changes, or why not. Inside, it may
+    /// do anything a run does except print, start repeated runs or leave early; the only
+    /// outside variables it may change are `Bit`s and `Bool`s, which the circuit keeps in
+    /// classical bits.
+    fn recordable_control(
         &self,
         id: ExprId,
         cond: ExprId,
-        then: BlockId,
-        otherwise: Option<ExprId>,
-    ) -> Option<(Span, String)> {
+        blocks: &[Node],
+        repeats: bool,
+    ) -> Result<Vec<LocalId>, (Span, String)> {
         let ast = self.cx.ast;
         let typed = self.cx.typed;
-        if !matches!(typed.types.deref(typed.ty(id)), Ty::UNIT | Ty::NEVER) {
-            return Some((
-                ast.expr(id).span,
-                "an `if` on a measurement result gives a value".into(),
-            ));
+        let what = if repeats {
+            "a loop on a measurement result"
+        } else {
+            "a branch on a measurement result"
+        };
+        let says = |why: &str| format!("{what} {why}");
+        if !repeats && !matches!(typed.types.deref(typed.ty(id)), Ty::UNIT | Ty::NEVER) {
+            let why = "an `if` on a measurement result gives a value";
+            return Err((ast.expr(id).span, why.into()));
         }
-        if !short_circuit_free(ast, cond) {
-            let why = "a measurement-dependent condition calls a function after `and` or `or`";
-            return Some((ast.expr(cond).span, why.into()));
+        // A loop's condition is evaluated again on every pass, so it must be plain logic.
+        let plain = if repeats {
+            is_pure(ast, cond)
+        } else {
+            short_circuit_free(ast, cond)
+        };
+        if !plain {
+            let why = if repeats {
+                "a loop's measurement-dependent condition calls a function"
+            } else {
+                "a measurement-dependent condition calls a function after `and` or `or`"
+            };
+            return Err((ast.expr(cond).span, why.into()));
         }
-        let then_span = ast.block(then).span;
-        let end = otherwise.map_or(then_span.end, |o| ast.expr(o).span.end);
-        let span = Span::new(then_span.start, end);
+        let span = ast.expr(id).span;
         let first_local = typed
             .pat_locals
             .iter()
@@ -815,22 +825,32 @@ impl<'a> Walker<'a> {
             })
             .min()
             .copied();
-        let mut stack = vec![Node::Block(then)];
-        stack.extend(otherwise.map(Node::Expr));
-        let branch = |what: &str| format!("a branch on a measurement result {what}");
+        let inside = |l: LocalId| first_local.is_some_and(|f| l >= f);
+        let mut carried = Vec::new();
+        let mut stack = blocks.to_vec();
         while let Some(node) = stack.pop() {
             children(ast, node, &mut stack);
             match node {
                 Node::Stmt(s) => match ast.stmt(s).kind {
                     StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue => {
-                        return Some((ast.stmt(s).span, branch("leaves it early")));
+                        return Err((ast.stmt(s).span, says("leaves it early")));
                     }
                     StmtKind::Assign { place, .. } => {
-                        let inside = root(ast, typed, place)
-                            .is_some_and(|l| first_local.is_some_and(|f| l >= f));
-                        if !inside {
-                            let why = branch("changes a variable from outside it");
-                            return Some((ast.stmt(s).span, why));
+                        let Some(l) = root(ast, typed, place) else {
+                            continue;
+                        };
+                        if inside(l) {
+                            continue;
+                        }
+                        let logic = matches!(typed.local(l).ty, Ty::BIT | Ty::BOOL);
+                        if !logic || !matches!(ast.expr(place).kind, ExprKind::Name(_)) {
+                            let why = says(
+                                "changes a variable from outside it that is not a `Bit` or `Bool`",
+                            );
+                            return Err((ast.stmt(s).span, why));
+                        }
+                        if !carried.contains(&l) {
+                            carried.push(l);
                         }
                     }
                     _ => {}
@@ -838,22 +858,14 @@ impl<'a> Walker<'a> {
                 Node::Expr(e) => {
                     let span = ast.expr(e).span;
                     let why = match ast.expr(e).kind {
-                        ExprKind::Ket => Some("creates qubits"),
-                        ExprKind::BraTest { .. } => Some("measures"),
                         ExprKind::Sample { .. } | ExprKind::Expectation { .. } => {
                             Some("starts a repeated run")
                         }
                         ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
                             match typed.callees[e.index()] {
-                                Some(Callee::Builtin(
-                                    Builtin::Measure
-                                    | Builtin::Reset
-                                    | Builtin::Discard
-                                    | Builtin::Release,
-                                )) => Some("measures or frees qubits"),
                                 Some(Callee::Builtin(Builtin::Print { .. })) => Some("prints"),
-                                Some(Callee::Fn(f)) if !self.cx.gates_only[f.index()] => {
-                                    Some("calls a function that does more than apply gates")
+                                Some(Callee::Fn(f)) if !self.cx.recordable[f.index()] => {
+                                    Some("calls a function that prints or starts repeated runs")
                                 }
                                 _ => None,
                             }
@@ -861,7 +873,7 @@ impl<'a> Walker<'a> {
                         _ => None,
                     };
                     if let Some(why) = why {
-                        return Some((span, branch(why)));
+                        return Err((span, says(why)));
                     }
                     // A classical variable from outside, lent `mut`.
                     let lent = match ast.expr(e).kind {
@@ -882,15 +894,27 @@ impl<'a> Walker<'a> {
                     if let Some(place) = lent
                         && let Some(l) = root(ast, typed, place)
                         && typed.types.linearity(typed.local(l).ty) == Kind::Copyable
-                        && !first_local.is_some_and(|f| l >= f)
+                        && !inside(l)
                     {
-                        return Some((span, branch("changes a variable from outside it")));
+                        return Err((span, says("lends a variable from outside it `mut`")));
                     }
                 }
                 Node::Block(_) => {}
             }
         }
-        None
+        carried.sort();
+        Ok(carried)
+    }
+
+    fn control(&mut self, id: ExprId, result: Result<Vec<LocalId>, (Span, String)>) {
+        match result {
+            Ok(carried) => {
+                if !self.info.controls.iter().any(|(e, _)| *e == id) {
+                    self.info.controls.push((id, carried));
+                }
+            }
+            Err((span, why)) => self.unsupported(span, why),
+        }
     }
 
     fn violate(&mut self, span: Span, what: &str) {
@@ -1092,10 +1116,12 @@ impl<'a> Walker<'a> {
                 let condition = self.expr(cond, before);
                 if condition && before {
                     self.info.feedback = true;
-                    match self.unsupported_feedback(id, cond, then, otherwise) {
-                        None => self.info.feedback_ifs.push(id),
-                        Some((span, why)) => self.unsupported(span, why),
-                    }
+                    let blocks: Vec<Node> = [Node::Block(then)]
+                        .into_iter()
+                        .chain(otherwise.map(Node::Expr))
+                        .collect();
+                    let result = self.recordable_control(id, cond, &blocks, false);
+                    self.control(id, result);
                 }
                 self.control += u32::from(condition);
                 let mut tainted = self.value_block(then);
@@ -1112,8 +1138,8 @@ impl<'a> Walker<'a> {
                     let condition = self.expr(cond, before);
                     if condition && before {
                         self.info.feedback = true;
-                        let why = "a loop's condition depends on a measurement result";
-                        self.unsupported(ast.expr(cond).span, why.into());
+                        let result = self.recordable_control(id, cond, &[Node::Block(body)], true);
+                        self.control(id, result);
                     }
                     self.control += u32::from(condition);
                     self.block(body);
@@ -1173,12 +1199,17 @@ impl<'a> Walker<'a> {
             _ => return false,
         };
         let callee = self.cx.typed.callees[id.index()];
+        // Qubits are never measurement results, even ones created under a condition on one.
+        let typed = self.cx.typed;
+        let classical = |e: ExprId| typed.types.linearity(typed.ty(e)) != Kind::Linear;
         let mut tainted_args = Vec::new();
         if let Some(r) = receiver {
-            tainted_args.push((r, self.expr(r, before)));
+            let tainted = self.expr(r, before) && classical(r);
+            tainted_args.push((r, tainted));
         }
         for &a in args {
-            tainted_args.push((a, self.expr(a, before)));
+            let tainted = self.expr(a, before) && classical(a);
+            tainted_args.push((a, tainted));
         }
         let any = tainted_args.iter().any(|&(_, t)| t);
         match callee {

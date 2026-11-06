@@ -123,11 +123,11 @@ pub fn validate(program: &Program) -> Vec<String> {
                     cond,
                     then,
                     otherwise,
-                    join,
+                    control,
                 } => {
                     check_operand(cond, &mut report);
                     let mut targets = vec![*then, *otherwise];
-                    targets.extend(*join);
+                    targets.extend(control.as_ref().map(|c| c.join));
                     targets
                 }
                 Terminator::Call {

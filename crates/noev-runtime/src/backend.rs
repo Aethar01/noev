@@ -50,6 +50,21 @@ pub enum Instruction {
         /// The steps when it does not.
         otherwise: Vec<Instruction>,
     },
+    /// Classical control: run `body` again and again while `condition` holds.
+    While {
+        /// Tested before each pass.
+        condition: Condition,
+        /// The steps of one pass.
+        body: Vec<Instruction>,
+    },
+    /// Set a classical bit to a condition's value: how a circuit keeps a variable that
+    /// classical control changes.
+    Assign {
+        /// The bit.
+        clbit: usize,
+        /// Its new value.
+        value: Condition,
+    },
 }
 
 /// A condition on a circuit's classical bits: logic on measurement results.

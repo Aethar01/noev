@@ -187,14 +187,26 @@ the program's output:
 - `noev export` saves every circuit as OpenQASM 3 without running anything, and
   `noev run --circuits=DIR` saves them from a run ([runtime.md](runtime.md) §7).
 
-The current compiler turns part of the rule into circuits. An `if` on a measurement result
-becomes an `if` in the circuit when its branches only apply gates (directly, through `ctrl`,
-or by calling functions that only apply gates) and compute classical values of their own. A
-circuit that needs more runs shot by shot for now, with the warning saying why:
+The current compiler turns `if`s and `while`s on measurement results into classical control
+in the circuit. Inside them a run may do what it does anywhere else: apply gates, create and
+measure qubits, call functions. `Bit` and `Bool` variables from outside that they change are
+kept in the circuit's classical bits, so a repeat-until-success loop is one circuit:
 
-- a `while` whose condition depends on a measurement result;
-- a branch on a measurement result that creates qubits, measures, frees qubits, prints,
-  changes a variable from outside the branch, or leaves it early (`return`, `break`);
+```noev
+let mut done = false
+while not done {
+    let t = |+>
+    done = mv t.measure() == 1
+}
+```
+
+A circuit that needs more runs shot by shot for now, with the warning saying why:
+
+- an `if` or `while` on a measurement result that prints, starts a repeated run (`sample`, an
+  expectation value), leaves early (`return`, `break`, `continue`), or changes a variable from
+  outside it that is not a `Bit` or `Bool`;
+- a `while` on a measurement result whose condition calls a function (it is evaluated again
+  on every pass);
 - an `if` on a measurement result that gives a value (`let x = if m { … } else { … }`).
 
 One more case runs shot by shot on a simulator: a run that calls `release`. The simulator

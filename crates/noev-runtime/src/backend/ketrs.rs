@@ -84,6 +84,20 @@ fn convert(
                 };
                 converted.push_instruction(instruction).map_err(sim_error)?;
             }
+            Instruction::While { condition, body } => {
+                let instruction = ketrs::Instruction::While {
+                    condition: expr(condition),
+                    body: Box::new(convert(circuit, body)?),
+                };
+                converted.push_instruction(instruction).map_err(sim_error)?;
+            }
+            Instruction::Assign { clbit, value } => {
+                let instruction = ketrs::Instruction::Assign {
+                    clbit: *clbit,
+                    value: expr(value),
+                };
+                converted.push_instruction(instruction).map_err(sim_error)?;
+            }
         }
     }
     Ok(converted)

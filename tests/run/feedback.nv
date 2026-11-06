@@ -1,0 +1,49 @@
+// Classical control on measurement results whose outcome is certain: a repeat-until-success
+// loop, branches that measure, and a helper given measurement results.
+
+fn correct(q: mut Qubit, flip: Bit) {
+    if flip == 1 { q.x() }
+}
+
+// Always ends with `done`, so always 1.
+fn until_one() -> Bit {
+    let mut done = false
+    while not done {
+        let t = |+>
+        done = mv t.measure() == 1
+    }
+    let q = |0>
+    if done { q.x() }
+    mv q.measure()
+}
+
+// Whichever branch runs measures something certain to be 1.
+fn either_branch() -> Bit {
+    let coin = |+>
+    let mut m: Bit = 0
+    if mv coin.measure() == 1 {
+        let a = |1>
+        m = mv a.measure()
+    } else {
+        let b = |0>
+        b.x()
+        m = mv b.measure()
+    }
+    m
+}
+
+// `b` copies `a`'s random bit, then is corrected back to 0.
+fn corrected() -> Bit {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    let m = mv a.measure()
+    correct(b, m)
+    mv b.measure()
+}
+
+fn main() {
+    print(sample 500 { until_one() })
+    print(sample 500 { either_branch() })
+    print(sample 500 { corrected() })
+}

@@ -178,6 +178,17 @@ impl<'a> Builder<'a> {
         builder
     }
 
+    /// How to record the `if` or `while` `id` as classical control in a circuit, if it
+    /// becomes that.
+    fn control(&self, id: ExprId, join: Block, repeats: bool) -> Option<Box<Control>> {
+        let carried = self.circuits.control(id)?;
+        Some(Box::new(Control {
+            join,
+            carried: carried.iter().map(|&l| self.local(l)).collect(),
+            repeats,
+        }))
+    }
+
     /// Makes the function for a `sample` run, whose parameters are the locals from outside it
     /// that it reads. Returns it and those locals.
     fn run_function(&mut self, id: ExprId, body: ast::BlockId) -> (FuncId, Vec<LocalId>) {
@@ -383,11 +394,11 @@ fn successors_mut(term: &mut Terminator) -> Vec<&mut Block> {
         Terminator::Branch {
             then,
             otherwise,
-            join,
+            control,
             ..
         } => {
             let mut blocks = vec![then, otherwise];
-            blocks.extend(join.as_mut());
+            blocks.extend(control.as_mut().map(|c| &mut c.join));
             blocks
         }
         Terminator::Return | Terminator::Unreachable => vec![],
@@ -895,16 +906,16 @@ impl Builder<'_> {
                 then,
                 otherwise,
             } => {
-                let circuit_if = self.circuits.is_feedback_if(id);
                 let cond = self.operand(cond);
                 let (then_block, else_block, join) =
                     (self.new_block(), self.new_block(), self.new_block());
+                let control = self.control(id, join, false);
                 self.terminate_into(
                     Terminator::Branch {
                         cond,
                         then: then_block,
                         otherwise: else_block,
-                        join: circuit_if.then_some(join),
+                        control,
                     },
                     then_block,
                 );
@@ -920,12 +931,13 @@ impl Builder<'_> {
                     (self.new_block(), self.new_block(), self.new_block());
                 self.terminate_into(Terminator::Goto(head), head);
                 let cond = self.operand(cond);
+                let control = self.control(id, head, true);
                 self.terminate_into(
                     Terminator::Branch {
                         cond,
                         then: body_block,
                         otherwise: exit,
-                        join: None,
+                        control,
                     },
                     body_block,
                 );
@@ -1056,7 +1068,7 @@ impl Builder<'_> {
                 cond: Operand::Copy(dest.clone()),
                 then,
                 otherwise,
-                join: None,
+                control: None,
             },
             rest,
         );
@@ -1096,7 +1108,7 @@ impl Builder<'_> {
                 cond: Operand::Copy(more),
                 then: body_block,
                 otherwise: exit,
-                join: None,
+                control: None,
             },
             body_block,
         );

@@ -480,14 +480,55 @@ fn results_passed_to_functions_that_misuse_them_are_not_circuits() {
     assert_eq!(counts, [("1".to_string(), 50)]);
 }
 
+/// Repeat until success: a loop on a measurement result, with its variable kept in a
+/// classical bit, is one circuit.
+const UNTIL_ONE: &str = "fn test() -> (Bit, Int) {
+    let mut done = false
+    let mut tries = 0
+    let q = |0>
+    while not done {
+        let t = |+>
+        done = mv t.measure() == 1
+    }
+    q.x()
+    let last = mv q.measure()
+    // Classical work afterwards, on the values the loop left.
+    if done { tries = 1 }
+    (last, tries)
+}";
+
 #[test]
-fn measurement_loops_still_run_shot_by_shot() {
+fn measurement_loops_are_circuits() {
+    let (counts, circuit) = sampled(UNTIL_ONE, 200);
+    assert!(circuit);
+    assert_eq!(counts, [("(1, 1)".to_string(), 200)]);
+}
+
+#[test]
+fn branches_that_measure_are_circuits() {
+    // Whichever branch runs measures a fresh |1>, so `m` ends up 1 either way, and the
+    // branch's variable decides the flip.
     let (counts, circuit) = sampled(
-        "fn test() -> Bit {\n let mut done = false\n let q = |0>\n while not done {\n let t = |+>\n done = mv t.measure() == 1\n }\n q.x()\n mv q.measure()\n}",
-        50,
+        "fn test() -> (Bit, Bit) {
+            let coin = |+>
+            let mut m: Bit = 0
+            let q = |0>
+            if mv coin.measure() == 1 {
+                let a = |1>
+                m = mv a.measure()
+            } else {
+                let b = |+>
+                b.h()
+                b.x()
+                m = mv b.measure()
+            }
+            if m == 1 { q.x() }
+            (m, mv q.measure())
+        }",
+        300,
     );
-    assert!(!circuit);
-    assert_eq!(counts, [("1".to_string(), 50)]);
+    assert!(circuit);
+    assert_eq!(counts, [("11".to_string(), 300)]);
 }
 
 #[test]
@@ -683,10 +724,20 @@ fn qasm_reads_back_as_the_same_circuit() {
                 if p != r or not (p == 1) { z.x() } else { z.h() }
                 (p, r, mv z.measure())
             }
-            print(a, b, c)
+            let d = sample 100 {
+                let mut done = false
+                while not done {
+                    let t = |+>
+                    done = mv t.measure() == 1
+                }
+                let q = |0>
+                if done { q.x() }
+                mv q.measure()
+            }
+            print(a, b, c, d)
         }",
     );
-    assert_eq!(jobs, 3);
+    assert_eq!(jobs, 4);
 }
 
 #[test]

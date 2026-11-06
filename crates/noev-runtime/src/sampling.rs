@@ -130,14 +130,13 @@ fn sample_circuit(
         return Ok(Some(outcomes));
     }
     for (bits, count) in counts {
-        let mode = Mode::Replay {
-            bits,
-            next: 0,
-            qubits: 0,
-        };
+        // Recording again with the outcome known gives the same classical bits, so its
+        // classical code sees this outcome's values.
+        let mode = Mode::Build(Recording::knowing(bits));
         let mut replay = Machine::new(program, backend, seeds.random()).with_mode(mode);
         let value = replay.call(func, args.to_vec())?;
-        outcomes.push((replay.measure_value(value)?, count));
+        let value = replay.measure_value(value)?;
+        outcomes.push((value.with_clbits(bits), count));
     }
     Ok(Some(outcomes))
 }

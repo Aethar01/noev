@@ -52,6 +52,14 @@ fn instructions(out: &mut String, list: &[Instruction], depth: usize) {
                     let _ = writeln!(out, "{indent}}}");
                 }
             }
+            Instruction::While { condition, body } => {
+                let _ = writeln!(out, "while ({}) {{", condition_text(condition));
+                instructions(out, body, depth + 1);
+                let _ = writeln!(out, "{indent}}}");
+            }
+            Instruction::Assign { clbit, value } => {
+                let _ = writeln!(out, "c[{clbit}] = {};", condition_text(value));
+            }
         }
     }
 }
