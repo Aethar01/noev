@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 
+use noev_runtime::sampling::sample;
 use noev_runtime::{Counts, Output, RuntimeError, run, run_main};
 
 fn compile(source: &str) -> noev_ir::Program {
@@ -330,4 +331,143 @@ fn interpolation() {
 fn strings_compare() {
     let (out, _) = output("fn main() {\n let a = \"x{1}\"\n print(a == \"x1\", a != \"x1\")\n}");
     assert_eq!(out, "true false\n");
+}
+
+/// Samples `fn test()` through the language's `sample`, returning (outcome counts, whether the
+/// circuit path was taken).
+fn sampled(source: &str, shots: usize) -> (Vec<(String, usize)>, bool) {
+    let program = compile(source);
+    let test = program
+        .functions
+        .iter()
+        .position(|f| f.name == "test")
+        .expect("a `fn test`");
+    let dist = sample(
+        &program,
+        noev_ir::ir::FuncId(test as u32),
+        Vec::new(),
+        shots,
+        11,
+        |v| v.to_string(),
+    )
+    .unwrap();
+    (
+        dist.outcomes
+            .iter()
+            .map(|o| (o.key.clone(), o.count))
+            .collect(),
+        dist.from_circuit,
+    )
+}
+
+#[test]
+fn circuits_are_sampled_from_one_simulation() {
+    let (bell, circuit) = sampled(
+        "fn test() -> (Bit, Bit) {\n let a = |+>\n let b = |0>\n ctrl a { b.x() }\n (mv a.measure(), mv b.measure())\n}",
+        2000,
+    );
+    assert!(circuit);
+    assert_eq!(bell.len(), 2, "{bell:?}");
+    assert!(
+        bell.iter()
+            .all(|(k, n)| (k == "00" || k == "11") && (800..=1200).contains(n)),
+        "{bell:?}"
+    );
+}
+
+#[test]
+fn post_processing_is_replayed_per_outcome() {
+    // Counting ones after the last quantum operation: binomial(3, 1/2).
+    let (counts, circuit) = sampled(
+        "fn test() -> Int {\n let r = |+++>\n let bits = mv r.measure()\n let mut ones = 0\n for i in 0..3 { if bits[i] { ones += 1 } }\n ones\n}",
+        8000,
+    );
+    assert!(circuit);
+    let get = |k: &str| {
+        counts
+            .iter()
+            .find(|(key, _)| key == k)
+            .map_or(0, |(_, n)| *n)
+    };
+    assert!(
+        (800..=1200).contains(&get("0")) && (2700..=3300).contains(&get("1")),
+        "{counts:?}"
+    );
+    assert!(
+        (2700..=3300).contains(&get("2")) && (800..=1200).contains(&get("3")),
+        "{counts:?}"
+    );
+}
+
+#[test]
+fn circuit_and_shot_paths_agree() {
+    // Ctrl, adj, discard and a mid-circuit measurement, by both paths: the same program, made
+    // not a circuit by converting a result to a number before a later gate.
+    let body = "let r = |+0+>\n ctrl r[0] { r[1].x() }\n r[2].t()\n adj r[2].t()\n r[2].h()\n let extra = |+>\n mv extra.discard()\n let m = mv r[2].measure()";
+    let source = format!(
+        "fn test() -> (Bit, Bit, Bit) {{\n {body}\n (m, mv r[0].measure(), mv r[1].measure())\n}}"
+    );
+    let (a, fast) = sampled(&source, 4000);
+    assert!(fast);
+    let slow_source = source.replace("let m = mv r[2].measure()", "let m = mv r[2].measure()\n let k = Int(m)\n let y = |0>\n y.ry(Float(k))\n mv y.discard()");
+    let (b, slow) = sampled(&slow_source, 4000);
+    assert!(!slow);
+    // Both give m = 0 (t then adj t cancel, and h takes |+⟩ to |0⟩), and 00 or 11 for the
+    // pair; three bits print as a bit string.
+    for counts in [&a, &b] {
+        assert_eq!(counts.len(), 2, "{counts:?}");
+        assert!(
+            counts
+                .iter()
+                .all(|(k, n)| (k == "000" || k == "011") && (1700..=2300).contains(n)),
+            "{counts:?}"
+        );
+    }
+}
+
+#[test]
+fn feedback_runs_shot_by_shot_for_now() {
+    let (counts, circuit) = sampled(
+        "fn test() -> Bit {\n let a = |+>\n let b = |0>\n ctrl a { b.x() }\n if mv a.measure() { b.x() }\n mv b.measure()\n}",
+        200,
+    );
+    assert!(!circuit);
+    assert_eq!(counts, [("0".to_string(), 200)]);
+}
+
+#[test]
+fn sample_blocks_read_values_around_them() {
+    let (out, _) = output(
+        "fn main() {
+            let flip = true
+            let n = 3
+            let d = sample 50 {
+                let q = |0>
+                if flip { q.x() }
+                (mv q.measure(), n)
+            }
+            print(d)
+            let nested = sample 4 {
+                let inner = sample 10 { let q = |1>; mv q.measure() }
+                inner.count(1)
+            }
+            print(nested)
+        }",
+    );
+    assert_eq!(out, "(1, 3)  50  100.0%\n10  4  100.0%\n");
+}
+
+#[test]
+fn sample_blocks_measure_returned_qubits() {
+    let (out, _) = output(
+        "fn main() {
+            let d = sample 20 {
+                let r = |00>
+                r[1].x()
+                mv r
+            }
+            print(d.most_likely(), d.count([0, 1]))
+        }",
+    );
+    assert_eq!(out, "01 20\n");
 }

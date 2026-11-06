@@ -26,6 +26,74 @@ pub enum Value {
     Aggregate(Vec<Value>),
     /// A reference.
     Ref(Pointer),
+    /// A `Distribution`; shared, since distributions are immutable.
+    Distribution(Rc<Distribution>),
+    /// While a circuit is being recorded: the result of measurement number `k`, not yet known.
+    Clbit(usize),
+}
+
+/// How often each result occurred in repeated runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Distribution {
+    /// The outcomes, most frequent first, ties in key order.
+    pub outcomes: Vec<Outcome>,
+    /// How many runs were counted.
+    pub shots: usize,
+    /// Whether it came from one simulation of a circuit rather than shot by shot. Not visible
+    /// to programs; for tests and reports.
+    pub from_circuit: bool,
+}
+
+/// One result of a `Distribution`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Outcome {
+    /// How the result prints, which identifies it.
+    pub key: String,
+    /// The result.
+    pub value: Value,
+    /// How many runs gave it.
+    pub count: usize,
+}
+
+impl Distribution {
+    /// A distribution of `outcomes`, put in order.
+    pub fn new(mut outcomes: Vec<Outcome>, shots: usize) -> Self {
+        outcomes.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
+        Distribution {
+            outcomes,
+            shots,
+            from_circuit: false,
+        }
+    }
+
+    /// How many runs gave the result that prints as `key`.
+    pub fn count(&self, key: &str) -> usize {
+        self.outcomes
+            .iter()
+            .find(|o| o.key == key)
+            .map_or(0, |o| o.count)
+    }
+}
+
+impl fmt::Display for Distribution {
+    /// One line per outcome: result, count and percentage, aligned.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let width = self
+            .outcomes
+            .iter()
+            .map(|o| o.key.chars().count())
+            .max()
+            .unwrap_or(0);
+        let digits = self.shots.to_string().len();
+        for (i, o) in self.outcomes.iter().enumerate() {
+            if i > 0 {
+                writeln!(f)?;
+            }
+            let share = 100.0 * o.count as f64 / self.shots as f64;
+            write!(f, "{:<width$}  {:>digits$}  {share:>5.1}%", o.key, o.count)?;
+        }
+        Ok(())
+    }
 }
 
 /// Where a reference points: a local in some call frame, then fields and elements.
@@ -59,6 +127,27 @@ impl Value {
         go(self, bits, &mut 0)
     }
 
+    /// Whether the value holds measurement results not yet known.
+    pub fn has_clbits(&self) -> bool {
+        match self {
+            Value::Clbit(_) => true,
+            Value::Aggregate(items) => items.iter().any(Value::has_clbits),
+            _ => false,
+        }
+    }
+
+    /// The value with each recorded measurement result taken from `bits` (result `k` at bit
+    /// `k`).
+    pub fn with_clbits(&self, bits: u64) -> Value {
+        match self {
+            Value::Clbit(k) => Value::Bit(*k < 64 && (bits >> k) & 1 == 1),
+            Value::Aggregate(items) => {
+                Value::Aggregate(items.iter().map(|v| v.with_clbits(bits)).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
     /// Every qubit in the value, in order: elements and fields left to right.
     pub fn qubits(&self, out: &mut Vec<usize>) {
         match self {
@@ -83,6 +172,8 @@ impl fmt::Display for Value {
             Value::Qubit(q) => write!(f, "<qubit {q}>"),
             Value::Observable(_) => write!(f, "<observable>"),
             Value::Ref(_) => write!(f, "<reference>"),
+            Value::Distribution(d) => write!(f, "{d}"),
+            Value::Clbit(k) => write!(f, "<measurement {k}>"),
             Value::Aggregate(items)
                 if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Bit(_))) =>
             {

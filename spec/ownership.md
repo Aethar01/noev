@@ -518,7 +518,7 @@ not allowed in a reversible context (N013).
 An expectation value `<ψ| H |ψ>` runs the preparation `ψ` as many times as the estimate
 needs, each time creating and consuming its qubits internally. So `ψ` must be repeatable:
 
-### N020: preparation is not repeatable
+### N020: a repeated run is not repeatable
 
 ```noev
 let q = |+>
@@ -529,6 +529,26 @@ let e = <prep(q)| Z(0) |prep(q)>     // error[N020]: `prep` is run many times, b
 The arguments of a preparation must be classical (copyable) values: no qubits, no `mv`, and
 no `mut` lends. A ket literal is always repeatable. Expectation values are not allowed in a
 reversible context (N013).
+
+The same rule holds for the block of `sample` ([execution.md](execution.md) §3), which runs
+many times. Each run is given a copy of the classical values it reads from the code around
+it, so it may read them, but not use qubits from outside it, change outside variables, or
+lend them `mut`:
+
+```noev
+let q = |+>
+let mut total = 0
+let d = sample 100 {
+    q.h()              // error[N020]: `sample` runs this many times, but it uses `q`, from outside the run
+    total += 1         // error[N020]: … it changes `total`, from outside the run
+    total
+}
+```
+
+References from outside are not allowed either, since each run is separate. Inside the
+block, the usual rules apply: qubits it creates are consumed in it or are its result, which
+is measured. `return`, `break` and `continue` cannot leave the block. `sample` is not allowed
+in a reversible context (N013).
 
 ## 13. Open questions
 
@@ -557,6 +577,6 @@ None currently.
 | N017 | Indices not proven different                       |
 | N018 | Qubit index not proven in range                    |
 | N019 | Unsafe operation outside `unsafe`                  |
-| N020 | Preparation is not repeatable                      |
+| N020 | A repeated run is not repeatable                   |
 | N021 | A `circuit fn` is not a circuit ([execution.md](execution.md) §4) |
 | N022 | A repeated run prints ([execution.md](execution.md) §3) |

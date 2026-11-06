@@ -92,6 +92,9 @@ enum Emit {
     Qasm3,
     /// Noev's intermediate representation, for inspecting the compiler
     Ir,
+    /// How each `sample` run and quantum function runs when repeated: sampled from one
+    /// simulation, or shot by shot and why
+    Plan,
 }
 
 fn main() -> ExitCode {
@@ -141,9 +144,13 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
     let parsed = noev_syntax::parse(&source);
     let (typed, type_errors) = noev_sema::check(&parsed.ast);
     let mut diagnostics = parsed.diagnostics.clone();
-    // Ownership is only meaningful for a well-typed program.
+    // Ownership is only meaningful for a well-typed program, and circuits for one that
+    // passes ownership checking.
     if diagnostics.is_empty() && type_errors.is_empty() {
         diagnostics.extend(noev_sema::check_ownership(&parsed.ast, &typed));
+        if diagnostics.is_empty() {
+            diagnostics.extend(noev_sema::check_circuits(&parsed.ast, &typed).1);
+        }
     }
     diagnostics.extend(type_errors);
     diagnostics.sort_by_key(|d| d.span.start);
@@ -170,6 +177,7 @@ fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) 
     let program = noev_ir::lower(&checked.parsed.ast, &checked.typed, &checked.source);
     let text = match emit {
         Emit::Ir => program.to_string(),
+        Emit::Plan => plan(&checked),
         Emit::Qasm3 => return not_implemented("build --emit=qasm3"),
     };
     match output {
@@ -232,6 +240,60 @@ fn run(file: &Path, seed: Option<u64>, format: MessageFormat) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// The text of `--emit=plan`: one line per `sample` run, then one per function with
+/// quantum operations.
+fn plan(checked: &Checked) -> String {
+    let ast = &checked.parsed.ast;
+    let (circuits, _) = noev_sema::check_circuits(ast, &checked.typed);
+    let lines = report::Lines::new(&checked.source);
+    let line = |span: noev_syntax::Span| lines.line_col(span.start).0;
+    // Why a run is not sampled from one simulation, if it is not.
+    let why = |info: &noev_sema::CircuitInfo| {
+        if let Some((span, what)) = &info.not_circuit {
+            Some(format!(
+                "a measurement result is {what} (line {})",
+                line(*span)
+            ))
+        } else if info.feedback {
+            Some("conditions on measurement results are not compiled yet".to_string())
+        } else {
+            info.releases
+                .map(|span| format!("the simulator checks its `release` (line {})", line(span)))
+        }
+    };
+    let run = |info: &noev_sema::CircuitInfo| match why(info) {
+        _ if !info.quantum => "classical: no quantum operations".to_string(),
+        None => "circuit: sampled from one simulation".to_string(),
+        Some(why) => format!("shot by shot: {why}"),
+    };
+    let function = |info: &noev_sema::CircuitInfo| match (why(info), &info.not_circuit) {
+        (None, _) => "circuit".to_string(),
+        (Some(why), Some(_)) => format!("not a circuit: {why}"),
+        (Some(why), None) => format!("circuit, run shot by shot: {why}"),
+    };
+    let mut runs: Vec<_> = circuits
+        .runs
+        .iter()
+        .map(|(&id, info)| (ast.expr(id).span, info))
+        .collect();
+    runs.sort_by_key(|(span, _)| span.start);
+    let mut rows: Vec<(String, String)> = runs
+        .into_iter()
+        .map(|(span, info)| (format!("sample (line {})", line(span)), run(info)))
+        .collect();
+    rows.extend(
+        ast.all_fns()
+            .iter()
+            .zip(&circuits.fns)
+            .filter(|(_, info)| info.quantum)
+            .map(|(decl, info)| (format!("fn {}", ast.name(decl.name)), function(info))),
+    );
+    let width = rows.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
+    rows.iter()
+        .map(|(name, how)| format!("{name:<width$}  {how}\n"))
+        .collect()
 }
 
 fn not_implemented(command: &str) -> ExitCode {

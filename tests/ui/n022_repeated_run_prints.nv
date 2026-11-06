@@ -1,0 +1,28 @@
+// N022: a run that is repeated prints.
+
+fn noisy() -> Bit {
+    let q = |+>
+    print("measuring")
+    mv q.measure()
+}
+
+fn calls_noisy() -> Bit {
+    noisy()
+}
+
+fn prep() -> Qubit {
+    eprint("preparing")
+    |+>
+}
+
+fn main() {
+    let a = sample 100 { noisy() }                  //~ N022
+    let b = sample 100 { calls_noisy() }            //~ N022
+    let e = <prep()| Z(0) |prep()>                  //~ N022
+    let c = sample 100 {
+        let q = |+>
+        print("in the run")                         //~ N022
+        mv q.measure()
+    }
+    print(a, b, c, e)
+}

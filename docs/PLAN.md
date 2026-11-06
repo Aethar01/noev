@@ -133,10 +133,10 @@ circuit generation.
 | -- | ---------------------------- | ------------------------------------------------------------------------------------------ | ------- |
 | 1  | Parser                       | Read `.nv` files, build an AST                                                             | ☑ Done |
 | 2  | Basic types                  | `Int`, `Float`, `Bool`, `Bit`, `Qubit`, tuples, arrays, structs                            | ☑ Done |
-| 3  | Ownership checker            | Rules N001–N020 in `spec/ownership.md` (`with`/`do` reserved)                              | ☑ Done |
+| 3  | Ownership checker            | Rules N001–N022 in `spec/ownership.md` (`with`/`do` reserved)                              | ☑ Done |
 | 4  | Quantum IR                   | Allocation, gates, measurement, classical dependencies                                     | ☑ Done |
-| 5  | Circuits                     | Closed runs that are circuits (`spec/execution.md`) compiled to ketrs circuits and OpenQASM 3 | ☐ Todo |
-| 6  | Execution                    | Interpreter on ketrs, circuits sampled through ketrs, `noev run` | ◐ In progress |
+| 5  | Circuits                     | Closed runs that are circuits (`spec/execution.md`) compiled to ketrs circuits and OpenQASM 3 | ◐ In progress (ketrs circuits done; OpenQASM 3 export to do) |
+| 6  | Execution                    | Interpreter on ketrs, circuits sampled through ketrs, `noev run` | ☑ Done |
 | 7  | Expectation values           | `<ψ\| H \|ψ>` with observables, exact on ketrs where possible                               | ☐ Todo |
 
 **Priority:** build the type system and ownership checker (milestones 1–3) first, before any
@@ -288,7 +288,7 @@ program never breaks existing code; the reverse does.
 | Execution model     | Calls run once; closed runs repeat as shots; a one-sentence rule decides circuit vs shot by shot; `circuit fn` promises it (`spec/execution.md`) | Decided  |
 | Output              | `noev run` runs `main` once; output is what the program prints (`print`, `eprint`); `std::io` reserved | Decided  |
 | Strings, formatting | `String` with value semantics; `{expr:spec}` interpolation checked at compile time | Decided  |
-| Sampling            | `sample(f(args), n) -> Distribution<T>` in the language, no CLI command | Decided  |
+| Sampling            | `sample n { … } -> Distribution<T>` in the language, no CLI command: a block that runs `n` times, so every call still runs once where it is written | Decided  |
 | Generic syntax      | Angle brackets: `Distribution<T>` | Decided  |
 | Unconsumed qubits   | Compile error now; goal is implicit free when provably \|0⟩ | Decided  |
 

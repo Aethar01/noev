@@ -47,7 +47,9 @@ pub fn validate(program: &Program) -> Vec<String> {
                                 check_operand(a, &mut report);
                                 check_operand(b, &mut report);
                             }
-                            Rvalue::Aggregate(ops) | Rvalue::Math(_, ops) => {
+                            Rvalue::Aggregate(ops)
+                            | Rvalue::Math(_, ops)
+                            | Rvalue::Dist(_, ops, _) => {
                                 ops.iter().for_each(|op| check_operand(op, &mut report))
                             }
                             Rvalue::Ref { place, .. } => check_place(place, &mut report),
@@ -80,6 +82,20 @@ pub fn validate(program: &Program) -> Vec<String> {
                         places.iter().for_each(|p| check_place(p, &mut report))
                     }
                     Stmt::CtrlPop => {}
+                    Stmt::Sample {
+                        dest,
+                        func,
+                        args,
+                        shots,
+                        ..
+                    } => {
+                        check_place(dest, &mut report);
+                        check_operand(shots, &mut report);
+                        args.iter().for_each(|a| check_operand(a, &mut report));
+                        if func.index() >= program.functions.len() {
+                            report(format!("unknown function {}", func.0));
+                        }
+                    }
                     Stmt::Print { args, .. } => args
                         .iter()
                         .for_each(|(op, _)| check_operand(op, &mut report)),

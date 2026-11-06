@@ -15,16 +15,18 @@ use noev_syntax::{Diagnostic, Span, Symbol};
 
 use crate::check::{Adjust, Callee, LocalId, Res, Typed};
 use crate::facts::{self, Fact, Linear};
-use crate::prelude::Reversible;
+use crate::prelude::{Builtin, Reversible};
 use crate::ty::{Kind, Ty, TyKind};
 
 /// Checks ownership in every function of `ast`.
 pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
     let irreversible = infer_reversibility(ast, typed);
+    let prints = infer_printing(ast, typed);
     let mut checker = Owner {
         ast,
         typed,
         irreversible,
+        prints,
         diagnostics: Vec::new(),
         locals: vec![LocalInfo::default(); typed.locals.len()],
         order: 0,
@@ -149,6 +151,8 @@ struct Owner<'a> {
     ast: &'a Ast,
     typed: &'a Typed,
     irreversible: Vec<Option<Irreversible>>,
+    /// For each function, where it prints (directly or through a call), if it does.
+    prints: Vec<Option<Span>>,
     diagnostics: Vec<Diagnostic>,
     locals: Vec<LocalInfo>,
     order: u32,
@@ -207,6 +211,39 @@ fn infer_reversibility(ast: &Ast, typed: &Typed) -> Vec<Option<Irreversible>> {
     }
 }
 
+/// For each function, the first place it prints, directly or through a call it makes.
+fn infer_printing(ast: &Ast, typed: &Typed) -> Vec<Option<Span>> {
+    let mut result: Vec<Option<Span>> = vec![None; ast.all_fns().len()];
+    loop {
+        let mut changed = false;
+        for (index, decl) in ast.all_fns().iter().enumerate() {
+            let Some(body) = decl.body else { continue };
+            if result[index].is_some() {
+                continue;
+            }
+            let mut found = None;
+            walk_block(ast, body, &mut |node| {
+                let Node::Expr(id) = node else { return };
+                if found.is_some() {
+                    return;
+                }
+                found = match typed.callees[id.index()] {
+                    Some(Callee::Builtin(Builtin::Print { .. })) => Some(ast.expr(id).span),
+                    Some(Callee::Fn(f)) if result[f.index()].is_some() => Some(ast.expr(id).span),
+                    _ => None,
+                };
+            });
+            if found.is_some() {
+                result[index] = found;
+                changed = true;
+            }
+        }
+        if !changed {
+            return result;
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Node {
     Expr(ExprId),
@@ -240,6 +277,7 @@ fn irreversible_op(
                 ExprKind::Expectation { .. } => {
                     (expr.span, "it computes an expectation value".into())
                 }
+                ExprKind::Sample { .. } => (expr.span, "it samples a run".into()),
                 ExprKind::Own {
                     kind: OwnKind::Mv, ..
                 } if typed.types.linearity(typed.ty(id)) == Kind::Linear => {
@@ -287,7 +325,7 @@ fn root_local(ast: &Ast, typed: &Typed, mut id: ExprId) -> Option<LocalId> {
 }
 
 /// Calls `visit` on every expression and assignment in a block, outside-in. Expectation
-/// preparations are skipped: they run separately.
+/// preparations and `sample` runs are skipped: they run separately.
 fn walk_block(ast: &Ast, block: BlockId, visit: &mut dyn FnMut(Node)) {
     for &stmt in ast.list(ast.block(block).stmts) {
         let stmt = ast.stmt(stmt);
@@ -333,6 +371,8 @@ fn walk_expr(ast: &Ast, id: ExprId, visit: &mut dyn FnMut(Node)) {
         ExprKind::Adj(call) => children.push(call),
         ExprKind::BraTest { operand, .. } => children.push(operand),
         ExprKind::Expectation { observable, .. } => children.push(observable),
+        // The body is a run of its own.
+        ExprKind::Sample { shots, .. } => children.push(shots),
         ExprKind::Block(b) | ExprKind::Unsafe(b) => blocks.push(b),
         ExprKind::If {
             cond,
@@ -790,7 +830,21 @@ impl Owner<'_> {
                     return Vec::new();
                 }
                 self.preparation(prep);
+                self.repeated_run_prints(prep, "an expectation value");
                 self.expr(observable, Use::Read);
+                Vec::new()
+            }
+            ExprKind::Sample { shots, body } => {
+                if self.not_reversible(expr.span, "sampling") {
+                    return Vec::new();
+                }
+                self.expr(shots, Use::Read);
+                self.run_captures(id, body);
+                self.run_prints(body);
+                // The run's result is measured and counted: taken, like a returned value.
+                let carried = self.block(body, Use::Value);
+                self.release(&carried);
+                self.diverged = false;
                 Vec::new()
             }
             ExprKind::Block(block) => self.block(block, use_),
@@ -1028,6 +1082,142 @@ impl Owner<'_> {
         }
     }
 
+    /// N022: a run that is repeated must not print.
+    fn repeated_run_prints(&mut self, run: ExprId, by: &str) {
+        let Some(Callee::Fn(f)) = self.typed.callees[run.index()] else {
+            return;
+        };
+        let Some(print) = self.prints[f.index()] else {
+            return;
+        };
+        let name = self.ast.name(self.ast.function(f).name).to_string();
+        let span = self.ast.expr(run).span;
+        self.error(
+            "N022",
+            span,
+            format!("`{name}` prints, but it is run many times by {by}"),
+        )
+        .with_label_mut(print, "it prints here")
+        .help = Some("compute values in the run and print them from the caller".into());
+    }
+
+    /// N022 for printing in a `sample` run, directly or through a call.
+    fn run_prints(&mut self, body: BlockId) {
+        let mut found = Vec::new();
+        walk_block(self.ast, body, &mut |node| {
+            let Node::Expr(id) = node else { return };
+            match self.typed.callees[id.index()] {
+                Some(Callee::Builtin(Builtin::Print { .. })) => found.push((id, None)),
+                Some(Callee::Fn(f)) => {
+                    if let Some(print) = self.prints[f.index()] {
+                        found.push((id, Some((f, print))));
+                    }
+                }
+                _ => {}
+            }
+        });
+        for (id, through) in found {
+            let span = self.ast.expr(id).span;
+            let help = "compute values in the run and print them after `sample`";
+            match through {
+                None => {
+                    self.error("N022", span, "this prints, but `sample` runs it many times")
+                        .help = Some(help.into());
+                }
+                Some((f, print)) => {
+                    let name = self.ast.name(self.ast.function(f).name).to_string();
+                    self.error(
+                        "N022",
+                        span,
+                        format!("`{name}` prints, but `sample` runs it many times"),
+                    )
+                    .with_label_mut(print, "it prints here")
+                    .help = Some(help.into());
+                }
+            }
+        }
+    }
+
+    /// N020 for a `sample` run that uses something from outside it other than by reading a
+    /// classical value: each run is given a copy of the values it reads.
+    fn run_captures(&mut self, id: ExprId, body: BlockId) {
+        let Some(run) = self.typed.runs.get(&id) else {
+            return;
+        };
+        let first = run.first_local as usize;
+        let ast = self.ast;
+        let typed = self.typed;
+        let outside = |e: ExprId| match ast.expr(e).kind {
+            ExprKind::Name(_) => match typed.res[e.index()] {
+                Res::Local(l) if l.index() < first => Some(l),
+                _ => None,
+            },
+            _ => None,
+        };
+        let mut problems: Vec<(LocalId, Span, &str)> = Vec::new();
+        walk_block(ast, body, &mut |node| match node {
+            Node::Assign(place, span) => {
+                if let Some(l) = root_local(ast, typed, place).filter(|l| l.index() < first) {
+                    problems.push((l, span, "changes"));
+                }
+            }
+            Node::Expr(e) => {
+                if let Some(l) = outside(e) {
+                    let ty = typed.local(l).ty;
+                    if typed.types.linearity(ty) != Kind::Copyable {
+                        problems.push((l, ast.expr(e).span, "uses"));
+                    } else if matches!(typed.types.kind(ty), TyKind::Ref { .. }) {
+                        problems.push((l, ast.expr(e).span, "uses the reference"));
+                    } else if matches!(typed.adjust[e.index()], Adjust::Lend { mutable: true }) {
+                        problems.push((l, ast.expr(e).span, "lends"));
+                    }
+                }
+                let owned = match ast.expr(e).kind {
+                    ExprKind::Own {
+                        kind: OwnKind::Mv | OwnKind::Mut,
+                        place,
+                    } => Some(place),
+                    ExprKind::MethodCall { receiver, .. }
+                        if typed.receivers[e.index()] == Some(OwnKind::Mut) =>
+                    {
+                        Some(receiver)
+                    }
+                    _ => None,
+                };
+                if let Some(l) = owned
+                    .and_then(|p| root_local(ast, typed, p))
+                    .filter(|l| l.index() < first)
+                {
+                    problems.push((l, ast.expr(e).span, "changes"));
+                }
+            }
+        });
+        let mut reported = Vec::new();
+        for (local, span, what) in problems {
+            if reported.contains(&local) {
+                continue;
+            }
+            reported.push(local);
+            // Qubits cannot be shared between runs at all, however they are used.
+            let ty = self.typed.local(local).ty;
+            let what = if self.typed.types.linearity(ty) == Kind::Copyable {
+                what
+            } else {
+                "uses"
+            };
+            let name = self.name(local).to_string();
+            self.error(
+                "N020",
+                span,
+                format!("`sample` runs this many times, but it {what} `{name}`, from outside the run"),
+            )
+            .help = Some(
+                "a run can only read classical values from outside it; create qubits inside the run"
+                    .into(),
+            );
+        }
+    }
+
     /// N020: a preparation is run many times, so its arguments must be classical.
     fn preparation(&mut self, prep: ExprId) {
         let ExprKind::Call { args, .. } = self.ast.expr(prep).kind else {
@@ -1049,8 +1239,8 @@ impl Owner<'_> {
             if self.typed.types.linearity(ty) != Kind::Copyable || lends_mut || owns {
                 let span = self.ast.expr(arg).span;
                 let text = self.expr_text(arg);
-                self.error("N020", span, format!("the preparation is run many times, but `{text}` is not a classical value it can be given each time"))
-                    .help = Some("create the qubits inside the preparation, and pass only classical values".into());
+                self.error("N020", span, format!("this call is repeated many times, but `{text}` is not a classical value it can be given each time"))
+                    .help = Some("create the qubits inside the function, and pass only classical values".into());
                 return;
             }
             self.expr(arg, Use::Read);
@@ -1180,7 +1370,6 @@ impl Owner<'_> {
         let span = self.ast.expr(id).span;
         let callee = self.typed.callees[id.index()];
         self.callee_rules(callee, span);
-
         let mut receiver_carried = Vec::new();
         if let Some(receiver) = receiver {
             receiver_carried = self.receiver(id, receiver);

@@ -46,6 +46,8 @@ pub enum TyKind {
     Tuple(Box<[Ty]>),
     /// `[T; N]`.
     Array(Ty, u64),
+    /// `Distribution<T>`.
+    Distribution(Ty),
     /// A struct.
     Struct(StructId),
     /// `ref T` or `mut T`.
@@ -277,6 +279,7 @@ impl Types {
                 }
             }
             TyKind::Array(elem, len) => format!("[{}; {len}]", self.display(*elem, ast)),
+            TyKind::Distribution(elem) => format!("Distribution<{}>", self.display(*elem, ast)),
             TyKind::Struct(id) => ast.name(self.structs[id.index()].name).into(),
             TyKind::Ref { mutable, inner } => {
                 let word = if *mutable { "mut" } else { "ref" };

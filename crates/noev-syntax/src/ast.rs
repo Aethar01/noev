@@ -410,6 +410,14 @@ pub enum ExprKind {
         /// The body.
         body: BlockId,
     },
+    /// `sample shots { … }`: the distribution of the block's results over `shots` separate
+    /// runs of it.
+    Sample {
+        /// How many runs.
+        shots: ExprId,
+        /// The run.
+        body: BlockId,
+    },
     /// `for var in start..end { … }`.
     For {
         /// The loop variable.
@@ -699,6 +707,13 @@ pub enum TypeKind {
     Error,
     /// A named type, such as `Int` or `Experiment`, or a path.
     Path(List<Symbol>),
+    /// A named type with type arguments, such as `Distribution<(Bit, Bit)>`.
+    Generic {
+        /// The type's name or path.
+        path: List<Symbol>,
+        /// The type arguments.
+        args: List<TypeId>,
+    },
     /// `ref T` or `mut T`.
     Ref {
         /// Whether it is `mut T`.

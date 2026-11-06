@@ -11,7 +11,7 @@
 
 use ketrs::{Operation, PauliString, PauliSum, Statevector};
 use noev_ir::ir::*;
-use noev_sema::prelude::{FloatConst, Gate, Math, Pauli as IrPauli};
+use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli as IrPauli};
 use noev_sema::{Ty, TyKind};
 use noev_syntax::Span;
 use rand::rngs::SmallRng;
@@ -66,6 +66,56 @@ struct Op {
     targets: Vec<usize>,
 }
 
+/// How a machine treats quantum operations.
+#[derive(Clone, Debug, Default)]
+pub enum Mode {
+    /// Simulate them on the statevector.
+    #[default]
+    Simulate,
+    /// Record them into a circuit instead, without simulating. Measurements give a
+    /// placeholder `0`: only used for runs that are circuits, where a measurement result
+    /// cannot affect anything before the last quantum operation.
+    Build(Recording),
+    /// Skip them, and take measurement results from `bits`, in order: re-runs a circuit's
+    /// classical code for one sampled outcome.
+    Replay {
+        /// The outcome, measurement `k` at bit `k`.
+        bits: u64,
+        /// How many measurements have been made.
+        next: usize,
+        /// How many qubits have been handed out (indices only; there is no state).
+        qubits: usize,
+    },
+}
+
+/// A circuit being recorded in [`Mode::Build`].
+#[derive(Clone, Debug, Default)]
+pub struct Recording {
+    /// The instructions, in order.
+    pub instructions: Vec<Instruction>,
+    /// How many qubits the circuit uses.
+    pub qubits: usize,
+    /// How many classical bits (one per measurement).
+    pub clbits: usize,
+    /// Released and measured qubits, and whether each needs a reset before reuse.
+    free: Vec<(usize, bool)>,
+}
+
+/// One recorded step.
+#[derive(Clone, Debug)]
+pub enum Instruction {
+    /// A gate.
+    Op(Box<Operation>),
+    /// Measure a qubit into a classical bit.
+    Measure(usize, usize),
+    /// Return a qubit to \|0⟩.
+    Reset(usize),
+}
+
+/// Recorded circuits use fresh qubits up to this many, so their measurements can all come at
+/// the end; beyond it they reuse measured qubits after a reset.
+const FRESH_QUBITS: usize = 24;
+
 /// The state of one run of a program.
 pub struct Machine<'p> {
     program: &'p Program,
@@ -84,6 +134,12 @@ pub struct Machine<'p> {
     measured: bool,
     /// Where `print` and `eprint` write; `None` in runs that are repeated, which cannot print.
     output: Option<Rc<RefCell<Output>>>,
+    /// Simulating, recording a circuit, or replaying one outcome.
+    pub mode: Mode,
+    /// Whether, while recording, an operation needed a measurement result's actual value.
+    /// If not, a circuit's results are its classical bits in place, and outcomes need no
+    /// replay.
+    pub needs_values: std::cell::Cell<bool>,
 }
 
 impl<'p> Machine<'p> {
@@ -100,7 +156,15 @@ impl<'p> Machine<'p> {
             rng: SmallRng::seed_from_u64(seed),
             measured: false,
             output: None,
+            mode: Mode::Simulate,
+            needs_values: std::cell::Cell::new(false),
         }
+    }
+
+    /// A machine in `mode`.
+    pub fn with_mode(mut self, mode: Mode) -> Self {
+        self.mode = mode;
+        self
     }
 
     /// Sends the program's output to `output`.
@@ -118,7 +182,7 @@ impl<'p> Machine<'p> {
     /// qubits are consumed at the end of a shot (`spec/core.md` §6).
     pub fn measure_value(&mut self, value: Value) -> Result<Value> {
         Ok(match value {
-            Value::Qubit(q) => Value::Bit(self.measure(q)?),
+            Value::Qubit(q) => self.measurement(q)?,
             Value::Aggregate(items) => Value::Aggregate(
                 items
                     .into_iter()
@@ -340,8 +404,28 @@ impl Machine<'_> {
         }
     }
 
+    /// An operand's value where an operation needs it: a recorded measurement result becomes
+    /// a concrete placeholder, noting that outcomes will need replaying.
+    fn value(&self, op: &Operand) -> Result<Value> {
+        let value = self.operand(op)?;
+        Ok(self.concrete(value))
+    }
+
+    fn concrete(&self, value: Value) -> Value {
+        match value {
+            Value::Clbit(_) => {
+                self.needs_values.set(true);
+                Value::Bit(false)
+            }
+            Value::Aggregate(items) if items.iter().any(Value::has_clbits) => {
+                Value::Aggregate(items.into_iter().map(|v| self.concrete(v)).collect())
+            }
+            other => other,
+        }
+    }
+
     fn int(&self, op: &Operand) -> Result<i64> {
-        match self.operand(op)? {
+        match self.value(op)? {
             Value::Int(v) => Ok(v),
             other => Err(RuntimeError::new(format!(
                 "expected an Int, found {other:?}"
@@ -350,7 +434,7 @@ impl Machine<'_> {
     }
 
     fn float(&self, op: &Operand) -> Result<f64> {
-        match self.operand(op)? {
+        match self.value(op)? {
             Value::Float(v) => Ok(v),
             other => Err(RuntimeError::new(format!(
                 "expected a Float, found {other:?}"
@@ -359,7 +443,7 @@ impl Machine<'_> {
     }
 
     fn truth(&self, op: &Operand) -> Result<bool> {
-        match self.operand(op)? {
+        match self.value(op)? {
             Value::Bool(v) | Value::Bit(v) => Ok(v),
             other => Err(RuntimeError::new(format!(
                 "expected a Bool or Bit, found {other:?}"
@@ -421,15 +505,30 @@ impl Machine<'_> {
             }
             Stmt::Measure { dest, qubit } => {
                 let qubit = self.qubit(qubit)?;
-                let bit = self.measure(qubit)?;
-                self.store(dest, Value::Bit(bit))
+                let value = self.measurement(qubit)?;
+                self.store(dest, value)
             }
             Stmt::Reset(place) => {
                 let qubit = self.qubit(place)?;
-                self.state.reset(qubit, &mut self.rng).map_err(sim_error)
+                match &mut self.mode {
+                    Mode::Simulate => self.state.reset(qubit, &mut self.rng).map_err(sim_error),
+                    Mode::Build(recording) => {
+                        recording.instructions.push(Instruction::Reset(qubit));
+                        Ok(())
+                    }
+                    Mode::Replay { .. } => Ok(()),
+                }
             }
             Stmt::Release(place) => {
                 let qubit = self.qubit(place)?;
+                match &mut self.mode {
+                    Mode::Simulate => {}
+                    Mode::Build(recording) => {
+                        recording.free.push((qubit, false));
+                        return Ok(());
+                    }
+                    Mode::Replay { .. } => return Ok(()),
+                }
                 // Simulators check `release`'s claim (spec/ownership.md §11).
                 let p1 = self.state.probability_one(qubit).map_err(sim_error)?;
                 if p1 > 1e-9 {
@@ -454,13 +553,34 @@ impl Machine<'_> {
                 self.controls.truncate(mark);
                 Ok(())
             }
+            Stmt::Sample {
+                dest,
+                func,
+                args,
+                shots,
+                elem,
+            } => {
+                let args = args
+                    .iter()
+                    .map(|a| self.value(a))
+                    .collect::<Result<Vec<_>>>()?;
+                let shots = usize::try_from(self.int(shots)?)
+                    .map_err(|_| RuntimeError::new("`sample` needs a positive number of shots"))?;
+                let seed = self.rng.random();
+                let program = self.program;
+                let elem = *elem;
+                let dist = crate::sampling::sample(program, *func, args, shots, seed, |v| {
+                    format::display(program, v, elem)
+                })?;
+                self.store(dest, Value::Distribution(Rc::new(dist)))
+            }
             Stmt::Print { stderr, args } => {
                 let mut line = String::new();
                 for (i, (op, ty)) in args.iter().enumerate() {
                     if i > 0 {
                         line.push(' ');
                     }
-                    line.push_str(&format::display(self.program, &self.operand(op)?, *ty));
+                    line.push_str(&format::display(self.program, &self.value(op)?, *ty));
                 }
                 line.push('\n');
                 if let Some(output) = &self.output {
@@ -500,6 +620,24 @@ impl Machine<'_> {
 
     /// A qubit in \|0⟩: a released one, or a new one added to the state.
     fn allocate(&mut self) -> Result<usize> {
+        match &mut self.mode {
+            Mode::Simulate => {}
+            Mode::Build(recording) => {
+                if recording.qubits < FRESH_QUBITS || recording.free.is_empty() {
+                    recording.qubits += 1;
+                    return Ok(recording.qubits - 1);
+                }
+                let (qubit, needs_reset) = recording.free.pop().expect("checked above");
+                if needs_reset {
+                    recording.instructions.push(Instruction::Reset(qubit));
+                }
+                return Ok(qubit);
+            }
+            Mode::Replay { qubits, .. } => {
+                *qubits += 1;
+                return Ok(*qubits - 1);
+            }
+        }
         if let Some(qubit) = self.free.pop() {
             return Ok(qubit);
         }
@@ -514,9 +652,35 @@ impl Machine<'_> {
         Ok(qubit)
     }
 
+    /// Measures a qubit: its `Bit`, or while recording, the classical bit it was measured into.
+    fn measurement(&mut self, qubit: usize) -> Result<Value> {
+        if let Mode::Build(recording) = &self.mode {
+            let clbit = recording.clbits;
+            self.measure(qubit)?;
+            return Ok(Value::Clbit(clbit));
+        }
+        Ok(Value::Bit(self.measure(qubit)?))
+    }
+
     /// Measures a qubit, consuming it: it is returned to \|0⟩ and freed.
     fn measure(&mut self, qubit: usize) -> Result<bool> {
         self.measured = true;
+        match &mut self.mode {
+            Mode::Simulate => {}
+            Mode::Build(recording) => {
+                recording
+                    .instructions
+                    .push(Instruction::Measure(qubit, recording.clbits));
+                recording.clbits += 1;
+                recording.free.push((qubit, true));
+                return Ok(false);
+            }
+            Mode::Replay { bits, next, .. } => {
+                let bit = *next < 64 && (*bits >> *next) & 1 == 1;
+                *next += 1;
+                return Ok(bit);
+            }
+        }
         let bit = self
             .state
             .measure(qubit, &mut self.rng)
@@ -561,7 +725,16 @@ impl Machine<'_> {
             },
             _ => return Err(RuntimeError::new("a gate with the wrong number of qubits")),
         };
-        self.state.apply(&operation).map_err(sim_error)
+        match &mut self.mode {
+            Mode::Simulate => self.state.apply(&operation).map_err(sim_error),
+            Mode::Build(recording) => {
+                recording
+                    .instructions
+                    .push(Instruction::Op(Box::new(operation)));
+                Ok(())
+            }
+            Mode::Replay { .. } => Ok(()),
+        }
     }
 }
 
@@ -608,14 +781,14 @@ impl Machine<'_> {
     fn rvalue(&self, value: &Rvalue) -> Result<Value> {
         Ok(match value {
             Rvalue::Use(op) => self.operand(op)?,
-            Rvalue::Unary(op, x) => unary(*op, self.operand(x)?)?,
-            Rvalue::Binary(op, a, b) => binary(*op, self.operand(a)?, self.operand(b)?)?,
+            Rvalue::Unary(op, x) => unary(*op, self.value(x)?)?,
+            Rvalue::Binary(op, a, b) => binary(*op, self.value(a)?, self.value(b)?)?,
             Rvalue::Aggregate(ops) => {
                 Value::Aggregate(ops.iter().map(|o| self.operand(o)).collect::<Result<_>>()?)
             }
             Rvalue::Repeat(op, n) => Value::Aggregate(vec![self.operand(op)?; *n as usize]),
             Rvalue::Ref { place, .. } => Value::Ref(self.resolve(place)?),
-            Rvalue::Convert(target, op) => convert(*target, self.operand(op)?)?,
+            Rvalue::Convert(target, op) => convert(*target, self.value(op)?)?,
             Rvalue::Math(math, ops) => {
                 let args = ops
                     .iter()
@@ -638,6 +811,22 @@ impl Machine<'_> {
                 Value::Observable(Observable::pauli(pauli, index))
             }
             Rvalue::Identity => Value::Observable(Observable::identity()),
+            Rvalue::Dist(method, ops, elem) => {
+                let Value::Distribution(dist) = self.operand(&ops[0])? else {
+                    return Err(RuntimeError::new("expected a distribution"));
+                };
+                let key = |m: &Self, i: usize| -> Result<String> {
+                    Ok(format::display(m.program, &m.value(&ops[i])?, *elem))
+                };
+                match method {
+                    DistMethod::Shots => Value::Int(dist.shots as i64),
+                    DistMethod::Count => Value::Int(dist.count(&key(self, 1)?) as i64),
+                    DistMethod::Probability => {
+                        Value::Float(dist.count(&key(self, 1)?) as f64 / dist.shots as f64)
+                    }
+                    DistMethod::MostLikely => dist.outcomes[0].value.clone(),
+                }
+            }
             Rvalue::Format(parts) => {
                 let mut text = String::new();
                 for part in parts {

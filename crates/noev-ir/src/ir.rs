@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use noev_sema::prelude::{FloatConst, Gate, Math, Pauli};
+use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli};
 use noev_sema::{Ty, TyKind, Types};
 use noev_syntax::Span;
 pub use noev_syntax::ast::{Align, FormatKind, FormatSpec};
@@ -64,6 +64,9 @@ pub struct Function {
     pub blocks: Vec<BasicBlock>,
     /// Where the function is declared.
     pub span: Span,
+    /// Whether repeated runs of it can be computed once and sampled: a circuit whose control
+    /// flow does not depend on measurement results (`spec/execution.md` §4).
+    pub sampled: bool,
 }
 
 /// A local's type, and its source name if it has one.
@@ -194,6 +197,9 @@ pub enum Rvalue {
     Identity,
     /// A string literal: text and formatted values.
     Format(Vec<FormatPart>),
+    /// A method of a `Distribution`: the distribution, then the method's arguments. The type
+    /// is the distribution's element type.
+    Dist(DistMethod, Vec<Operand>, Ty),
     /// `P(i, b)` (`x_basis: false`) or `PX(i, b)` (`x_basis: true`).
     Projector {
         /// Whether it is in the X basis.
@@ -255,6 +261,20 @@ pub enum Stmt {
     CtrlPush(Vec<Place>),
     /// Remove the controls added by the matching [`Stmt::CtrlPush`].
     CtrlPop,
+    /// `dest = sample shots { … }`, with the block made into `func`: the distribution of
+    /// `func(args)`'s results over `shots` runs, with returned qubits measured at the end of each.
+    Sample {
+        /// Where the `Distribution` goes.
+        dest: Place,
+        /// The run.
+        func: FuncId,
+        /// Its classical arguments.
+        args: Vec<Operand>,
+        /// How many runs.
+        shots: Operand,
+        /// The distribution's element type.
+        elem: Ty,
+    },
     /// `dest = <prep| observable |prep>`.
     Expectation {
         /// Where the `Float` goes.
@@ -338,6 +358,7 @@ impl Program {
                 format!("({})", elems.join(", "))
             }
             TyKind::Array(elem, len) => format!("[{}; {len}]", self.type_name(*elem)),
+            TyKind::Distribution(elem) => format!("Distribution<{}>", self.type_name(*elem)),
             TyKind::Struct(id) => self.struct_names[id.index()].clone(),
             TyKind::Ref { mutable, inner } => {
                 format!(
@@ -428,6 +449,22 @@ impl Program {
                 format!("ctrl push {}", places.join(", "))
             }
             Stmt::CtrlPop => "ctrl pop".into(),
+            Stmt::Sample {
+                dest,
+                func,
+                args,
+                shots,
+                ..
+            } => {
+                let args: Vec<String> = args.iter().map(operand_text).collect();
+                format!(
+                    "{} = sample {}({}), {}",
+                    place_text(dest),
+                    self.function_name(*func),
+                    args.join(", "),
+                    operand_text(shots)
+                )
+            }
             Stmt::Print { stderr, args } => {
                 let args: Vec<String> = args.iter().map(|(op, _)| operand_text(op)).collect();
                 format!(
@@ -493,6 +530,7 @@ impl Program {
             ),
             Rvalue::Pauli(p, i) => format!("{p:?}({})", operand_text(i)),
             Rvalue::Identity => "I()".into(),
+            Rvalue::Dist(method, ops, _) => format!("{method:?}({})", list(ops)).to_lowercase(),
             Rvalue::Format(parts) => {
                 let text: String = parts
                     .iter()

@@ -107,8 +107,8 @@ All of these are pure, so they may be called in reversible contexts.
 ## 6. Running a program
 
 How programs run, how runs are repeated and sampled, and when a run is a circuit, is in
-[execution.md](execution.md). `sample` and the `Distribution` type are intrinsics, specified
-there (§3).
+[execution.md](execution.md). `sample` and the `Distribution` type are part of the core
+language, specified there (§3).
 
 ## 7. Open questions
 

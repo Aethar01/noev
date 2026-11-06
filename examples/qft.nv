@@ -1,0 +1,30 @@
+// The quantum Fourier transform on 16 qubits, sampled.
+//
+//     noev run examples/qft.nv
+//
+// `qft_state` is a circuit (spec/execution.md §4), so `sample` simulates it once and samples
+// it for every shot. On |0…0⟩ the QFT gives the uniform superposition, so all 65536 outcomes
+// are about equally likely.
+
+fn qft(r: mut [Qubit; 16]) {
+    for i in 0..16 {
+        r[i].h()
+        for j in i + 1..16 {
+            ctrl r[j] { r[i].p(Float::PI / Float(1 << (j - i))) }
+        }
+    }
+}
+
+fn qft_state() -> [Qubit; 16] {
+    let r = |0000000000000000>
+    qft(r)
+    mv r
+}
+
+fn main() {
+    let shots = 100000
+    let d = sample shots { qft_state() }
+    let p = d.probability(d.most_likely())
+    print("{shots} shots, {d.shots()} counted; most likely outcome {d.most_likely()} with P = {p:.5}")
+    print("uniform would be {1.0 / 65536.0:.5} per outcome")
+}

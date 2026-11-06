@@ -8,7 +8,7 @@
 
 use noev_sema::check::{Adjust, Callee, LocalId, Res};
 use noev_sema::prelude::{Builtin, Gate};
-use noev_sema::{Ty, TyKind, Typed, Types};
+use noev_sema::{Circuits, Ty, TyKind, Typed, Types};
 use noev_syntax::ast::{self as ast, ExprId, ExprKind, OwnKind, StmtKind};
 use noev_syntax::{Ast, Span};
 
@@ -35,7 +35,10 @@ pub fn lower(syntax: &Ast, typed: &Typed, source: &str) -> Program {
         .collect();
     // Lowering creates reference types for implicit lends, so it works on its own copy.
     let mut types = typed.types.clone();
+    let (circuits, _) = noev_sema::check_circuits(syntax, typed);
     let mut functions = Vec::with_capacity(syntax.all_fns().len());
+    // `sample` runs become functions of their own, numbered after the program's.
+    let mut runs = Vec::new();
     let mut main = None;
     for (index, decl) in syntax.all_fns().iter().enumerate() {
         let f = ast::FnId::from_index(index);
@@ -51,8 +54,17 @@ pub fn lower(syntax: &Ast, typed: &Typed, source: &str) -> Program {
         if owner.is_none() && name == "main" {
             main = Some(FuncId(index as u32));
         }
-        functions.push(Builder::new(syntax, typed, &mut types, source, f, name).build());
+        let shared = Shared {
+            types: &mut types,
+            circuits: &circuits,
+            runs: &mut runs,
+            first_run: syntax.all_fns().len() as u32,
+        };
+        let mut function = Builder::new(syntax, typed, shared, source, f, name).build();
+        function.sampled = circuits.fns[index].sampled();
+        functions.push(function);
     }
+    functions.extend(runs);
     Program {
         functions,
         main,
@@ -62,12 +74,25 @@ pub fn lower(syntax: &Ast, typed: &Typed, source: &str) -> Program {
     }
 }
 
+/// What every builder of a program shares.
+struct Shared<'a> {
+    types: &'a mut Types,
+    circuits: &'a Circuits,
+    /// The functions made for `sample` runs so far.
+    runs: &'a mut Vec<Function>,
+    /// The id of the first of them.
+    first_run: u32,
+}
+
 struct Builder<'a> {
     ast: &'a Ast,
     typed: &'a Typed,
     types: &'a mut Types,
+    circuits: &'a Circuits,
+    runs: &'a mut Vec<Function>,
+    first_run: u32,
     source: &'a str,
-    decl: &'a ast::FnDecl,
+    body: Option<ast::BlockId>,
     function: Function,
     current: Block,
     /// IR locals for source locals, indexed by [`LocalId::index`].
@@ -80,34 +105,16 @@ impl<'a> Builder<'a> {
     fn new(
         syntax: &'a Ast,
         typed: &'a Typed,
-        types: &'a mut Types,
+        shared: Shared<'a>,
         source: &'a str,
         f: ast::FnId,
         name: String,
     ) -> Self {
         let decl = syntax.function(f);
         let info = &typed.fns[f.index()];
-        let mut builder = Builder {
-            ast: syntax,
-            typed,
-            types,
-            source,
-            decl,
-            function: Function {
-                name,
-                params: 0,
-                locals: vec![LocalDecl {
-                    ty: info.sig.ret,
-                    name: None,
-                }],
-                blocks: Vec::new(),
-                span: decl.span,
-            },
-            current: Block(0),
-            locals: vec![None; typed.locals.len()],
-            loops: Vec::new(),
-        };
-        builder.current = builder.new_block();
+        let mut builder =
+            Builder::empty(syntax, typed, shared, source, name, decl.body, info.sig.ret);
+        builder.function.span = decl.span;
         match (info.self_local, info.receiver_ty) {
             (Some(local), _) => {
                 builder.declare(local);
@@ -130,8 +137,116 @@ impl<'a> Builder<'a> {
         builder
     }
 
+    /// A builder for a function returning `ret`, with no parameters yet.
+    fn empty(
+        syntax: &'a Ast,
+        typed: &'a Typed,
+        shared: Shared<'a>,
+        source: &'a str,
+        name: String,
+        body: Option<ast::BlockId>,
+        ret: Ty,
+    ) -> Self {
+        let mut builder = Builder {
+            ast: syntax,
+            typed,
+            types: shared.types,
+            circuits: shared.circuits,
+            runs: shared.runs,
+            first_run: shared.first_run,
+            source,
+            body,
+            function: Function {
+                name,
+                params: 0,
+                locals: vec![LocalDecl {
+                    ty: ret,
+                    name: None,
+                }],
+                blocks: Vec::new(),
+                span: body.map_or(Span::default(), |b| syntax.block(b).span),
+                sampled: false,
+            },
+            current: Block(0),
+            locals: vec![None; typed.locals.len()],
+            loops: Vec::new(),
+        };
+        builder.current = builder.new_block();
+        builder
+    }
+
+    /// Makes the function for a `sample` run, whose parameters are the locals from outside it
+    /// that it reads. Returns it and those locals.
+    fn run_function(&mut self, id: ExprId, body: ast::BlockId) -> (FuncId, Vec<LocalId>) {
+        let run = self.typed.runs[&id];
+        let captures = self.captures(body, run.first_local);
+        let name = format!("{}::sample{}", self.function.name, self.runs.len() + 1);
+        let shared = Shared {
+            types: &mut *self.types,
+            circuits: self.circuits,
+            runs: &mut *self.runs,
+            first_run: self.first_run,
+        };
+        let mut builder = Builder::empty(
+            self.ast,
+            self.typed,
+            shared,
+            self.source,
+            name,
+            Some(body),
+            run.ty,
+        );
+        builder.function.sampled = self.circuits.runs[&id].sampled();
+        for &local in &captures {
+            builder.declare(local);
+            builder.function.params += 1;
+        }
+        let function = builder.build();
+        self.runs.push(function);
+        (
+            FuncId(self.first_run + self.runs.len() as u32 - 1),
+            captures,
+        )
+    }
+
+    /// The locals declared before `first` that a block mentions, nested runs included.
+    fn captures(&self, body: ast::BlockId, first: u32) -> Vec<LocalId> {
+        let span = self.ast.block(body).span;
+        let mut found = Vec::new();
+        for (index, expr) in self.ast.all_exprs().iter().enumerate() {
+            if expr.span.start < span.start || expr.span.end > span.end {
+                continue;
+            }
+            match expr.kind {
+                ExprKind::Name(_) => {
+                    if let Res::Local(l) = self.typed.res[index]
+                        && l.index() < first as usize
+                    {
+                        found.push(l);
+                    }
+                }
+                ExprKind::StructLit { fields, .. } => {
+                    for field in self.ast.list(fields).iter().filter(|f| f.value.is_none()) {
+                        let outer = (0..first as usize)
+                            .rev()
+                            .map(LocalId::from_index)
+                            .find(|&l| {
+                                self.locals[l.index()].is_some()
+                                    && self.typed.local(l).name == field.name
+                            });
+                        found.extend(outer);
+                    }
+                }
+                _ => {}
+            }
+        }
+        found.sort();
+        found.dedup();
+        found
+    }
+
     fn build(mut self) -> Function {
-        if let Some(body) = self.decl.body {
+        if let Some(body) = self.body {
             let dest = (self.function.locals[0].ty != Ty::UNIT).then(|| Place::local(Local(0)));
             self.block_into(body, dest);
             self.terminate(Terminator::Return);
@@ -719,6 +834,28 @@ impl Builder<'_> {
                     observable,
                 });
             }
+            ExprKind::Sample { shots, body } => {
+                let (func, captures) = self.run_function(id, body);
+                let args = captures
+                    .iter()
+                    .map(|&l| {
+                        let ty = self.typed.local(l).ty;
+                        self.read(Place::local(self.local(l)), ty)
+                    })
+                    .collect();
+                let shots = self.operand(shots);
+                let TyKind::Distribution(elem) = *self.types.kind(self.ty(id)) else {
+                    return;
+                };
+                let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
+                self.push(Stmt::Sample {
+                    dest,
+                    func,
+                    args,
+                    shots,
+                    elem,
+                });
+            }
             ExprKind::Block(block) | ExprKind::Unsafe(block) => self.block_into(block, dest),
             ExprKind::If {
                 cond,
@@ -1170,6 +1307,18 @@ impl Builder<'_> {
                 ops.extend(rest.iter().map(|&a| self.operand(a)));
                 if let Some(dest) = dest {
                     self.assign(dest, Rvalue::Math(math, ops));
+                }
+            }
+            Builtin::Dist(method) => {
+                let Some(first) = first else { return };
+                let TyKind::Distribution(elem) = *self.types.kind(self.types.deref(self.ty(first)))
+                else {
+                    return;
+                };
+                let mut ops = vec![self.value_operand(first)];
+                ops.extend(rest.iter().map(|&a| self.operand(a)));
+                if let Some(dest) = dest {
+                    self.assign(dest, Rvalue::Dist(method, ops, elem));
                 }
             }
             Builtin::Print { stderr } => {

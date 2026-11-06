@@ -142,7 +142,11 @@ fn write_value(program: &Program, value: &Value, ty: Ty, out: &mut String) {
                 _ => out.push('…'),
             }
         }
+        (Value::Distribution(d), _) => {
+            let _ = write!(out, "{d}");
+        }
         (Value::Qubit(_), _) => out.push_str("<qubit>"),
+        (Value::Clbit(_), _) => out.push('0'),
         (Value::Ref(_), _) => out.push_str("<reference>"),
     }
 }

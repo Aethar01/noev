@@ -1,0 +1,46 @@
+// Circuits by the rule of spec/execution.md §4; each is declared `circuit fn` to check it.
+
+circuit fn returned() -> (Bit, Bit) {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    (mv a.measure(), mv b.measure())
+}
+
+circuit fn feedback() -> Bit {
+    let a = |+>
+    let b = |0>
+    if mv a.measure() { b.x() }
+    mv b.measure()
+}
+
+circuit fn arithmetic_afterwards() -> Int {
+    let r = |+++>
+    let bits = mv r.measure()
+    let mut ones = 0
+    for i in 0..3 {
+        if bits[i] { ones += 1 }
+    }
+    ones
+}
+
+circuit fn classical_setup() -> [Bit; 4] {
+    let r = |0000>
+    for i in 0..4 {
+        r[i].ry(Float(i) * Float::PI / 4.0)
+    }
+    mv r.measure()
+}
+
+circuit fn logic_on_results() -> Bool {
+    let a = |+>
+    let b = |+>
+    let same = (mv a.measure()) == (mv b.measure())
+    let c = |0>
+    if same and not false { c.x() }
+    <1| mv c
+}
+
+fn main() {
+    print(sample 100 { returned() }, sample 100 { arithmetic_afterwards() })
+}

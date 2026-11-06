@@ -1,4 +1,5 @@
-// N020: the preparation in an expectation value cannot be run repeatedly.
+// N020: a run that is repeated (an expectation value's preparation, or a `sample` block)
+// can only be given classical values.
 
 fn prep(q: mut Qubit) -> Qubit {
     q.h()
@@ -20,4 +21,23 @@ fn outside_qubit() -> Float {
 fn classical_mut_lend() -> Float {
     let mut n = 0
     <counted(mut n)| Z(0) |counted(mut n)>  //~ N020
+}
+
+fn sample_outside_qubit() {
+    let q = |+>
+    let d = sample 10 {
+        q.h()                                   //~ N020
+        5
+    }
+    mv q.discard()
+    print(d)
+}
+
+fn sample_changes_outside() {
+    let mut total = 0
+    let d = sample 10 {
+        total += 1                              //~ N020
+        total
+    }
+    print(d, total)
 }

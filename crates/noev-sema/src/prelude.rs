@@ -36,6 +36,8 @@ pub enum Builtin {
     Convert(Ty),
     /// `Float::PI`, `Float::TAU` or `Float::E`.
     Const(FloatConst),
+    /// A method of `Distribution<T>`.
+    Dist(DistMethod),
     /// `print(…)` (`stderr: false`) or `eprint(…)` (`stderr: true`). Standard library.
     Print {
         /// Whether it writes to standard error.
@@ -75,10 +77,24 @@ impl Builtin {
             Builtin::Math(_) => "a maths function",
             Builtin::Convert(_) => "a conversion",
             Builtin::Const(_) => "a constant",
+            Builtin::Dist(_) => "a distribution method",
             Builtin::Print { stderr: false } => "print",
             Builtin::Print { stderr: true } => "eprint",
         }
     }
+}
+
+/// The methods of `Distribution<T>` (`spec/execution.md` §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DistMethod {
+    /// `shots() -> Int`
+    Shots,
+    /// `count(x: T) -> Int`
+    Count,
+    /// `probability(x: T) -> Float`
+    Probability,
+    /// `most_likely() -> T`
+    MostLikely,
 }
 
 /// The prelude's gates.
@@ -288,6 +304,19 @@ pub fn method(types: &mut Types, base: Ty, name: &str) -> Option<(Builtin, Sig)>
             };
             Some((
                 Builtin::Math(math),
+                Sig::new(Some(OwnKind::Ref), params, ret, Yes),
+            ))
+        }
+        TyKind::Distribution(elem) => {
+            let (method, params, ret) = match name {
+                "shots" => (DistMethod::Shots, vec![], Ty::INT),
+                "count" => (DistMethod::Count, vec![elem], Ty::INT),
+                "probability" => (DistMethod::Probability, vec![elem], Ty::FLOAT),
+                "most_likely" => (DistMethod::MostLikely, vec![], elem),
+                _ => return None,
+            };
+            Some((
+                Builtin::Dist(method),
                 Sig::new(Some(OwnKind::Ref), params, ret, Yes),
             ))
         }

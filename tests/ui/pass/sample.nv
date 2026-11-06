@@ -1,0 +1,45 @@
+// Sampling closed runs and using the distributions.
+
+fn bell() -> (Bit, Bit) {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    (mv a.measure(), mv b.measure())
+}
+
+fn ghz(theta: Float) -> [Qubit; 3] {
+    let r = |000>
+    r[0].ry(theta)
+    for i in 0..2 {
+        ctrl r[i] { r[i + 1].x() }
+    }
+    mv r
+}
+
+fn analyse(d: Distribution<(Bit, Bit)>) -> Float {
+    d.probability((1, 1))
+}
+
+fn main() {
+    let d = sample 1000 { bell() }
+    let g = sample 500 { ghz(Float::PI / 2.0) }
+
+    // A run can be any block, and read classical values from around it.
+    let theta = Float::PI / 3.0
+    let n = 200
+    let e = sample n * 2 {
+        let q = |0>
+        q.ry(theta)
+        let flipped = mv q.measure()
+        (flipped, n)
+    }
+    let r = sample 100 {
+        let pair = |00>
+        pair[0].h()
+        mv pair
+    }
+    print(e, r)
+    print(d)
+    print("P(11) = {analyse(d):.2}, shots: {d.shots()}, all ones: {g.count([1, 1, 1])}")
+    print("most likely GHZ outcome: {g.most_likely()}")
+}

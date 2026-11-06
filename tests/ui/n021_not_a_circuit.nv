@@ -1,0 +1,27 @@
+// N021: a `circuit fn` that is not a circuit, or not a closed run.
+
+circuit fn angle_from_measurement() -> Bit {
+    let x = |+>
+    let y = |0>
+    let k = Int(mv x.measure())         //~ N021
+    y.ry(Float(k))
+    mv y.measure()
+}
+
+circuit fn passes_result() -> Bit {
+    let x = |+>
+    let b = mv x.measure()
+    let y = |0>
+    flip_if(y, b)                       //~ N021
+    mv y.measure()
+}
+
+fn flip_if(q: mut Qubit, b: Bit) {
+    if b { q.x() }
+}
+
+circuit fn takes_a_qubit(q: mut Qubit) -> Bit { //~ N021
+    q.h()
+    let r = |0>
+    mv r.measure()
+}

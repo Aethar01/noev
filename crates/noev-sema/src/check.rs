@@ -114,6 +114,18 @@ pub struct Typed {
     pub locals: Vec<Local>,
     /// Every function, indexed by [`FnId::index`].
     pub fns: Vec<FnInfo>,
+    /// Each `sample` expression's run.
+    pub runs: FxHashMap<ExprId, Run>,
+}
+
+/// The block of a `sample` expression, which is run separately from the code around it.
+#[derive(Clone, Copy, Debug)]
+pub struct Run {
+    /// The first local declared inside the run: locals before it belong to the code around
+    /// it, and are copied into each run.
+    pub first_local: u32,
+    /// The block's type, before returned qubits are measured.
+    pub ty: Ty,
 }
 
 impl Typed {
@@ -172,6 +184,7 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         self_ty: None,
         ret: Ty::UNIT,
         loops: 0,
+        runs: 0,
     };
     checker.collect();
     checker.check_bodies();
@@ -193,6 +206,8 @@ struct Checker<'a> {
     ret: Ty,
     /// How many loops enclose the current code.
     loops: u32,
+    /// How many `sample` runs enclose the current code.
+    runs: u32,
 }
 
 // Collecting items.
@@ -372,6 +387,35 @@ impl Checker<'_> {
                 let elem = self.resolve_type(elem);
                 self.t.types.array(elem, len)
             }
+            TypeKind::Generic { path, args } => {
+                let args: Vec<Ty> = ast
+                    .list(args)
+                    .iter()
+                    .map(|&a| self.resolve_type(a))
+                    .collect();
+                let name = self.path_text(path);
+                match (name.as_str(), args.as_slice()) {
+                    ("Distribution", &[elem]) => {
+                        if !self.t.types.is_wildcard(elem) && !self.t.types.is_printable(elem) {
+                            let message = format!(
+                                "a `Distribution` holds classical values, but {} is not one",
+                                self.show(elem)
+                            );
+                            self.error(node.span, message);
+                        }
+                        self.t.types.intern(TyKind::Distribution(elem))
+                    }
+                    ("Distribution", _) => {
+                        self.error(node.span, "`Distribution` takes one type argument");
+                        Ty::ERROR
+                    }
+                    _ => {
+                        let message = format!("`{name}` takes no type arguments");
+                        self.error(node.span, message);
+                        Ty::ERROR
+                    }
+                }
+            }
             TypeKind::Path(segments) => {
                 if let [single] = ast.list(segments) {
                     let name = self.name(*single);
@@ -410,6 +454,7 @@ impl Checker<'_> {
             self.ret = info.sig.ret;
             self.scope.clear();
             self.loops = 0;
+            self.runs = 0;
 
             if let (Some(receiver), Some(self_ty)) = (decl.receiver, self.self_ty) {
                 let ty = match receiver.kind {
@@ -555,6 +600,14 @@ impl Checker<'_> {
                     }
                 }
                 false
+            }
+            StmtKind::Return(value) if self.runs > 0 => {
+                if let Some(value) = value {
+                    self.expr(value, Expect::None);
+                }
+                self.error(stmt.span, "`return` cannot leave a `sample` run")
+                    .help = Some("the run's result is its block's last expression".into());
+                true
             }
             StmtKind::Return(value) => {
                 match value {
@@ -886,6 +939,7 @@ impl Checker<'_> {
                 then,
                 otherwise,
             } => self.if_expr(cond, then, otherwise, expect, expr.span),
+            ExprKind::Sample { shots, body } => self.sample(id, shots, body),
             ExprKind::While { cond, body } => {
                 self.condition(cond);
                 self.loops += 1;
@@ -1433,6 +1487,56 @@ impl Checker<'_> {
             }
         }
         target
+    }
+
+    /// `sample n { … }`: a `Distribution` of the block's results, with returned qubits
+    /// measured.
+    fn sample(&mut self, id: ExprId, shots: ExprId, body: BlockId) -> Ty {
+        self.expr(shots, Expect::Ty(Ty::INT));
+        let first_local = self.t.locals.len() as u32;
+        // `break` and `continue` cannot leave the run either.
+        let loops = std::mem::replace(&mut self.loops, 0);
+        self.runs += 1;
+        let ty = self.block(body, Expect::None);
+        self.runs -= 1;
+        self.loops = loops;
+        self.t.runs.insert(id, Run { first_local, ty });
+        if self.t.types.is_wildcard(ty) {
+            return Ty::ERROR;
+        }
+        match self.measured_type(ty) {
+            Ok(elem) => self.t.types.intern(TyKind::Distribution(elem)),
+            Err(problem) => {
+                let span = self.ast.block(body).span;
+                let message = format!("`sample` cannot count results of type {}", self.show(ty));
+                self.error(span, message).help = Some(problem.into());
+                Ty::ERROR
+            }
+        }
+    }
+
+    /// A run's result type once its returned qubits are measured: each `Qubit` becomes a `Bit`.
+    fn measured_type(&mut self, ty: Ty) -> Result<Ty, &'static str> {
+        match self.t.types.kind(ty).clone() {
+            TyKind::Qubit => Ok(Ty::BIT),
+            TyKind::Array(elem, len) => {
+                let elem = self.measured_type(elem)?;
+                Ok(self.t.types.array(elem, len))
+            }
+            TyKind::Tuple(elems) => {
+                let elems = elems
+                    .iter()
+                    .map(|&t| self.measured_type(t))
+                    .collect::<Result<Box<[Ty]>, _>>()?;
+                Ok(self.t.types.intern(TyKind::Tuple(elems)))
+            }
+            TyKind::Struct(_) if !self.t.types.is_printable(ty) => Err(
+                "a struct holding qubits cannot be counted; return its qubits in a tuple or array",
+            ),
+            TyKind::Ref { .. } => Err("references cannot be counted; return values"),
+            _ if self.t.types.is_printable(ty) => Ok(ty),
+            _ => Err("only classical values and qubits can be counted"),
+        }
     }
 
     /// `print(…)` and `eprint(…)`: any number of printable values.

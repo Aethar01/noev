@@ -655,7 +655,27 @@ impl Parser<'_> {
                 self.expect(RBracket, "`]`");
                 TypeKind::Array { elem, len }
             }
-            Ident | SelfType => TypeKind::Path(self.path_segments()),
+            Ident | SelfType => {
+                let path = self.path_segments();
+                if self.at(Lt) {
+                    self.bump();
+                    let mark = self.ast.mark::<TypeId>();
+                    while !matches!(self.kind(), Gt | Shr | Eof) {
+                        let arg = self.ty();
+                        self.ast.push_to(arg);
+                        if !self.eat(Comma) {
+                            break;
+                        }
+                    }
+                    self.close_angle();
+                    TypeKind::Generic {
+                        path,
+                        args: self.ast.finish(mark),
+                    }
+                } else {
+                    TypeKind::Path(path)
+                }
+            }
             _ => {
                 self.expected("a type");
                 TypeKind::Error
@@ -663,6 +683,24 @@ impl Parser<'_> {
         };
         let span = start.to(self.prev_span());
         self.ast.push_type(TypeExpr { kind, span })
+    }
+
+    /// Consumes a `>` closing type arguments. In `A<B<C>>` the lexer sees `>>`, so it is
+    /// split: the first `>` is consumed and the second left for the outer list.
+    fn close_angle(&mut self) {
+        match self.kind() {
+            TokenKind::Gt => {
+                self.bump();
+            }
+            TokenKind::Shr => {
+                let token = &mut self.tokens[self.pos];
+                token.kind = TokenKind::Gt;
+                token.span.start += 1;
+            }
+            _ => {
+                self.expected("`>` to close the type arguments");
+            }
+        }
     }
 
     fn pat(&mut self) -> PatId {
@@ -1168,6 +1206,13 @@ impl Parser<'_> {
                 ExprKind::While { cond, body }
             }
             For => return self.for_expr(),
+            Sample => {
+                self.bump();
+                let shots = self.expr_no_struct();
+                self.skip_newlines();
+                let body = self.block();
+                ExprKind::Sample { shots, body }
+            }
             Unsafe => {
                 self.bump();
                 self.skip_newlines();

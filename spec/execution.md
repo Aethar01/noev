@@ -20,9 +20,11 @@ complete new run.
 
 ## 2. Closed runs
 
-A **closed run** is a call whose parameters and result contain no qubits (and no references
-to qubits). Ownership guarantees that every qubit it creates is consumed inside it, so it is
-a self-contained quantum computation that can be repeated independently: one **shot**.
+A **closed run** is a piece of code that takes no qubits from outside it: a `sample` block,
+or a call whose parameters and result contain no qubits (and no references). Ownership
+guarantees that every qubit it creates is consumed inside it (or, for a `sample` block,
+returned to be measured), so it is a self-contained quantum computation that can be repeated
+independently: one **shot**.
 
 ```noev
 fn bell() -> (Bit, Bit) { … }            // closed: no qubits in or out
@@ -30,14 +32,13 @@ fn ansatz(theta: Float) -> [Qubit; 2] { … }   // not closed: returns qubits
 fn flip(q: mut Qubit) { … }              // not closed: takes a qubit
 ```
 
-Closed runs are found from function signatures alone.
+Closed calls are found from function signatures alone.
 
 ## 3. Repeating runs
 
 Runs are only ever repeated explicitly:
 
-- `sample(f(args), n)` runs the closed run `f(args)` `n` times and returns a
-  `Distribution` of its results.
+- `sample n { … }` runs its block `n` times and returns a `Distribution` of its results.
 - `<ψ| H |ψ>` runs its preparation as many times as the estimate needs
   ([types.md](types.md) §3).
 - An ordinary loop that calls a run repeats it, one run per call.
@@ -46,20 +47,34 @@ Runs are only ever repeated explicitly:
 
 ```noev
 fn main() {
-    let d = sample(bell(), 1000)
+    let d = sample 1000 { bell() }
     print(d)                                    // every outcome, most frequent first
     print("P(11) = {d.probability((1, 1)):.3}")
+
+    let theta = 0.3
+    let e = sample 500 {                        // any block is a run
+        let q = |0>
+        q.ry(theta)
+        mv q.measure()
+    }
 }
 ```
 
-`sample(f(args), n)`:
+`sample` is a block, like `for` or `while`, so the code still reads in order: `sample n
+{ … }` means "run this block `n` times and count what it gives", exactly as a loop that
+collects its results would. A call inside the block runs once per run, where it is written.
 
-- `f(args)` must be a call to a function, with classical arguments (the same rule as
-  preparations, N020). It runs `n` times; `n` is an `Int`, at least 1.
-- If `f` returns qubits, they are measured in the Z basis at the end of each run, in the order
-  of the value's qubits (elements and fields left to right). So `sample(ansatz(t), 1000)`
-  samples the state `ansatz` prepares. The `Distribution`'s element type is `f`'s result type
-  with every `Qubit` replaced by `Bit`.
+`sample n { … }`:
+
+- `n` is an `Int`, at least 1. It is evaluated once, before the runs.
+- Each run is separate: it starts with no qubits, and is given a copy of the classical values
+  it reads from the code around it. It may not use qubits or references from outside it,
+  change outside variables, or lend them `mut` (N020). `return`, `break` and `continue` cannot
+  leave it.
+- The block's value is the run's result. Qubits in it are measured in the Z basis at the end
+  of each run, in the order of the value's qubits (elements and fields left to right). So
+  `sample 1000 { ansatz(t) }` samples the state `ansatz` prepares. The `Distribution`'s
+  element type is the block's type with every `Qubit` replaced by `Bit`.
 - Every other part of the result must be classical; references are not allowed.
 
 A `Distribution<T>` has:
@@ -80,10 +95,10 @@ on a simulator, when the run is a circuit (§4).
 
 ### Repeated runs have no output
 
-A run that is repeated (by `sample`, or as a preparation) must not print, directly or in any
+A run that is repeated (a `sample` block, or a preparation) must not print, directly or in any
 function it calls: it would print once per run, and when it is a circuit it is not run once
 per shot at all. Printing in a repeated run is error N022. Compute values in the run and
-print them from the code that called `sample`.
+print them after `sample`.
 
 ## 4. Circuits
 
@@ -161,10 +176,15 @@ function is a circuit to other modules only if it is declared `circuit fn`
 Which way each repeated run executes is decided at compile time and reported then, never in
 the program's output:
 
-- `noev check` and `noev run` warn, on standard error, when a run given to `sample` or used as
-  a preparation is not a circuit, pointing at the line that makes it so.
-- `noev build --emit=plan` lists every repeated run, whether it is a circuit, and why not
-  when it is not.
+- `noev check` and `noev run` warn, on standard error, when a `sample` block or a preparation
+  will run shot by shot, pointing at the line that makes it so.
+- `noev build --emit=plan` lists every `sample` block and how it runs, then every function
+  with quantum operations and whether it is a circuit, and why not when it is not.
+
+One more case runs shot by shot on a simulator: a run that calls `release`. The simulator
+checks `release`'s claim that the qubit is in \|0⟩ ([ownership.md](ownership.md) §11), which
+needs each shot's state. The warning says so; `discard`, which resets first, keeps the run
+sampled.
 
 Optimisations that only make the fast path faster are not reported and never change which
 path is taken: caching a function's circuit and rebinding its angles on each call, running

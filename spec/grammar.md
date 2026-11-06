@@ -27,7 +27,7 @@ Reserved keywords cannot be used as identifiers:
 
 ```
 and  as  assert  break  continue  else  extern  false  fn  for  if  impl  in  let  mut
-not  or  pub  ref  return  self  Self  struct  trait  true  type  unsafe  use  while
+not  or  pub  ref  return  sample  self  Self  struct  trait  true  type  unsafe  use  while
 ```
 
 Contextual keywords are keywords only in the positions listed. Everywhere else they are
@@ -245,6 +245,7 @@ used (see [ownership.md](ownership.md) §2).
 if_expr     = "if" expr_no_struct block [ "else" ( block | if_expr ) ] ;
 for_expr    = "for" IDENT "in" expr_no_struct ".." expr_no_struct block ;
 while_expr  = "while" expr_no_struct block ;
+sample_expr = "sample" expr_no_struct block ;
 
 ctrl_stmt   = "ctrl" place { "," place } block ;
 with_stmt   = "with" block "do" block ;          (* Reserved *)
@@ -261,6 +262,8 @@ unsafe_block = "unsafe" block ;
 - `for i in a..b` iterates over the half-open integer range.
 - `assert cond` checks a `Bool` condition at runtime and stops the program if it is false.
   The compiler also uses it as a known fact (see [ownership.md](ownership.md) §10).
+- `sample n { … }` runs its block `n` times, each run separate from the others and from the
+  code around it, and counts the results (see [execution.md](execution.md) §3).
 - `unsafe { … }` allows operations whose claims the compiler cannot check (see
   [ownership.md](ownership.md) §11).
 
@@ -289,7 +292,8 @@ primary     = INT | FLOAT | "true" | "false" | KET
             | "[" [ expr { "," expr } [ "," ] ] "]"                    (* array *)
             | "[" expr ";" expr "]"                                     (* array repeat *)
             | expectation
-            | if_expr | for_expr | while_expr | ctrl_stmt | with_stmt | unsafe_block | block ;
+            | if_expr | for_expr | while_expr | sample_expr | ctrl_stmt | with_stmt
+            | unsafe_block | block ;
 expectation = "<" prep "|" observable "|" prep ">"
             | BRA observable "|" KET_BODY ">" ;     (* <+| h |+> *)
 prep        = postfix ;                             (* a call or a ket *)

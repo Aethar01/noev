@@ -87,6 +87,7 @@ fn sexp(ast: &Ast, source: &str, id: ExprId) -> String {
             None => format!("(if {})", e(cond)),
         },
         ExprKind::While { cond, .. } => format!("(while {})", e(cond)),
+        ExprKind::Sample { shots, .. } => format!("(sample {})", e(shots)),
         ExprKind::For {
             var, start, end, ..
         } => {
@@ -215,6 +216,7 @@ fn control_flow() {
 fn struct_literal_not_allowed_in_conditions() {
     assert_eq!(expr("if x { y }"), "(if x)");
     assert_eq!(expr("while done { }"), "(while done)");
+    assert_eq!(expr("sample n * 2 { bell() }"), "(sample (* n 2))");
 }
 
 #[test]
@@ -282,6 +284,19 @@ fn items() {
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let fns = parsed.ast.all_fns();
     assert!(fns[0].is_circuit && fns[1].is_circuit && fns[1].is_rev && !fns[2].is_circuit);
+}
+
+#[test]
+fn generic_types() {
+    let parsed = parse("fn f(d: Distribution<(Bit, Bit)>, e: Distribution<Distribution<Int>>) {}");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let kinds: Vec<bool> = parsed
+        .ast
+        .all_types()
+        .iter()
+        .map(|t| matches!(t.kind, TypeKind::Generic { .. }))
+        .collect();
+    assert_eq!(kinds.iter().filter(|&&g| g).count(), 3);
 }
 
 #[test]

@@ -47,6 +47,7 @@ pub enum TokenKind {
     Pub,
     Ref,
     Return,
+    Sample,
     /// `self`
     SelfValue,
     /// `Self`
@@ -144,6 +145,7 @@ impl TokenKind {
             b"pub" => Pub,
             b"ref" => Ref,
             b"return" => Return,
+            b"sample" => Sample,
             b"self" => SelfValue,
             b"Self" => SelfType,
             b"struct" => Struct,
