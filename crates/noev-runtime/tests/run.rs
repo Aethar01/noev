@@ -440,6 +440,10 @@ fn feedback_ifs_are_part_of_the_circuit() {
 /// Teleportation: the corrections depend on two measurements, combined with logic, and the
 /// teleported state comes out exactly.
 const TELEPORT: &str = "
+fn correct(q: mut Qubit, flip: Bit, phase: Bool) {
+    if phase { q.z() }
+    if flip == 1 and not false { q.x() }
+}
 fn test() -> (Bit, Bit, Bit) {
     let msg = |0>
     msg.ry(2.0 * Float::PI / 3.0)
@@ -450,9 +454,7 @@ fn test() -> (Bit, Bit, Bit) {
     msg.h()
     let m1 = mv msg.measure()
     let m2 = mv a.measure()
-    let phase = m1 == 1
-    if phase { b.z() }
-    if m2 == 1 and not false { b.x() }
+    correct(b, m2, m1 == 1)
     // Undo the preparation: b should now be |0⟩.
     b.ry(-2.0 * Float::PI / 3.0)
     (m1, m2, mv b.measure())
@@ -464,6 +466,17 @@ fn teleportation_is_one_circuit() {
     assert!(circuit);
     assert!(counts.iter().all(|(k, _)| k.ends_with('0')), "{counts:?}");
     assert_eq!(counts.len(), 4, "{counts:?}");
+}
+
+#[test]
+fn results_passed_to_functions_that_misuse_them_are_not_circuits() {
+    // `rotate` turns its `Bit` into an angle, so given a measurement result it breaks the rule.
+    let (counts, circuit) = sampled(
+        "fn rotate(q: mut Qubit, b: Bit) { q.ry(Float(Int(b)) * Float::PI) }\nfn test() -> Bit {\n let a = |1>\n let m = mv a.measure()\n let q = |0>\n rotate(q, m)\n mv q.measure()\n}",
+        50,
+    );
+    assert!(!circuit);
+    assert_eq!(counts, [("1".to_string(), 50)]);
 }
 
 #[test]

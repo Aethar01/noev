@@ -119,10 +119,12 @@ In detail:
     and constants (`==`, `!=`, `and`, `or`, `not`, `&`, `|`, `^`, `~`, and the conversions
     `Bool(b)` and `Bit(flag)`);
   - stored in variables, and moved or copied into the run's result, directly or inside
-    tuples, arrays and structs.
+    tuples, arrays and structs;
+  - passed to a function, which is then held to the same rule with its `Bit` and `Bool`
+    parameters counted as measurement results.
 
-  Any other use (arithmetic producing an `Int` or `Float`, an argument to a function, an
-  array index, a gate's angle) makes the run not a circuit.
+  Any other use (arithmetic producing an `Int` or `Float`, an array index, a gate's angle,
+  or a use like these inside a function it was passed to) makes the run not a circuit.
 - **Classical code that does not depend on measurement results is unrestricted**: loops,
   arithmetic, structs, calls to helper functions, angles computed from arguments. It runs
   while the circuit is being built.
@@ -130,7 +132,9 @@ In detail:
   a gate, measures, resets or allocates, including inside calls), anything goes: counting
   ones, decoding, building a result.
 - Calls to other functions inside a run are part of it: their quantum operations are part of
-  the circuit, and passing a measurement result to them counts as "any other use".
+  the circuit, and what they do with measurement results passed to them counts as done by
+  the run. So a helper such as `fn correct(q: mut Qubit, flip: Bit) { if flip { q.x() } }`
+  keeps a run a circuit.
 
 ```noev
 fn a() -> (Bit, Bit) { …; (mv x.measure(), mv y.measure()) }        // circuit: results returned

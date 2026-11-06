@@ -12,12 +12,13 @@ circuit fn passes_result() -> Bit {
     let x = |+>
     let b = mv x.measure()
     let y = |0>
-    flip_if(y, b)                       //~ N021
+    rotate_by(y, b)
     mv y.measure()
 }
 
-fn flip_if(q: mut Qubit, b: Bit) {
-    if b { q.x() }
+// Given a measurement result, this turns it into an angle.
+fn rotate_by(q: mut Qubit, b: Bit) {
+    q.ry(Float(Int(b)))                 //~ N021
 }
 
 circuit fn takes_a_qubit(q: mut Qubit) -> Bit { //~ N021

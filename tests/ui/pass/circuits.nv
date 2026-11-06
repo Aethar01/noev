@@ -14,6 +14,19 @@ circuit fn feedback() -> Bit {
     mv b.measure()
 }
 
+// Measurement results may be passed to a function that itself follows the rule.
+circuit fn corrected_by_a_helper() -> Bit {
+    let a = |+>
+    let b = |0>
+    let m = mv a.measure()
+    flip_if(b, m == 1)
+    mv b.measure()
+}
+
+fn flip_if(q: mut Qubit, flip: Bool) {
+    if flip { q.x() }
+}
+
 circuit fn arithmetic_afterwards() -> Int {
     let r = |+++>
     let bits = mv r.measure()

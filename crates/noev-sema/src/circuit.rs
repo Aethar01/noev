@@ -79,7 +79,14 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
     let releases = infer_releases(ast, typed, &order);
     // A call is part of the run that makes it, so a function is only a circuit if what it
     // calls is: repeat until nothing changes, since functions can call each other.
-    let mut infos = vec![CircuitInfo::default(); ast.all_fns().len()];
+    let mut cx = Context {
+        ast,
+        typed,
+        quantum,
+        gates_only,
+        fns: vec![CircuitInfo::default(); ast.all_fns().len()],
+        given: vec![None; ast.all_fns().len()],
+    };
     let mut buffers = Buffers::new(ast, typed);
     // Callees come first, so one pass is enough unless functions call each other in a cycle;
     // the bound stops a cycle whose first violation keeps moving.
@@ -97,26 +104,31 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
                 && typed.fns[index]
                     .receiver_ty
                     .is_none_or(|t| !holds_quantum_or_ref(typed, t));
-            let mut info = CircuitInfo {
-                quantum: quantum[index],
+            let base = CircuitInfo {
+                quantum: cx.quantum[index],
                 closed,
                 releases: releases[index],
                 ..CircuitInfo::default()
             };
-            if let (true, Some(body)) = (quantum[index], decl.body) {
-                Walker::run(
-                    ast,
-                    typed,
-                    &quantum,
-                    &infos,
-                    &gates_only,
-                    &mut info,
-                    body,
-                    &mut buffers,
-                );
+            let takes_results = typed.fns[index]
+                .params
+                .iter()
+                .any(|&p| holds_logic(typed, typed.local(p).ty));
+            let mut info = base.clone();
+            let mut given = takes_results.then(|| base.clone());
+            if let Some(body) = decl.body {
+                if cx.quantum[index] {
+                    Walker::run(&cx, &mut info, body, &mut buffers, None);
+                }
+                // Even a classical function matters when given results: what it returns
+                // depends on them, and it may branch on them.
+                if let Some(given) = &mut given {
+                    Walker::run(&cx, given, body, &mut buffers, Some(index));
+                }
             }
-            if info != infos[index] {
-                infos[index] = info;
+            if info != cx.fns[index] || given != cx.given[index] {
+                cx.fns[index] = info;
+                cx.given[index] = given;
                 changed = true;
             }
         }
@@ -135,20 +147,11 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
             releases: block_releases(ast, typed, &releases, body),
             ..CircuitInfo::default()
         };
-        info.quantum = contains_quantum(ast, typed, &quantum, Node::Block(body));
+        info.quantum = contains_quantum(ast, typed, &cx.quantum, Node::Block(body));
         if info.quantum {
             // Values from outside a run are copied in, so they start untainted.
             let mut fresh = Buffers::new(ast, typed);
-            Walker::run(
-                ast,
-                typed,
-                &quantum,
-                &infos,
-                &gates_only,
-                &mut info,
-                body,
-                &mut fresh,
-            );
+            Walker::run(&cx, &mut info, body, &mut fresh, None);
         }
         runs.insert(ExprId::from_index(index), info);
     }
@@ -158,7 +161,7 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
         if !decl.is_circuit {
             continue;
         }
-        let info = &infos[index];
+        let info = &cx.fns[index];
         let name = ast.name(decl.name);
         if !info.closed {
             diagnostics.push(
@@ -178,15 +181,17 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
             );
         }
     }
-    let mut feedback_ifs: Vec<ExprId> = infos
+    let mut feedback_ifs: Vec<ExprId> = cx
+        .fns
         .iter()
+        .chain(cx.given.iter().flatten())
         .chain(runs.values())
         .flat_map(|info| info.feedback_ifs.iter().copied())
         .collect();
     feedback_ifs.sort();
     feedback_ifs.dedup();
     let circuits = Circuits {
-        fns: infos,
+        fns: cx.fns,
         runs,
         feedback_ifs,
     };
@@ -316,6 +321,22 @@ impl CallOrder {
             }
         }
         CallOrder { fns, cyclic }
+    }
+}
+
+/// Whether a value of type `ty` can hold a measurement result: a `Bit` or `Bool`, or a
+/// tuple, array or struct containing one.
+fn holds_logic(typed: &Typed, ty: Ty) -> bool {
+    let types = &typed.types;
+    match types.kind(ty) {
+        _ if matches!(types.deref(ty), Ty::BIT | Ty::BOOL) => true,
+        TyKind::Tuple(elems) => elems.iter().any(|&t| holds_logic(typed, t)),
+        &TyKind::Array(elem, _) => holds_logic(typed, elem),
+        &TyKind::Struct(s) => types.structs[s.index()]
+            .fields
+            .iter()
+            .any(|&(_, t)| holds_logic(typed, t)),
+        _ => false,
     }
 }
 
@@ -634,14 +655,24 @@ impl Buffers {
     }
 }
 
-struct Walker<'a> {
+/// What the walker knows about the whole program.
+struct Context<'a> {
     ast: &'a Ast,
     typed: &'a Typed,
-    quantum: &'a [bool],
-    /// What is known so far about each function, for the calls the run makes.
-    fns: &'a [CircuitInfo],
+    /// Whether each function does quantum operations.
+    quantum: Vec<bool>,
     /// Whether each function only applies gates and computes classical values.
-    gates_only: &'a [bool],
+    gates_only: Vec<bool>,
+    /// What is known so far about each function, for the calls a run makes.
+    fns: Vec<CircuitInfo>,
+    /// The same, for a call that passes measurement results to it: its `Bit` and `Bool`
+    /// parameters are then measurement results. `None` for a function with no such
+    /// parameters.
+    given: Vec<Option<CircuitInfo>>,
+}
+
+struct Walker<'a> {
+    cx: &'a Context<'a>,
     /// For each statement, whether a quantum operation can happen at or after it.
     later: Vec<bool>,
     /// Whether each local holds a value that depends on a measurement.
@@ -653,21 +684,9 @@ struct Walker<'a> {
 }
 
 impl<'a> Walker<'a> {
-    fn new(
-        ast: &'a Ast,
-        typed: &'a Typed,
-        quantum: &'a [bool],
-        fns: &'a [CircuitInfo],
-        gates_only: &'a [bool],
-        info: &'a mut CircuitInfo,
-        buffers: &mut Buffers,
-    ) -> Self {
+    fn new(cx: &'a Context<'a>, info: &'a mut CircuitInfo, buffers: &mut Buffers) -> Self {
         Walker {
-            ast,
-            typed,
-            quantum,
-            fns,
-            gates_only,
+            cx,
             later: std::mem::take(&mut buffers.later),
             tainted: std::mem::take(&mut buffers.tainted),
             control: 0,
@@ -676,32 +695,40 @@ impl<'a> Walker<'a> {
     }
 
     /// Applies the rule to a run whose body is `body`, recording what it finds in `info`.
-    #[allow(clippy::too_many_arguments)]
+    /// With `given`, the body is that function's, called with measurement results.
     fn run(
-        ast: &'a Ast,
-        typed: &'a Typed,
-        quantum: &'a [bool],
-        fns: &'a [CircuitInfo],
-        gates_only: &'a [bool],
+        cx: &'a Context<'a>,
         info: &'a mut CircuitInfo,
         body: BlockId,
         buffers: &mut Buffers,
+        given: Option<usize>,
     ) {
-        let mut walker = Walker::new(ast, typed, quantum, fns, gates_only, info, buffers);
+        let mut walker = Walker::new(cx, info, buffers);
+        if let Some(f) = given {
+            for &param in &cx.typed.fns[f].params {
+                walker.tainted[param.index()] = holds_logic(cx.typed, cx.typed.local(param).ty);
+            }
+        }
         walker.mark_block(body, false);
         walker.block(body);
         buffers.later = walker.later;
         buffers.tainted = walker.tainted;
+        // Parameters are only written by `run`, so clear them for the next caller.
+        if let Some(f) = given {
+            for &param in &cx.typed.fns[f].params {
+                buffers.tainted[param.index()] = false;
+            }
+        }
     }
 
     fn contains_quantum(&self, node: Node) -> bool {
-        contains_quantum(self.ast, self.typed, self.quantum, node)
+        contains_quantum(self.cx.ast, self.cx.typed, &self.cx.quantum, node)
     }
 
     /// First pass: marks `later` for every statement in `block`, given whether a quantum
     /// operation can happen after the block. Returns whether the block contains one.
     fn mark_block(&mut self, block: BlockId, after: bool) -> bool {
-        let stmts = self.ast.list(self.ast.block(block).stmts).to_vec();
+        let stmts = self.cx.ast.list(self.cx.ast.block(block).stmts).to_vec();
         let mut later = after;
         let mut any = false;
         for &stmt in stmts.iter().rev() {
@@ -718,13 +745,13 @@ impl<'a> Walker<'a> {
     /// work, every point comes before the next iteration's quantum operations.
     fn mark_nested(&mut self, node: Node, later: bool) {
         let mut stack = Vec::new();
-        children(self.ast, node, &mut stack);
+        children(self.cx.ast, node, &mut stack);
         while let Some(child) = stack.pop() {
             match child {
                 Node::Block(b) => {
                     self.mark_block(b, later);
                 }
-                Node::Expr(e) => match self.ast.expr(e).kind {
+                Node::Expr(e) => match self.cx.ast.expr(e).kind {
                     ExprKind::While { cond, body }
                     | ExprKind::For {
                         body, start: cond, ..
@@ -733,9 +760,9 @@ impl<'a> Walker<'a> {
                         self.mark_block(body, later || loops);
                         stack.push(Node::Expr(cond));
                     }
-                    _ => children(self.ast, child, &mut stack),
+                    _ => children(self.cx.ast, child, &mut stack),
                 },
-                Node::Stmt(_) => children(self.ast, child, &mut stack),
+                Node::Stmt(_) => children(self.cx.ast, child, &mut stack),
             }
         }
     }
@@ -756,8 +783,8 @@ impl<'a> Walker<'a> {
         then: BlockId,
         otherwise: Option<ExprId>,
     ) -> Option<(Span, String)> {
-        let ast = self.ast;
-        let typed = self.typed;
+        let ast = self.cx.ast;
+        let typed = self.cx.typed;
         if !matches!(typed.types.deref(typed.ty(id)), Ty::UNIT | Ty::NEVER) {
             return Some((
                 ast.expr(id).span,
@@ -818,7 +845,7 @@ impl<'a> Walker<'a> {
                                     | Builtin::Release,
                                 )) => Some("measures or frees qubits"),
                                 Some(Callee::Builtin(Builtin::Print { .. })) => Some("prints"),
-                                Some(Callee::Fn(f)) if !self.gates_only[f.index()] => {
+                                Some(Callee::Fn(f)) if !self.cx.gates_only[f.index()] => {
                                     Some("calls a function that does more than apply gates")
                                 }
                                 _ => None,
@@ -867,14 +894,14 @@ impl<'a> Walker<'a> {
 
     /// Second pass.
     fn block(&mut self, block: BlockId) {
-        for &stmt in self.ast.list(self.ast.block(block).stmts) {
+        for &stmt in self.cx.ast.list(self.cx.ast.block(block).stmts) {
             self.stmt(stmt);
         }
     }
 
     fn stmt(&mut self, id: StmtId) {
         let before = self.later[id.index()];
-        match self.ast.stmt(id).kind {
+        match self.cx.ast.stmt(id).kind {
             StmtKind::Let { pat, init, .. } => {
                 let tainted = self.expr(init, before) || self.control > 0;
                 self.taint_pattern(pat, tainted);
@@ -882,7 +909,7 @@ impl<'a> Walker<'a> {
             StmtKind::Assign { place, value, .. } => {
                 let tainted = self.expr(value, before) || self.control > 0;
                 self.place_indices(place, before);
-                if let Some(local) = root(self.ast, self.typed, place)
+                if let Some(local) = root(self.cx.ast, self.cx.typed, place)
                     && tainted
                 {
                     self.tainted[local.index()] = true;
@@ -893,7 +920,7 @@ impl<'a> Walker<'a> {
             }
             StmtKind::Assert(e) => {
                 if self.expr(e, before) && before {
-                    let span = self.ast.expr(e).span;
+                    let span = self.cx.ast.expr(e).span;
                     self.violate(span, "used in `assert`");
                 }
             }
@@ -902,15 +929,15 @@ impl<'a> Walker<'a> {
     }
 
     fn taint_pattern(&mut self, pat: PatId, tainted: bool) {
-        match self.ast.pat(pat).kind {
+        match self.cx.ast.pat(pat).kind {
             PatKind::Name(_) => {
-                if let Some(local) = self.typed.pat_locals[pat.index()] {
+                if let Some(local) = self.cx.typed.pat_locals[pat.index()] {
                     self.tainted[local.index()] = tainted;
                 }
             }
             PatKind::Wildcard => {}
             PatKind::Tuple(pats) => {
-                for &p in self.ast.list(pats) {
+                for &p in self.cx.ast.list(pats) {
                     self.taint_pattern(p, tainted);
                 }
             }
@@ -919,14 +946,14 @@ impl<'a> Walker<'a> {
 
     /// Checks the indices inside an assignment target.
     fn place_indices(&mut self, place: ExprId, before: bool) {
-        match self.ast.expr(place).kind {
+        match self.cx.ast.expr(place).kind {
             ExprKind::Field { base, .. } | ExprKind::TupleIndex { base, .. } => {
                 self.place_indices(base, before)
             }
             ExprKind::Index { base, index } => {
                 self.place_indices(base, before);
                 if self.expr(index, before) && before {
-                    let span = self.ast.expr(index).span;
+                    let span = self.cx.ast.expr(index).span;
                     self.violate(span, "used as an array index");
                 }
             }
@@ -937,11 +964,11 @@ impl<'a> Walker<'a> {
     /// Walks an expression; returns whether its value depends on a measurement. `before` says
     /// whether a quantum operation can still follow.
     fn expr(&mut self, id: ExprId, before: bool) -> bool {
-        let ast = self.ast;
+        let ast = self.cx.ast;
         let expr = *ast.expr(id);
-        let is_logic_type = |ty: Ty| matches!(self.typed.types.deref(ty), Ty::BIT | Ty::BOOL);
+        let is_logic_type = |ty: Ty| matches!(self.cx.typed.types.deref(ty), Ty::BIT | Ty::BOOL);
         match expr.kind {
-            ExprKind::Name(_) => match self.typed.res[id.index()] {
+            ExprKind::Name(_) => match self.cx.typed.res[id.index()] {
                 Res::Local(local) => self.tainted[local.index()],
                 _ => false,
             },
@@ -973,10 +1000,10 @@ impl<'a> Walker<'a> {
                     match field.value {
                         Some(v) => tainted |= self.expr(v, before),
                         None => {
-                            let local = (0..self.typed.locals.len())
+                            let local = (0..self.cx.typed.locals.len())
                                 .rev()
                                 .map(LocalId::from_index)
-                                .find(|&l| self.typed.local(l).name == field.name);
+                                .find(|&l| self.cx.typed.local(l).name == field.name);
                             tainted |= local.is_some_and(|l| self.tainted[l.index()]);
                         }
                     }
@@ -1001,7 +1028,7 @@ impl<'a> Walker<'a> {
             ExprKind::Unary { op, operand } => {
                 let tainted = self.expr(operand, before);
                 let logic = matches!(op, UnaryOp::Not | UnaryOp::BitNot)
-                    && is_logic_type(self.typed.ty(operand));
+                    && is_logic_type(self.cx.typed.ty(operand));
                 if tainted && before && !logic {
                     self.violate(expr.span, "used in arithmetic");
                 }
@@ -1018,7 +1045,7 @@ impl<'a> Walker<'a> {
                         | BinaryOp::BitAnd
                         | BinaryOp::BitOr
                         | BinaryOp::BitXor
-                ) && is_logic_type(self.typed.ty(lhs));
+                ) && is_logic_type(self.cx.typed.ty(lhs));
                 if tainted && before && !logic {
                     self.violate(expr.span, "used in arithmetic");
                 }
@@ -1108,10 +1135,10 @@ impl<'a> Walker<'a> {
 
     /// A block used as a value: tainted if its final expression is.
     fn value_block(&mut self, block: BlockId) -> bool {
-        let stmts = self.ast.list(self.ast.block(block).stmts);
+        let stmts = self.cx.ast.list(self.cx.ast.block(block).stmts);
         let mut tainted = false;
         for (i, &stmt) in stmts.iter().enumerate() {
-            match self.ast.stmt(stmt).kind {
+            match self.cx.ast.stmt(stmt).kind {
                 StmtKind::Expr { expr, semi: false } if i + 1 == stmts.len() => {
                     tainted = self.expr(expr, self.later[stmt.index()]);
                 }
@@ -1122,13 +1149,13 @@ impl<'a> Walker<'a> {
     }
 
     fn call(&mut self, id: ExprId, before: bool) -> bool {
-        let ast = self.ast;
+        let ast = self.cx.ast;
         let (receiver, args) = match ast.expr(id).kind {
             ExprKind::Call { args, .. } => (None, ast.list(args)),
             ExprKind::MethodCall { receiver, args, .. } => (Some(receiver), ast.list(args)),
             _ => return false,
         };
-        let callee = self.typed.callees[id.index()];
+        let callee = self.cx.typed.callees[id.index()];
         let mut tainted_args = Vec::new();
         if let Some(r) = receiver {
             tainted_args.push((r, self.expr(r, before)));
@@ -1156,15 +1183,18 @@ impl<'a> Walker<'a> {
                 false
             }
             Some(Callee::Fn(f)) => {
+                // Given measurement results, the function is checked as if they were its own.
+                let given = self.cx.given[f.index()].as_ref().filter(|_| any);
                 if let Some(&(arg, _)) = tainted_args.iter().find(|&&(_, t)| t)
                     && before
+                    && given.is_none()
                 {
                     let name = ast.name(ast.function(f).name);
                     let what = format!("passed to `{name}`");
                     self.violate(ast.expr(arg).span, &what);
                 }
                 // What happens inside the call is part of this run.
-                let inner = &self.fns[f.index()];
+                let inner = given.unwrap_or(&self.cx.fns[f.index()]);
                 if let Some((span, what)) = &inner.not_circuit {
                     // Name the function where it happens, once.
                     let what = if what.contains(" in `") {
@@ -1180,7 +1210,7 @@ impl<'a> Walker<'a> {
                     self.unsupported(*span, why);
                 }
                 // A quantum function's result comes from its own measurements.
-                self.quantum[f.index()] || any
+                self.cx.quantum[f.index()] || any
             }
             Some(Callee::Builtin(Builtin::Print { .. })) => {
                 if let Some(&(arg, _)) = tainted_args.iter().find(|&&(_, t)| t)

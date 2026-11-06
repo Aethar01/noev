@@ -8,6 +8,13 @@
 // is one circuit with classical control (spec/execution.md §4): it is simulated once for all
 // shots. Undoing the preparation on the receiving qubit gives 0 every time.
 
+// The receiver's corrections. Passing measurement results to it keeps the run a circuit,
+// since it only uses them as conditions.
+fn correct(receiver: mut Qubit, m1: Bit, m2: Bit) {
+    if m2 == 1 { receiver.x() }
+    if m1 == 1 { receiver.z() }
+}
+
 fn teleported(theta: Float) -> (Bit, Bit, Bit) {
     let message = |0>
     message.ry(theta)
@@ -23,9 +30,7 @@ fn teleported(theta: Float) -> (Bit, Bit, Bit) {
     let m1 = mv message.measure()
     let m2 = mv sender.measure()
 
-    // The receiver corrects.
-    if m2 == 1 { receiver.x() }
-    if m1 == 1 { receiver.z() }
+    correct(receiver, m1, m2)
 
     receiver.ry(-theta)
     (m1, m2, mv receiver.measure())
