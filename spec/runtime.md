@@ -5,8 +5,8 @@ program is native code linked to the **Noev runtime**. The runtime sends quantum
 to a **quantum backend**: a simulator such as ketrs, or a quantum computer's control stack.
 The program does not depend on which backend it runs on.
 
-Status: design. v0.1 runs programs with an interpreter (`noev run`); the interpreter uses
-the same runtime interface that compiled programs will (§6).
+Status: design, except the backend interface (§3), which v0.1's interpreter (`noev run`)
+already uses, with ketrs as its backend (§6).
 
 ```
 program.nv ─▶ front end ─▶ Noev IR ─┬─▶ code generator ─▶ native object ─┐
@@ -72,6 +72,18 @@ shot, so the same table applies.
 
 A backend that accepts both levels, as ketrs does, takes circuits where it can, since that is
 faster.
+
+### What only simulators can do
+
+Some things are possible only when the backend can see the state, and a backend says
+whether it can do each:
+
+- **Check `release`**: confirm that a released qubit is in \|0⟩ ([ownership.md](ownership.md)
+  §11). Other backends trust the claim.
+- **Exact expectation values**: compute `<ψ| H |ψ>` from the state. Other backends will
+  estimate it by measuring in each term's basis (not yet implemented).
+- **Sample a state without measuring it**: when a run returns qubits and measures nothing,
+  simulate it once and draw every shot from the final state.
 
 ### Circuits are built while the program runs
 
@@ -143,6 +155,11 @@ a simulator or on hardware.
 `noev run` interprets the IR instead of compiling it. It drives the same runtime and
 backends through the same interface, so a program behaves the same interpreted or compiled.
 The interpreter is the reference implementation: compiled programs are tested against it.
+
+In v0.1, the interface is a Rust trait in `noev-runtime` (`Backend`, with a `Session` for gate
+level), and ketrs is the only backend. Quantum code that runs outside a repeated run (in
+`main` directly) still needs gate level; making it a one-shot circuit for circuit-level
+backends comes with the C ABI.
 
 ## 7. `noev build` outputs
 

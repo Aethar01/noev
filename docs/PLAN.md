@@ -138,7 +138,7 @@ circuit generation.
 | 5  | Circuits                     | Closed runs that are circuits (`spec/execution.md`) compiled to ketrs circuits and OpenQASM 3 | ◐ In progress (ketrs circuits done; OpenQASM 3 export to do) |
 | 6  | Execution                    | Interpreter on ketrs, circuits sampled through ketrs, `noev run` | ☑ Done |
 | 7  | Expectation values           | `<ψ\| H \|ψ>` with observables, exact on ketrs where possible                               | ☐ Todo |
-| 8  | Backend interface            | The interpreter drives ketrs through the runtime's backend interface (`spec/runtime.md`), at circuit and gate level | ☐ Todo |
+| 8  | Backend interface            | The interpreter drives ketrs through the runtime's backend interface (`spec/runtime.md`), at circuit and gate level | ☑ Done |
 
 **Priority:** build the type system and ownership checker (milestones 1–3) first, before any
 simulator. A compiler that accepts valid quantum programs and rejects physically invalid

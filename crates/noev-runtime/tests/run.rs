@@ -5,7 +5,7 @@ use std::io::Write;
 use std::rc::Rc;
 
 use noev_runtime::sampling::sample;
-use noev_runtime::{Counts, Output, RuntimeError, run, run_main};
+use noev_runtime::{Counts, Ketrs, Output, RuntimeError, run, run_main};
 
 fn compile(source: &str) -> noev_ir::Program {
     let parsed = noev_syntax::parse(source);
@@ -49,6 +49,7 @@ fn output(source: &str) -> (String, String) {
     let (out, err) = (Buffer::default(), Buffer::default());
     run_main(
         &program,
+        &Ketrs,
         7,
         Output {
             stdout: Box::new(out.clone()),
@@ -344,6 +345,7 @@ fn sampled(source: &str, shots: usize) -> (Vec<(String, usize)>, bool) {
         .expect("a `fn test`");
     let dist = sample(
         &program,
+        &Ketrs,
         noev_ir::ir::FuncId(test as u32),
         Vec::new(),
         shots,
@@ -470,4 +472,89 @@ fn sample_blocks_measure_returned_qubits() {
         }",
     );
     assert_eq!(out, "01 20\n");
+}
+
+/// ketrs restricted to one level, to test how the runtime chooses between them.
+struct OneLevel {
+    circuits: bool,
+}
+
+impl noev_runtime::Backend for OneLevel {
+    fn name(&self) -> &str {
+        if self.circuits {
+            "circuits-only"
+        } else {
+            "gates-only"
+        }
+    }
+
+    fn session(&self, seed: u64) -> Option<Box<dyn noev_runtime::backend::Session>> {
+        if self.circuits { None } else { Ketrs.session(seed) }
+    }
+
+    fn run_circuit(
+        &self,
+        circuit: &noev_runtime::backend::Circuit,
+        shots: usize,
+        seed: u64,
+    ) -> Option<Result<noev_runtime::backend::Counts, noev_runtime::backend::BackendError>> {
+        if self.circuits {
+            Ketrs.run_circuit(circuit, shots, seed)
+        } else {
+            None
+        }
+    }
+}
+
+fn main_on(source: &str, backend: &dyn noev_runtime::Backend) -> Result<String, RuntimeError> {
+    let program = compile(source);
+    let out = Buffer::default();
+    run_main(
+        &program,
+        backend,
+        3,
+        Output {
+            stdout: Box::new(out.clone()),
+            stderr: Box::new(Buffer::default()),
+        },
+    )?;
+    Ok(String::from_utf8(out.0.borrow().clone()).unwrap())
+}
+
+const BELL_MAIN: &str = "fn main() {
+    let d = sample 2000 {
+        let a = |+>
+        let b = |0>
+        ctrl a { b.x() }
+        (mv a.measure(), mv b.measure())
+    }
+    print(d.count((0, 1)) + d.count((1, 0)), d.shots())
+}";
+
+#[test]
+fn circuit_only_backends_take_circuits() {
+    let out = main_on(BELL_MAIN, &OneLevel { circuits: true }).unwrap();
+    assert_eq!(out, "0 2000\n");
+    // A run that is not a circuit needs gate-level control.
+    let error = main_on(
+        "fn main() {
+            let d = sample 10 {
+                let q = |+>
+                let k = Int(mv q.measure())
+                let r = |0>
+                r.ry(Float(k))
+                mv r.measure()
+            }
+            print(d)
+        }",
+        &OneLevel { circuits: true },
+    )
+    .unwrap_err();
+    assert!(error.message.contains("only runs circuits"), "{error:?}");
+}
+
+#[test]
+fn gate_only_backends_run_circuits_shot_by_shot() {
+    let out = main_on(BELL_MAIN, &OneLevel { circuits: false }).unwrap();
+    assert_eq!(out, "0 2000\n");
 }

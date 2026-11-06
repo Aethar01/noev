@@ -6,9 +6,8 @@ use noev_ir::ir::{FuncId, Program};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
-use ketrs::{Circuit, Statevector};
-
-use crate::machine::{Instruction, Machine, Mode, Recording, RuntimeError};
+use crate::backend::Backend;
+use crate::machine::{Machine, Mode, Recording, RuntimeError};
 use crate::value::{Distribution, Outcome, Value};
 
 /// Runs `func(args)` `shots` times and counts the results, with returned qubits measured at
@@ -16,11 +15,13 @@ use crate::value::{Distribution, Outcome, Value};
 /// results. The same `seed` gives the same distribution.
 ///
 /// A run that is a circuit (`spec/execution.md` §4) is recorded as a circuit once, which the
-/// simulator samples for all shots; each distinct outcome then has its classical code
-/// replayed to get the result. Other runs each have their own fresh simulator, except that
-/// one returning qubits without measuring anything is simulated once and sampled.
+/// backend runs for all shots, if it accepts circuits; each distinct outcome then has its
+/// classical code replayed to get the result. Other runs go to the backend gate by gate, a
+/// shot at a time, except that one returning qubits without measuring anything is run once
+/// and its state sampled, on a simulator.
 pub fn sample(
     program: &Program,
+    backend: &dyn Backend,
     func: FuncId,
     args: Vec<Value>,
     shots: usize,
@@ -48,7 +49,8 @@ pub fn sample(
     };
 
     if program.functions[func.index()].sampled
-        && let Some(outcomes) = sample_circuit(program, func, &args, shots, seeds.random())?
+        && let Some(outcomes) =
+            sample_circuit(program, backend, func, &args, shots, seeds.random())?
     {
         for (value, count) in outcomes {
             add(value, count);
@@ -58,18 +60,21 @@ pub fn sample(
         return Ok(dist);
     }
 
-    let mut first = Machine::new(program, seeds.random());
+    let mut first = Machine::new(program, backend, seeds.random());
     let value = first.call(func, args.clone())?;
     let mut qubits = Vec::new();
     value.qubits(&mut qubits);
-    if !qubits.is_empty() && !first.measured() {
-        for (bits, count) in first.sample(&qubits, shots) {
+    let sampled = (!qubits.is_empty() && !first.measured())
+        .then(|| first.sample(&qubits, shots))
+        .flatten();
+    if let Some(counts) = sampled {
+        for (bits, count) in counts {
             add(value.with_bits(bits), count);
         }
     } else {
         add(first.measure_value(value)?, 1);
         for _ in 1..shots {
-            let mut machine = Machine::new(program, seeds.random());
+            let mut machine = Machine::new(program, backend, seeds.random());
             let value = machine.call(func, args.clone())?;
             add(machine.measure_value(value)?, 1);
         }
@@ -77,11 +82,13 @@ pub fn sample(
     Ok(Distribution::new(counts.into_values().collect(), shots))
 }
 
-/// The circuit path: record the run as a circuit, sample it on the simulator, and replay each
+/// The circuit path: record the run as a circuit, run it on the backend, and replay each
 /// distinct outcome. `None` if the run cannot be recorded (it failed while recording, or needs
-/// more classical bits than an outcome can hold), in which case it runs shot by shot.
+/// more classical bits than an outcome can hold) or the backend does not take the circuit, in
+/// which case it runs shot by shot.
 fn sample_circuit(
     program: &Program,
+    backend: &dyn Backend,
     func: FuncId,
     args: &[Value],
     shots: usize,
@@ -89,7 +96,7 @@ fn sample_circuit(
 ) -> Result<Option<Vec<(Value, usize)>>, RuntimeError> {
     let mut seeds = SmallRng::seed_from_u64(seed);
     let mut builder =
-        Machine::new(program, seeds.random()).with_mode(Mode::Build(Recording::default()));
+        Machine::new(program, backend, seeds.random()).with_mode(Mode::Build(Recording::default()));
     let Ok(value) = builder.call(func, args.to_vec()) else {
         return Ok(None);
     };
@@ -102,31 +109,17 @@ fn sample_circuit(
     let Mode::Build(recording) = std::mem::take(&mut builder.mode) else {
         unreachable!("the builder records")
     };
-    if recording.clbits > 64 || recording.qubits > 30 {
+    let circuit = recording.circuit;
+    if circuit.clbits > 64 {
         return Ok(None);
     }
-    let mut circuit = Circuit::with_clbits(recording.qubits, recording.clbits);
-    for instruction in recording.instructions {
-        match instruction {
-            Instruction::Op(op) => {
-                if circuit.push(*op).is_err() {
-                    return Ok(None);
-                }
-            }
-            Instruction::Measure(q, c) => {
-                circuit.measure(q, c);
-            }
-            Instruction::Reset(q) => {
-                circuit.reset(q);
-            }
-        }
-    }
-    let counts = Statevector::zero(recording.qubits)
-        .sample_circuit(&circuit, shots, &mut seeds)
-        .map_err(|e| RuntimeError {
-            message: format!("simulator error: {e}"),
-            span: None,
-        })?;
+    let Some(counts) = backend.run_circuit(&circuit, shots, seeds.random()) else {
+        return Ok(None);
+    };
+    let counts = counts.map_err(|e| RuntimeError {
+        message: e.0,
+        span: None,
+    })?;
 
     let mut outcomes = Vec::with_capacity(counts.len());
     if !replay {
@@ -141,7 +134,7 @@ fn sample_circuit(
             next: 0,
             qubits: 0,
         };
-        let mut replay = Machine::new(program, seeds.random()).with_mode(mode);
+        let mut replay = Machine::new(program, backend, seeds.random()).with_mode(mode);
         let value = replay.call(func, args.to_vec())?;
         outcomes.push((replay.measure_value(value)?, count));
     }

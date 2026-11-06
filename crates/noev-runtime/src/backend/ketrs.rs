@@ -1,0 +1,214 @@
+//! The ketrs statevector simulator, at both levels.
+
+use std::collections::BTreeMap;
+
+use ketrs::{Operation, PauliString, PauliSum, Statevector};
+use noev_sema::prelude::Gate;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
+
+use super::{Backend, BackendError, Circuit, Counts, Instruction, Op, Pauli, Session};
+
+/// The most qubits a statevector holds: 2^30 amplitudes take 16 GiB.
+const MAX_QUBITS: usize = 30;
+
+/// The ketrs simulator.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Ketrs;
+
+impl Backend for Ketrs {
+    fn name(&self) -> &str {
+        "ketrs"
+    }
+
+    fn session(&self, seed: u64) -> Option<Box<dyn Session>> {
+        Some(Box::new(KetrsSession {
+            state: Statevector::zero(0),
+            rng: SmallRng::seed_from_u64(seed),
+        }))
+    }
+
+    fn run_circuit(
+        &self,
+        circuit: &Circuit,
+        shots: usize,
+        seed: u64,
+    ) -> Option<Result<Counts, BackendError>> {
+        if circuit.qubits > MAX_QUBITS || circuit.clbits > 64 {
+            return None;
+        }
+        let mut converted = ketrs::Circuit::with_clbits(circuit.qubits, circuit.clbits);
+        for instruction in &circuit.instructions {
+            match instruction {
+                Instruction::Gate(op) => {
+                    let operation = match operation(op) {
+                        Ok(operation) => operation,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    if let Err(e) = converted.push(operation) {
+                        return Some(Err(sim_error(e)));
+                    }
+                }
+                &Instruction::Measure { qubit, clbit } => {
+                    converted.measure(qubit, clbit);
+                }
+                &Instruction::Reset(qubit) => {
+                    converted.reset(qubit);
+                }
+            }
+        }
+        let mut rng = SmallRng::seed_from_u64(seed);
+        Some(
+            Statevector::zero(circuit.qubits)
+                .sample_circuit(&converted, shots, &mut rng)
+                .map(|counts| counts.into_iter().collect())
+                .map_err(sim_error),
+        )
+    }
+}
+
+/// One run on a statevector.
+struct KetrsSession {
+    state: Statevector,
+    rng: SmallRng,
+}
+
+impl Session for KetrsSession {
+    fn add_qubit(&mut self) -> Result<usize, BackendError> {
+        let qubit = self.state.n_qubits();
+        if qubit >= MAX_QUBITS {
+            return Err(BackendError(format!(
+                "more than {MAX_QUBITS} qubits are alive at once, which is beyond the statevector simulator"
+            )));
+        }
+        // The new qubit is the most significant, so existing qubits keep their indices.
+        self.state.add_qubit();
+        Ok(qubit)
+    }
+
+    fn apply(&mut self, op: &Op) -> Result<(), BackendError> {
+        self.state.apply(&operation(op)?).map_err(sim_error)
+    }
+
+    fn measure(&mut self, qubit: usize) -> Result<bool, BackendError> {
+        self.state.measure(qubit, &mut self.rng).map_err(sim_error)
+    }
+
+    fn reset(&mut self, qubit: usize) -> Result<(), BackendError> {
+        self.state.reset(qubit, &mut self.rng).map_err(sim_error)
+    }
+
+    fn release(&mut self, qubit: usize) -> Result<(), BackendError> {
+        let p1 = self.state.probability_one(qubit).map_err(sim_error)?;
+        if p1 > 1e-9 {
+            return Err(BackendError(format!(
+                "a released qubit was not in |0⟩ (probability of 1: {p1:.3})"
+            )));
+        }
+        Ok(())
+    }
+
+    fn expectation(
+        &self,
+        terms: &[(f64, Vec<(usize, Pauli)>)],
+    ) -> Option<Result<f64, BackendError>> {
+        let mut sum = PauliSum::new();
+        for (coeff, product) in terms {
+            let ops = product.iter().map(|&(q, p)| {
+                let pauli = match p {
+                    Pauli::X => ketrs::Pauli::X,
+                    Pauli::Y => ketrs::Pauli::Y,
+                    Pauli::Z => ketrs::Pauli::Z,
+                };
+                (q, pauli)
+            });
+            match PauliString::new(ops) {
+                Ok(string) => {
+                    sum.add(*coeff, string);
+                }
+                Err(e) => return Some(Err(sim_error(e))),
+            }
+        }
+        Some(self.state.expectation(&sum).map_err(sim_error))
+    }
+
+    fn sample(&mut self, qubits: &[usize], shots: usize) -> Option<Counts> {
+        let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
+        for (index, count) in self.state.sample_counts(shots, &mut self.rng) {
+            let bits = qubits
+                .iter()
+                .enumerate()
+                .fold(0u64, |acc, (k, &q)| acc | (((index >> q) & 1) as u64) << k);
+            *counts.entry(bits).or_default() += count;
+        }
+        Some(counts.into_iter().collect())
+    }
+}
+
+/// The ketrs operation for a gate with its controls.
+fn operation(op: &Op) -> Result<Operation, BackendError> {
+    let gate = ketrs_gate(op.gate, op.adjoint, &op.params);
+    Ok(
+        match (op.controls.as_slice(), gate, op.targets.as_slice()) {
+            ([], None, &[a, b]) => Operation::Swap(a, b),
+            ([], Some(gate), &[target]) => Operation::Gate { gate, target },
+            (&[control], Some(gate), &[target]) => Operation::Controlled {
+                gate,
+                control,
+                target,
+            },
+            (controls, Some(gate), &[target]) => Operation::MultiControlled {
+                gate,
+                controls: controls.to_vec(),
+                target,
+            },
+            (controls, None, &[a, b]) => Operation::ControlledSwap {
+                controls: controls.to_vec(),
+                a,
+                b,
+            },
+            _ => {
+                return Err(BackendError(
+                    "a gate with the wrong number of qubits".into(),
+                ));
+            }
+        },
+    )
+}
+
+/// The ketrs gate for a Noev gate, inverted for `adj`; `None` for `swap`.
+fn ketrs_gate(gate: Gate, adjoint: bool, params: &[f64]) -> Option<ketrs::Gate> {
+    use ketrs::Gate as K;
+    let sign = if adjoint { -1.0 } else { 1.0 };
+    let param = |i: usize| params.get(i).copied().unwrap_or(0.0);
+    Some(match gate {
+        Gate::X => K::X,
+        Gate::Y => K::Y,
+        Gate::Z => K::Z,
+        Gate::H => K::H,
+        Gate::S if adjoint => K::Sdg,
+        Gate::S => K::S,
+        Gate::T if adjoint => K::Tdg,
+        Gate::T => K::T,
+        Gate::Rx => K::Rx(sign * param(0)),
+        Gate::Ry => K::Ry(sign * param(0)),
+        Gate::Rz => K::Rz(sign * param(0)),
+        Gate::P => K::Phase(sign * param(0)),
+        // U(θ, φ, λ)† = U(−θ, −λ, −φ).
+        Gate::U if adjoint => K::U {
+            theta: -param(0),
+            phi: -param(2),
+            lambda: -param(1),
+        },
+        Gate::U => K::U {
+            theta: param(0),
+            phi: param(1),
+            lambda: param(2),
+        },
+        Gate::Swap => return None,
+    })
+}
+
+fn sim_error(error: ketrs::Error) -> BackendError {
+    BackendError(format!("simulator error: {error}"))
+}

@@ -1,6 +1,6 @@
-//! Runs IR on the ketrs statevector simulator.
+//! Runs IR, sending quantum operations to a [`Backend`].
 //!
-//! One [`Machine`] runs one shot. Qubits are allocated on demand: the statevector grows by one
+//! One [`Machine`] runs one shot. Qubits are allocated on demand: the backend adds one
 //! qubit when no released qubit is free, and qubits that are measured, discarded or released
 //! go back on a free list in \|0⟩ for reuse.
 //!
@@ -9,7 +9,6 @@
 //! cannot measure or allocate, and its classical computation is deterministic, so this is
 //! exactly the inverse.
 
-use ketrs::{Operation, PauliString, PauliSum, Statevector};
 use noev_ir::ir::*;
 use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli as IrPauli};
 use noev_sema::{Ty, TyKind};
@@ -21,6 +20,7 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 
+use crate::backend::{Backend, BackendError, Circuit, Instruction, Op, Session};
 use crate::format;
 use crate::value::{Observable, Pauli, Pointer, Value};
 
@@ -56,20 +56,10 @@ type Result<T> = std::result::Result<T, RuntimeError>;
 /// (`spec/core.md`, open question on estimation settings).
 const EXPECTATION_RUNS: usize = 1000;
 
-/// A quantum operation with its qubits resolved, as applied or recorded under `adj`.
-#[derive(Clone, Debug)]
-struct Op {
-    gate: Gate,
-    adjoint: bool,
-    params: Vec<f64>,
-    controls: Vec<usize>,
-    targets: Vec<usize>,
-}
-
 /// How a machine treats quantum operations.
 #[derive(Clone, Debug, Default)]
 pub enum Mode {
-    /// Simulate them on the statevector.
+    /// Send them to the backend, one at a time.
     #[default]
     Simulate,
     /// Record them into a circuit instead, without simulating. Measurements give a
@@ -91,25 +81,10 @@ pub enum Mode {
 /// A circuit being recorded in [`Mode::Build`].
 #[derive(Clone, Debug, Default)]
 pub struct Recording {
-    /// The instructions, in order.
-    pub instructions: Vec<Instruction>,
-    /// How many qubits the circuit uses.
-    pub qubits: usize,
-    /// How many classical bits (one per measurement).
-    pub clbits: usize,
+    /// The circuit so far.
+    pub circuit: Circuit,
     /// Released and measured qubits, and whether each needs a reset before reuse.
     free: Vec<(usize, bool)>,
-}
-
-/// One recorded step.
-#[derive(Clone, Debug)]
-pub enum Instruction {
-    /// A gate.
-    Op(Box<Operation>),
-    /// Measure a qubit into a classical bit.
-    Measure(usize, usize),
-    /// Return a qubit to \|0⟩.
-    Reset(usize),
 }
 
 /// Recorded circuits use fresh qubits up to this many, so their measurements can all come at
@@ -119,7 +94,9 @@ const FRESH_QUBITS: usize = 24;
 /// The state of one run of a program.
 pub struct Machine<'p> {
     program: &'p Program,
-    state: Statevector,
+    backend: &'p dyn Backend,
+    /// The backend's gate-level session; `None` if it only runs circuits.
+    session: Option<Box<dyn Session>>,
     /// Qubits in \|0⟩ that can be handed out again.
     free: Vec<usize>,
     frames: Vec<Vec<Value>>,
@@ -143,17 +120,19 @@ pub struct Machine<'p> {
 }
 
 impl<'p> Machine<'p> {
-    /// A machine with no qubits.
-    pub fn new(program: &'p Program, seed: u64) -> Self {
+    /// A machine with no qubits, running on `backend`.
+    pub fn new(program: &'p Program, backend: &'p dyn Backend, seed: u64) -> Self {
+        let mut seeds = SmallRng::seed_from_u64(seed);
         Machine {
             program,
-            state: Statevector::zero(0),
+            backend,
+            session: backend.session(seeds.random()),
             free: Vec::new(),
             frames: Vec::new(),
             controls: Vec::new(),
             control_marks: Vec::new(),
             recording: Vec::new(),
-            rng: SmallRng::seed_from_u64(seed),
+            rng: seeds,
             measured: false,
             output: None,
             mode: Mode::Simulate,
@@ -194,17 +173,21 @@ impl<'p> Machine<'p> {
     }
 
     /// Samples the current state `shots` times, returning how often each outcome of `qubits`
-    /// occurred, with `qubits[k]` at bit `k`. Leaves the state unchanged.
-    pub fn sample(&mut self, qubits: &[usize], shots: usize) -> Vec<(u64, usize)> {
-        let mut counts: std::collections::BTreeMap<u64, usize> = Default::default();
-        for (index, count) in self.state.sample_counts(shots, &mut self.rng) {
-            let bits = qubits
-                .iter()
-                .enumerate()
-                .fold(0u64, |acc, (k, &q)| acc | (((index >> q) & 1) as u64) << k);
-            *counts.entry(bits).or_default() += count;
+    /// occurred, with `qubits[k]` at bit `k`. Leaves the state unchanged. `None` if the
+    /// backend cannot (only simulators can).
+    pub fn sample(&mut self, qubits: &[usize], shots: usize) -> Option<Vec<(u64, usize)>> {
+        self.session.as_mut()?.sample(qubits, shots)
+    }
+
+    /// The backend's gate-level session, for running operations one at a time.
+    fn session(&mut self) -> Result<&mut dyn Session> {
+        let name = self.backend.name();
+        match &mut self.session {
+            Some(session) => Ok(session.as_mut()),
+            None => Err(RuntimeError::new(format!(
+                "`{name}` only runs circuits, and this run is not one (see `noev build --emit=plan`)"
+            ))),
         }
-        counts.into_iter().collect()
     }
 
     /// Calls `func` with `args` and returns its result.
@@ -511,9 +494,12 @@ impl Machine<'_> {
             Stmt::Reset(place) => {
                 let qubit = self.qubit(place)?;
                 match &mut self.mode {
-                    Mode::Simulate => self.state.reset(qubit, &mut self.rng).map_err(sim_error),
+                    Mode::Simulate => self.session()?.reset(qubit).map_err(backend_error),
                     Mode::Build(recording) => {
-                        recording.instructions.push(Instruction::Reset(qubit));
+                        recording
+                            .circuit
+                            .instructions
+                            .push(Instruction::Reset(qubit));
                         Ok(())
                     }
                     Mode::Replay { .. } => Ok(()),
@@ -530,12 +516,7 @@ impl Machine<'_> {
                     Mode::Replay { .. } => return Ok(()),
                 }
                 // Simulators check `release`'s claim (spec/ownership.md §11).
-                let p1 = self.state.probability_one(qubit).map_err(sim_error)?;
-                if p1 > 1e-9 {
-                    return Err(RuntimeError::new(format!(
-                        "a released qubit was not in |0⟩ (probability of 1: {p1:.3})"
-                    )));
-                }
+                self.session()?.release(qubit).map_err(backend_error)?;
                 self.free.push(qubit);
                 Ok(())
             }
@@ -569,9 +550,15 @@ impl Machine<'_> {
                 let seed = self.rng.random();
                 let program = self.program;
                 let elem = *elem;
-                let dist = crate::sampling::sample(program, *func, args, shots, seed, |v| {
-                    format::display(program, v, elem)
-                })?;
+                let dist = crate::sampling::sample(
+                    program,
+                    self.backend,
+                    *func,
+                    args,
+                    shots,
+                    seed,
+                    |v| format::display(program, v, elem),
+                )?;
                 self.store(dest, Value::Distribution(Rc::new(dist)))
             }
             Stmt::Print { stderr, args } => {
@@ -612,7 +599,14 @@ impl Machine<'_> {
                         .collect::<Result<Vec<_>>>()?,
                 };
                 let seed = self.rng.random();
-                let value = expectation(self.program, prep, prep_args, &observable, seed)?;
+                let value = expectation(
+                    self.program,
+                    self.backend,
+                    prep,
+                    prep_args,
+                    &observable,
+                    seed,
+                )?;
                 self.store(dest, Value::Float(value))
             }
         }
@@ -623,13 +617,14 @@ impl Machine<'_> {
         match &mut self.mode {
             Mode::Simulate => {}
             Mode::Build(recording) => {
-                if recording.qubits < FRESH_QUBITS || recording.free.is_empty() {
-                    recording.qubits += 1;
-                    return Ok(recording.qubits - 1);
+                let circuit = &mut recording.circuit;
+                if circuit.qubits < FRESH_QUBITS || recording.free.is_empty() {
+                    circuit.qubits += 1;
+                    return Ok(circuit.qubits - 1);
                 }
                 let (qubit, needs_reset) = recording.free.pop().expect("checked above");
                 if needs_reset {
-                    recording.instructions.push(Instruction::Reset(qubit));
+                    circuit.instructions.push(Instruction::Reset(qubit));
                 }
                 return Ok(qubit);
             }
@@ -641,21 +636,13 @@ impl Machine<'_> {
         if let Some(qubit) = self.free.pop() {
             return Ok(qubit);
         }
-        let qubit = self.state.n_qubits();
-        if qubit >= 30 {
-            return Err(RuntimeError::new(
-                "more than 30 qubits are alive at once, which is beyond the statevector simulator",
-            ));
-        }
-        // The new qubit is the most significant, so existing qubits keep their indices.
-        self.state.add_qubit();
-        Ok(qubit)
+        self.session()?.add_qubit().map_err(backend_error)
     }
 
     /// Measures a qubit: its `Bit`, or while recording, the classical bit it was measured into.
     fn measurement(&mut self, qubit: usize) -> Result<Value> {
         if let Mode::Build(recording) = &self.mode {
-            let clbit = recording.clbits;
+            let clbit = recording.circuit.clbits;
             self.measure(qubit)?;
             return Ok(Value::Clbit(clbit));
         }
@@ -668,10 +655,12 @@ impl Machine<'_> {
         match &mut self.mode {
             Mode::Simulate => {}
             Mode::Build(recording) => {
-                recording
+                let circuit = &mut recording.circuit;
+                let clbit = circuit.clbits;
+                circuit
                     .instructions
-                    .push(Instruction::Measure(qubit, recording.clbits));
-                recording.clbits += 1;
+                    .push(Instruction::Measure { qubit, clbit });
+                circuit.clbits += 1;
                 recording.free.push((qubit, true));
                 return Ok(false);
             }
@@ -681,17 +670,19 @@ impl Machine<'_> {
                 return Ok(bit);
             }
         }
-        let bit = self
-            .state
-            .measure(qubit, &mut self.rng)
-            .map_err(sim_error)?;
+        let session = self.session()?;
+        let bit = session.measure(qubit).map_err(backend_error)?;
         if bit {
-            self.state
-                .apply(&Operation::Gate {
-                    gate: ketrs::Gate::X,
-                    target: qubit,
+            // Back to |0⟩ for reuse: the qubit is known to be in |1⟩.
+            session
+                .apply(&Op {
+                    gate: Gate::X,
+                    adjoint: false,
+                    params: Vec::new(),
+                    controls: Vec::new(),
+                    targets: vec![qubit],
                 })
-                .map_err(sim_error)?;
+                .map_err(backend_error)?;
         }
         self.free.push(qubit);
         Ok(bit)
@@ -704,33 +695,14 @@ impl Machine<'_> {
                 "a gate's target is also one of its controls",
             ));
         }
-        let gate = ketrs_gate(op.gate, op.adjoint, &op.params);
-        let operation = match (op.controls.as_slice(), gate, op.targets.as_slice()) {
-            ([], None, &[a, b]) => Operation::Swap(a, b),
-            ([], Some(gate), &[target]) => Operation::Gate { gate, target },
-            (&[control], Some(gate), &[target]) => Operation::Controlled {
-                gate,
-                control,
-                target,
-            },
-            (controls, Some(gate), &[target]) => Operation::MultiControlled {
-                gate,
-                controls: controls.to_vec(),
-                target,
-            },
-            (controls, None, &[a, b]) => Operation::ControlledSwap {
-                controls: controls.to_vec(),
-                a,
-                b,
-            },
-            _ => return Err(RuntimeError::new("a gate with the wrong number of qubits")),
-        };
+        let wanted = if op.gate == Gate::Swap { 2 } else { 1 };
+        if op.targets.len() != wanted {
+            return Err(RuntimeError::new("a gate with the wrong number of qubits"));
+        }
         match &mut self.mode {
-            Mode::Simulate => self.state.apply(&operation).map_err(sim_error),
+            Mode::Simulate => self.session()?.apply(&op).map_err(backend_error),
             Mode::Build(recording) => {
-                recording
-                    .instructions
-                    .push(Instruction::Op(Box::new(operation)));
+                recording.circuit.instructions.push(Instruction::Gate(op));
                 Ok(())
             }
             Mode::Replay { .. } => Ok(()),
@@ -738,41 +710,8 @@ impl Machine<'_> {
     }
 }
 
-/// The ketrs gate for a Noev gate, inverted for `adj`; `None` for `swap`.
-fn ketrs_gate(gate: Gate, adjoint: bool, params: &[f64]) -> Option<ketrs::Gate> {
-    use ketrs::Gate as K;
-    let sign = if adjoint { -1.0 } else { 1.0 };
-    let param = |i: usize| params.get(i).copied().unwrap_or(0.0);
-    Some(match gate {
-        Gate::X => K::X,
-        Gate::Y => K::Y,
-        Gate::Z => K::Z,
-        Gate::H => K::H,
-        Gate::S if adjoint => K::Sdg,
-        Gate::S => K::S,
-        Gate::T if adjoint => K::Tdg,
-        Gate::T => K::T,
-        Gate::Rx => K::Rx(sign * param(0)),
-        Gate::Ry => K::Ry(sign * param(0)),
-        Gate::Rz => K::Rz(sign * param(0)),
-        Gate::P => K::Phase(sign * param(0)),
-        // U(θ, φ, λ)† = U(−θ, −λ, −φ).
-        Gate::U if adjoint => K::U {
-            theta: -param(0),
-            phi: -param(2),
-            lambda: -param(1),
-        },
-        Gate::U => K::U {
-            theta: param(0),
-            phi: param(1),
-            lambda: param(2),
-        },
-        Gate::Swap => return None,
-    })
-}
-
-fn sim_error(error: ketrs::Error) -> RuntimeError {
-    RuntimeError::new(format!("simulator error: {error}"))
+fn backend_error(error: BackendError) -> RuntimeError {
+    RuntimeError::new(error.0)
 }
 
 // Expressions.
@@ -1026,6 +965,7 @@ fn maths(math: Math, args: &[Value]) -> Result<Value> {
 /// average over [`EXPECTATION_RUNS`] runs of the exact value in each run's outcome.
 fn expectation(
     program: &Program,
+    backend: &dyn Backend,
     prep: &Prep,
     args: Vec<Value>,
     observable: &Observable,
@@ -1034,7 +974,7 @@ fn expectation(
     let mut seeds = SmallRng::seed_from_u64(seed);
     let mut total = 0.0;
     for run in 0..EXPECTATION_RUNS {
-        let mut machine = Machine::new(program, seeds.random());
+        let mut machine = Machine::new(program, backend, seeds.random());
         let qubits = machine.prepare(prep, args.clone())?;
         total += machine.exact_expectation(observable, &qubits)?;
         if run == 0 && !machine.measured {
@@ -1087,18 +1027,25 @@ impl Machine<'_> {
                 if qubits.len() == 1 { "" } else { "s" }
             )));
         }
-        let mut sum = PauliSum::new();
-        for (coeff, product) in &observable.terms {
-            let ops = product.iter().map(|&(i, p)| {
-                let pauli = match p {
-                    Pauli::X => ketrs::Pauli::X,
-                    Pauli::Y => ketrs::Pauli::Y,
-                    Pauli::Z => ketrs::Pauli::Z,
-                };
-                (qubits[i], pauli)
-            });
-            sum.add(*coeff, PauliString::new(ops).map_err(sim_error)?);
+        let terms: Vec<_> = observable
+            .terms
+            .iter()
+            .map(|(coeff, product)| {
+                (
+                    *coeff,
+                    product.iter().map(|&(i, p)| (qubits[i], p)).collect(),
+                )
+            })
+            .collect();
+        let name = self.backend.name();
+        let session = self.session.as_ref().ok_or_else(|| {
+            RuntimeError::new(format!("`{name}` cannot compute expectation values yet"))
+        })?;
+        match session.expectation(&terms) {
+            Some(value) => value.map_err(backend_error),
+            None => Err(RuntimeError::new(format!(
+                "`{name}` cannot compute expectation values yet"
+            ))),
         }
-        self.state.expectation(&sum).map_err(sim_error)
     }
 }

@@ -221,7 +221,7 @@ fn run(file: &Path, seed: Option<u64>, format: MessageFormat) -> ExitCode {
         stdout,
         stderr: Box::new(std::io::stderr()),
     };
-    match noev_runtime::run_main(&program, seed, output) {
+    match noev_runtime::run_main(&program, &noev_runtime::Ketrs, seed, output) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             match error.span {
