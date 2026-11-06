@@ -16,7 +16,10 @@ quantum computer cannot copy a state or sample one state twice, so every repetit
 complete new run.
 
 `main` is no different: a program runs `main` once, like a program in any other language.
-`noev run` runs it, and the program's output is whatever it prints (§6).
+`noev run` runs it, and the program's output is whatever it prints (§6). Its own quantum
+code is a run with one shot, held to the same rule as any other (§4), so whether `main` is a
+circuit decides how it runs on a backend that only takes circuits
+([runtime.md](runtime.md) §6).
 
 ## 2. Closed runs
 

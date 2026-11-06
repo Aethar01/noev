@@ -27,5 +27,6 @@ fn main() {
     let p = (angle / 2.0).sin() * (angle / 2.0).sin()
     let mut e = Experiment::new(angle)
     e.rotate()
-    print("θ = {angle:.4}, P(1) = {p:.2}, this run measured {mv e.finish()}")
+    let measured = mv e.finish()
+    print("θ = {angle:.4}, P(1) = {p:.2}, this run measured {measured}")
 }

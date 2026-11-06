@@ -429,7 +429,7 @@ fn circuit_and_shot_paths_agree() {
 }
 
 #[test]
-fn feedback_ifs_are_part_of_the_circuit() {
+fn ifs_on_measurements_are_part_of_the_circuit() {
     let (counts, circuit) = sampled(
         "fn test() -> Bit {\n let a = |+>\n let b = |0>\n ctrl a { b.x() }\n if mv a.measure() { b.x() }\n mv b.measure()\n}",
         200,
@@ -854,4 +854,33 @@ fn expectation_circuits_are_exported() {
     // Two groups of terms measured together: Z0·Z1, and X0 with Y1.
     let jobs = exporter.jobs.borrow();
     assert_eq!(jobs.len(), 2, "{jobs:?}");
+}
+
+#[test]
+fn main_is_a_one_shot_circuit_on_circuit_only_backends() {
+    // `main` measures directly, prints the result, and starts a run of its own: on a backend
+    // that only takes circuits it is recorded, run once, and its printing happens afterwards.
+    let source = "fn main() {
+        let d = sample 100 { let t = |1>; mv t.measure() }
+        let q = |0>
+        q.x()
+        let m = mv q.measure()
+        print(\"main measured {m}, the sample gave {d.count(1)} ones\")
+    }";
+    let out = main_on(source, &OneLevel { circuits: true }).unwrap();
+    assert_eq!(out, "main measured 1, the sample gave 100 ones\n");
+    // Exporting needs no results here (`shots` is known), so it records both circuits.
+    let program = compile(&source.replace("d.count(1)", "d.shots()"));
+    let exporter = noev_runtime::backend::Exporter::default();
+    let sink = || Output {
+        stdout: Box::new(Buffer::default()),
+        stderr: Box::new(Buffer::default()),
+    };
+    run_main(&program, &exporter, 0, sink()).unwrap();
+    let jobs = exporter.jobs.borrow();
+    // The sample's circuit, then main's, with one shot.
+    assert_eq!(
+        jobs.iter().map(|(_, shots)| *shots).collect::<Vec<_>>(),
+        [100, 1]
+    );
 }

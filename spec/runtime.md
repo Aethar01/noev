@@ -158,9 +158,13 @@ backends through the same interface, so a program behaves the same interpreted o
 The interpreter is the reference implementation: compiled programs are tested against it.
 
 In v0.1, the interface is a Rust trait in `noev-runtime` (`Backend`, with a `Session` for gate
-level), and ketrs is the only backend. Quantum code that runs outside a repeated run (in
-`main` directly) still needs gate level; making it a one-shot circuit for circuit-level
-backends comes with the C ABI.
+level), and ketrs is the only backend.
+
+`main` is a run with one shot, like any other call (§3). On a backend that works gate by gate
+it runs as written. On one that only takes circuits, a `main` that is a circuit is recorded,
+run as a one-shot job, and then its classical code, including what it prints, runs for that
+outcome; the repeated runs it starts are computed once, while recording. `noev export` saves
+`main`'s circuit the same way. A `main` that is not a circuit needs a gate-level backend.
 
 ## 7. `noev build` outputs
 

@@ -1,6 +1,6 @@
 [package]
 name = "noev-ir"
-description = "Quantum intermediate representation and OpenQASM 3 emission for Noev."
+description = "The intermediate representation of Noev programs, and lowering to it."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

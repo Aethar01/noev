@@ -121,6 +121,10 @@ pub struct Recording {
     /// How many recorded loops enclose the current point: a qubit allocated in a loop's body
     /// may have been used in the previous pass, so it is reset.
     loops: u32,
+    /// When recording `main` as a one-shot circuit: the results of the repeated runs it
+    /// starts (`sample`, expectation values), in order. They are computed while recording and
+    /// reused when its classical code runs for the outcome, so each runs once.
+    pub runs: Option<std::collections::VecDeque<Value>>,
 }
 
 impl Recording {
@@ -130,6 +134,38 @@ impl Recording {
             known: Some(bits),
             ..Recording::default()
         }
+    }
+}
+
+impl Machine<'_> {
+    /// The result of a repeated run: reused when re-running `main`'s classical code for its
+    /// outcome, otherwise computed by `compute` (and kept, while recording `main`).
+    fn repeated_run(&mut self, compute: impl FnOnce(&mut Self) -> Result<Value>) -> Result<Value> {
+        let replaying = matches!(
+            &self.mode,
+            Mode::Build(Recording {
+                known: Some(_),
+                runs: Some(_),
+                ..
+            })
+        );
+        if replaying
+            && let Mode::Build(Recording {
+                runs: Some(runs), ..
+            }) = &mut self.mode
+        {
+            return runs
+                .pop_front()
+                .ok_or_else(|| RuntimeError::new("`main` started a run it did not start before"));
+        }
+        let value = compute(self)?;
+        if let Mode::Build(Recording {
+            runs: Some(runs), ..
+        }) = &mut self.mode
+        {
+            runs.push_back(value.clone());
+        }
+        Ok(value)
     }
 }
 
@@ -157,7 +193,7 @@ pub struct Machine<'p> {
     measured: bool,
     /// Where `print` and `eprint` write; `None` in runs that are repeated, which cannot print.
     output: Option<Rc<RefCell<Output>>>,
-    /// Simulating, recording a circuit, or replaying one outcome.
+    /// Simulating, or recording a circuit (possibly for one known outcome).
     pub mode: Mode,
     /// Whether, while recording, an operation needed a measurement result's actual value.
     /// If not, a circuit's results are its classical bits in place, and outcomes need no
@@ -768,25 +804,29 @@ impl Machine<'_> {
                 shots,
                 elem,
             } => {
-                let args = args
-                    .iter()
-                    .map(|a| self.value(a))
-                    .collect::<Result<Vec<_>>>()?;
-                let shots = usize::try_from(self.int(shots)?)
-                    .map_err(|_| RuntimeError::new("`sample` needs a positive number of shots"))?;
-                let seed = self.rng.random();
-                let program = self.program;
-                let elem = *elem;
-                let dist = crate::sampling::sample(
-                    program,
-                    self.backend,
-                    *func,
-                    args,
-                    shots,
-                    seed,
-                    |v| format::display(program, v, elem),
-                )?;
-                self.store(dest, Value::Distribution(Rc::new(dist)))
+                let dist = self.repeated_run(|m| {
+                    let args = args
+                        .iter()
+                        .map(|a| m.value(a))
+                        .collect::<Result<Vec<_>>>()?;
+                    let shots = usize::try_from(m.int(shots)?).map_err(|_| {
+                        RuntimeError::new("`sample` needs a positive number of shots")
+                    })?;
+                    let seed = m.rng.random();
+                    let program = m.program;
+                    let elem = *elem;
+                    let dist = crate::sampling::sample(
+                        program,
+                        m.backend,
+                        *func,
+                        args,
+                        shots,
+                        seed,
+                        |v| format::display(program, v, elem),
+                    )?;
+                    Ok(Value::Distribution(Rc::new(dist)))
+                })?;
+                self.store(dest, dist)
             }
             Stmt::Print { stderr, args } => {
                 let mut line = String::new();
@@ -835,17 +875,20 @@ impl Machine<'_> {
                         .map(|a| self.operand(a))
                         .collect::<Result<Vec<_>>>()?,
                 };
-                let seed = self.rng.random();
-                let value = expectation(
-                    self.program,
-                    self.backend,
-                    prep,
-                    prep_args,
-                    &observable,
-                    precision,
-                    seed,
-                )?;
-                self.store(dest, Value::Float(value))
+                let value = self.repeated_run(|m| {
+                    let seed = m.rng.random();
+                    let value = expectation(
+                        m.program,
+                        m.backend,
+                        prep,
+                        prep_args,
+                        &observable,
+                        precision,
+                        seed,
+                    )?;
+                    Ok(Value::Float(value))
+                })?;
+                self.store(dest, value)
             }
         }
     }
@@ -1037,7 +1080,7 @@ impl Machine<'_> {
                         FormatPart::Value(op, ty, spec) => {
                             text.push_str(&format::format(
                                 self.program,
-                                &self.operand(op)?,
+                                &self.value(op)?,
                                 *ty,
                                 spec.as_ref(),
                             ));

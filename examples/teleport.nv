@@ -4,9 +4,9 @@
 //     noev run examples/teleport.nv
 //     noev export examples/teleport.nv                 # the circuit, as OpenQASM 3
 //
-// The corrections are `if`s on measurement results that only apply gates, so the whole run
-// is one circuit with classical control (spec/execution.md §4): it is simulated once for all
-// shots. Undoing the preparation on the receiving qubit gives 0 every time.
+// The corrections are `if`s on measurement results, so the whole run is one circuit with
+// classical control (spec/execution.md §4): it is simulated once for all shots. Undoing the
+// preparation on the receiving qubit gives 0 every time.
 
 // The receiver's corrections. Passing measurement results to it keeps the run a circuit,
 // since it only uses them as conditions.

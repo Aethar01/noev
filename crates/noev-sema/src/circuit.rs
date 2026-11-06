@@ -68,7 +68,7 @@ pub struct CircuitInfo {
 
 impl CircuitInfo {
     /// Whether the run can be computed once and sampled by the current compiler: a circuit
-    /// whose feedback is all `if`s that only apply gates.
+    /// whose classical control can all be recorded, and that does not `release`.
     pub fn sampled(&self) -> bool {
         self.quantum
             && self.not_circuit.is_none()

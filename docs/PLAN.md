@@ -209,7 +209,7 @@ noev/
 │   ├── noev-ir/               # quantum IR, lowering from AST
 │   ├── noev-runtime/          # interpreter, backend interface (ketrs), OpenQASM 3 output
 │   └── noev/                  # CLI binary: check / build / run, diagnostics rendering
-├── examples/                  # hello.nv, bell.nv, hybrid.nv
+├── examples/                  # bell, hybrid, energy, qft, teleport
 ├── tests/
 │   ├── ui/                    # .nv programs + expected diagnostics (compile-fail and pass)
 │   └── run/                   # .nv programs + their exact expected output (deterministic by the language)
