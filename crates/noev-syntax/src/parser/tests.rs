@@ -57,6 +57,7 @@ fn sexp(ast: &Ast, source: &str, id: ExprId) -> String {
         ExprKind::Int(v) => v.to_string(),
         ExprKind::BigInt => expr.span.text(source).into(),
         ExprKind::Float(v) => format!("{v:?}"),
+        ExprKind::Imag(v) => format!("{v:?}i"),
         ExprKind::Bool(v) => v.to_string(),
         ExprKind::Ket { .. } => expr.span.text(source).into(),
         ExprKind::Str(parts) => {

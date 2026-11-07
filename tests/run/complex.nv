@@ -1,0 +1,18 @@
+// Complex numbers (spec/types.md §1): imaginary literals, arithmetic, methods, conversions
+// and printing; `c32` for two `f32`s.
+
+fn main() {
+    let z = 1.0 + 2.0i
+    let w: Complex = 3.0 - 1i
+    print(z, w, z + w, z * w, z / w, -z, z == 1.0 + 2.0i)
+    print(z.re(), z.im(), z.conj(), (1i).arg() == Float::PI / 2.0)
+    print((-4.0 + 0i).sqrt(), (3.0 + 4.0i).abs())
+    // Literals take the type expected; other values are converted.
+    let x = 2.5
+    print(z * 2.0, z * Complex(x), Complex(3), Complex(c32(z)))
+    let small: c32 = 0.5 + 0.25i
+    print(small * small, small.abs())
+    print("{z:.3} [{w:>12}]")
+    let also: c64 = z
+    print(also == z)
+}

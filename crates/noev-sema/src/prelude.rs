@@ -184,6 +184,16 @@ pub enum Math {
     Ceil,
     /// `x.bits()` on an unsigned integer: its bits, most significant first.
     Bits,
+    /// `z.re()`: a complex number's real part.
+    Re,
+    /// `z.im()`: its imaginary part.
+    Im,
+    /// `z.arg()`: its phase, in (−π, π].
+    Arg,
+    /// `z.conj()`: its complex conjugate.
+    Conj,
+    /// `Complex::polar(r, theta)`: the complex number with modulus `r` and phase `theta`.
+    Polar,
 }
 
 /// A `Float` constant.
@@ -252,6 +262,9 @@ pub fn builtin_type(name: &str) -> Option<Ty> {
         "u32" => Ty::U32,
         "u64" => Ty::U64,
         "f32" => Ty::F32,
+        // `Complex` is two `Float`s, as Python's `complex` is.
+        "Complex" | "c64" => Ty::COMPLEX,
+        "c32" => Ty::C32,
         // `Float` is a 64-bit IEEE 754 float, as Python's `float` is.
         "f64" => Ty::FLOAT,
         _ => return None,
@@ -350,6 +363,24 @@ pub fn method(types: &mut Types, base: Ty, name: &str) -> Option<(Builtin, Sig)>
                 Builtin::Dist(method),
                 Sig::new(Some(OwnKind::Ref), params, ret, Yes),
             ))
+        }
+        // `Complex` and `c32`, whose parts are `Float`s and `f32`s.
+        TyKind::Complex | TyKind::C32 => {
+            use Math::*;
+            let part = if base == Ty::C32 { Ty::F32 } else { Ty::FLOAT };
+            let receiver = Some(OwnKind::Ref);
+            let (math, receiver, params, ret) = match name {
+                "re" => (Re, receiver, vec![], part),
+                "im" => (Im, receiver, vec![], part),
+                "abs" => (Abs, receiver, vec![], part),
+                "arg" => (Arg, receiver, vec![], part),
+                "conj" => (Conj, receiver, vec![], base),
+                "exp" => (Exp, receiver, vec![], base),
+                "sqrt" => (Sqrt, receiver, vec![], base),
+                "polar" => (Polar, None, vec![part, part], base),
+                _ => return None,
+            };
+            Some((Builtin::Math(math), Sig::new(receiver, params, ret, Yes)))
         }
         _ if base.is_integer() => {
             let (math, params, ret) = match name {
@@ -455,5 +486,6 @@ pub fn converts(types: &Types, from: Ty, target: Ty) -> bool {
         || exact_int
         || bits
         || (target.is_float() && (from.is_number()))
+        || (target.is_complex() && (from.is_number() || from.is_complex()))
         || matches!((from, target), (Ty::BIT, Ty::BOOL) | (Ty::BOOL, Ty::BIT))
 }

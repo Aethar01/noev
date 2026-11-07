@@ -352,6 +352,25 @@ fn computed_labels() {
 }
 
 #[test]
+fn complex_numbers() {
+    ok("fn f(z: Complex) -> Complex { z * 2.0 + 1.5i - Complex(3) }");
+    ok("fn f(z: c32) -> f32 { (z * z.conj()).re() }");
+    ok("fn f(theta: Float) -> c64 { Complex::polar(1.0, theta) }");
+    assert_eq!(
+        one_error("fn f(z: Complex, x: Float) -> Complex { z * x }"),
+        "`*` cannot be applied to `Complex` and `Float`"
+    );
+    assert_eq!(
+        one_error("fn f(z: Complex) -> Bool { z < z }"),
+        "`<` cannot be applied to `Complex` and `Complex`"
+    );
+    assert_eq!(
+        one_error("fn f(z: Complex) -> Float { Float(z) }"),
+        "`Complex` cannot be converted to `Float`"
+    );
+}
+
+#[test]
 fn type_aliases() {
     ok("type Byte = [Bit; 8]\nfn f(b: Byte) -> [Bit; 8] { b }");
     ok("type A = B\ntype B = Int\nfn f(a: A) -> Int { a + 1 }");

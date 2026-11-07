@@ -79,6 +79,8 @@
 
 (float) @number.float
 
+(imaginary) @number.float
+
 (boolean) @boolean
 
 (string) @string

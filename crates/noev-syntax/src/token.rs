@@ -21,6 +21,7 @@ pub enum TokenKind {
     Ident,
     Int,
     Float,
+    Imag,
     Ket,
     Bra,
     /// A string literal, quotes included. Interpolations inside it are parsed separately.
@@ -170,7 +171,7 @@ impl TokenKind {
         use TokenKind::*;
         matches!(
             self,
-            Ident | Int | Float | Ket | Str | True | False | SelfValue | RParen | RBracket
+            Ident | Int | Float | Imag | Ket | Str | True | False | SelfValue | RParen | RBracket
         )
     }
 

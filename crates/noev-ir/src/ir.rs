@@ -155,6 +155,10 @@ pub enum Const {
     Float(f64),
     /// An `f32`.
     F32(f32),
+    /// A `Complex`: its real and imaginary parts.
+    Complex(f64, f64),
+    /// A `c32`: its real and imaginary parts.
+    C32(f32, f32),
     /// A `Bool`.
     Bool(bool),
     /// A `Bit`.
@@ -459,6 +463,8 @@ impl Program {
             | TyKind::U32
             | TyKind::U64 => ty.width().expect("a sized integer").name(),
             TyKind::F32 => "f32".into(),
+            TyKind::Complex => "Complex".into(),
+            TyKind::C32 => "c32".into(),
             TyKind::Tuple(elems) => {
                 let elems: Vec<String> = elems.iter().map(|&t| self.type_name(t)).collect();
                 format!("({})", elems.join(", "))
@@ -767,6 +773,8 @@ fn operand_text(op: &Operand) -> String {
             Const::Int(v) => v.to_string(),
             Const::Sized(v, w) => format!("{v}{}", w.name()),
             Const::F32(v) => format!("{v:?}f32"),
+            Const::Complex(re, im) => format!("({re:?}{im:+?}i)"),
+            Const::C32(re, im) => format!("({re:?}{im:+?}i)c32"),
             Const::Float(v) => format!("{v:?}"),
             Const::Bool(v) => v.to_string(),
             Const::Bit(v) => format!("{}b", u8::from(*v)),

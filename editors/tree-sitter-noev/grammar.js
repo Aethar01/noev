@@ -371,6 +371,7 @@ module.exports = grammar({
       choice(
         $.integer,
         $.float,
+        $.imaginary,
         $.boolean,
         $.string,
         $.ket,
@@ -545,6 +546,15 @@ module.exports = grammar({
     integer: (_) => token(choice(/0x[0-9a-fA-F_]+/, /0b[01_]+/, /[0-9][0-9_]*/)),
 
     float: (_) => token(choice(/[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?/, /[0-9][0-9_]*[eE][+-]?[0-9]+/)),
+
+    // `2.0i`, `3i`: an imaginary literal, the number written directly against `i`.
+    imaginary: (_) =>
+      token(
+        seq(
+          choice(/[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?/, /[0-9][0-9_]*([eE][+-]?[0-9]+)?/),
+          'i',
+        ),
+      ),
 
     // Labels: `0 1 + -`, `(+i)`, `(-i)`, and computed ones `{expr}` (one level of braces).
     ket: (_) => token(seq('|', /([01+\-]|\([+\-]i\)|\{([^{}]|\{[^{}]*\})*\})+/, '>')),

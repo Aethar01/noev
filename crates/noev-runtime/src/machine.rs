@@ -703,6 +703,8 @@ impl Machine<'_> {
                 Const::Int(v) => Value::Int(Int::from(v)),
                 Const::Sized(v, w) => Value::Sized(v, w),
                 Const::F32(v) => Value::F32(v),
+                Const::Complex(re, im) => Value::Complex(re, im),
+                Const::C32(re, im) => Value::C32(re, im),
                 Const::Float(v) => Value::Float(v),
                 Const::Bool(v) => Value::Bool(v),
                 Const::Bit(v) => Value::Bit(v),
@@ -1328,6 +1330,8 @@ fn unary(op: UnOp, x: Value) -> Result<Value> {
         (UnOp::Neg, Value::Int(v)) => Value::Int(v.neg()),
         (UnOp::Neg, Value::Float(v)) => Value::Float(-v),
         (UnOp::Neg, Value::F32(v)) => Value::F32(-v),
+        (UnOp::Neg, Value::Complex(re, im)) => Value::Complex(-re, -im),
+        (UnOp::Neg, Value::C32(re, im)) => Value::C32(-re, -im),
         (UnOp::Neg, Value::Sized(v, w)) => sized::neg(v, w)?,
         (UnOp::BitNot, Value::Sized(v, w)) => sized::not(v, w),
         (UnOp::Neg, Value::Observable(o)) => Value::Observable(o.scale(-1.0)),
@@ -1376,6 +1380,14 @@ fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
             And | Or => return Err(RuntimeError::new("logic on Int")),
         },
         (Value::Sized(a, w), b) => sized::binary(op, a, w, &b)?,
+        (Value::Complex(ar, ai), Value::Complex(br, bi)) => complex(op, (ar, ai), (br, bi))?,
+        (Value::C32(ar, ai), Value::C32(br, bi)) => {
+            let wide = (f64::from(ar), f64::from(ai));
+            match complex(op, wide, (f64::from(br), f64::from(bi)))? {
+                Value::Complex(re, im) => Value::C32(re as f32, im as f32),
+                other => other,
+            }
+        }
         (Value::F32(a), Value::F32(b)) => match op {
             Add => Value::F32(a + b),
             Sub => Value::F32(a - b),
@@ -1449,6 +1461,60 @@ fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
     })
 }
 
+/// `a op b` on complex numbers, given as (real, imaginary) parts.
+fn complex(op: BinOp, (ar, ai): (f64, f64), (br, bi): (f64, f64)) -> Result<Value> {
+    use BinOp::*;
+    Ok(match op {
+        Add => Value::Complex(ar + br, ai + bi),
+        Sub => Value::Complex(ar - br, ai - bi),
+        Mul => Value::Complex(ar * br - ai * bi, ar * bi + ai * br),
+        Div => {
+            let d = br * br + bi * bi;
+            Value::Complex((ar * br + ai * bi) / d, (ai * br - ar * bi) / d)
+        }
+        Eq => Value::Bool(ar == br && ai == bi),
+        NotEq => Value::Bool(ar != br || ai != bi),
+        _ => {
+            return Err(RuntimeError::new(format!(
+                "{} on complex numbers",
+                op.as_str()
+            )));
+        }
+    })
+}
+
+/// A method of a complex number `re + im·i` (`spec/types.md` §1).
+fn complex_maths(math: Math, re: f64, im: f64) -> Result<Value> {
+    let modulus = re.hypot(im);
+    let phase = im.atan2(re);
+    Ok(match math {
+        Math::Re => Value::Float(re),
+        Math::Im => Value::Float(im),
+        Math::Abs => Value::Float(modulus),
+        Math::Arg => Value::Float(phase),
+        Math::Conj => Value::Complex(re, -im),
+        Math::Exp => {
+            let scale = re.exp();
+            Value::Complex(scale * im.cos(), scale * im.sin())
+        }
+        // The principal root, with a real part that is never negative; computed from the
+        // modulus rather than the phase, so `(-4.0 + 0i).sqrt()` is exactly `2.0i`.
+        Math::Sqrt => {
+            let real = ((modulus + re) / 2.0).sqrt();
+            let imaginary = ((modulus - re) / 2.0).sqrt();
+            Value::Complex(
+                real,
+                if im.is_sign_negative() {
+                    -imaginary
+                } else {
+                    imaginary
+                },
+            )
+        }
+        _ => return Err(RuntimeError::new(format!("{math:?} on a complex number"))),
+    })
+}
+
 /// A conversion the checker allowed (`spec/types.md` §4).
 fn convert(target: Ty, value: Value) -> Result<Value> {
     let float = |value: &Value| match *value {
@@ -1462,6 +1528,12 @@ fn convert(target: Ty, value: Value) -> Result<Value> {
         (Ty::FLOAT, value) if let Some(x) = float(&value) => Value::Float(x),
         // Rounded to nearest, from a value already a float or an exact one otherwise.
         (Ty::F32, Value::Sized(v, _)) => Value::F32(v as f32),
+        (Ty::COMPLEX, Value::Complex(re, im)) => Value::Complex(re, im),
+        (Ty::COMPLEX, Value::C32(re, im)) => Value::Complex(f64::from(re), f64::from(im)),
+        (Ty::COMPLEX, value) if let Some(x) = float(&value) => Value::Complex(x, 0.0),
+        (Ty::C32, Value::Complex(re, im)) => Value::C32(re as f32, im as f32),
+        (Ty::C32, Value::Sized(v, _)) => Value::C32(v as f32, 0.0),
+        (Ty::C32, value) if let Some(x) = float(&value) => Value::C32(x as f32, 0.0),
         (Ty::F32, value) if let Some(x) = float(&value) => Value::F32(x as f32),
         (Ty::INT, Value::Bit(v) | Value::Bool(v)) => Value::Int(Int::from(i64::from(v))),
         (Ty::INT, Value::Sized(v, _)) => Value::Int(sized::to_int(v)),
@@ -1491,6 +1563,31 @@ fn maths(math: Math, args: &[Value]) -> Result<Value> {
             .map(Value::Int)
             .ok_or_else(|| RuntimeError::new(format!("cannot convert {x} to an Int")))
     };
+    // `Complex::polar(r, theta)`, or `c32::polar` from `f32`s.
+    if math == Math::Polar {
+        return Ok(match args {
+            [Value::Float(r), Value::Float(theta)] => {
+                Value::Complex(r * theta.cos(), r * theta.sin())
+            }
+            [Value::F32(r), Value::F32(theta)] => Value::C32(r * theta.cos(), r * theta.sin()),
+            other => {
+                return Err(RuntimeError::new(format!(
+                    "`polar` takes two floats, not {other:?}"
+                )));
+            }
+        });
+    }
+    // `c32` maths is `Complex` maths, rounded back.
+    if let Some(&Value::C32(re, im)) = args.first() {
+        return Ok(match complex_maths(math, f64::from(re), f64::from(im))? {
+            Value::Complex(re, im) => Value::C32(re as f32, im as f32),
+            Value::Float(v) => Value::F32(v as f32),
+            other => other,
+        });
+    }
+    if let Some(&Value::Complex(re, im)) = args.first() {
+        return complex_maths(math, re, im);
+    }
     // `f32` maths is `Float` maths, rounded back.
     if let Some(Value::F32(_)) = args.first() {
         let widened: Vec<Value> = args
@@ -1549,7 +1646,9 @@ fn maths(math: Math, args: &[Value]) -> Result<Value> {
         Math::Round => to_int(x.round())?,
         Math::Floor => to_int(x.floor())?,
         Math::Ceil => to_int(x.ceil())?,
-        Math::Bits => return Err(RuntimeError::new("`bits` on a Float")),
+        Math::Bits | Math::Re | Math::Im | Math::Arg | Math::Conj | Math::Polar => {
+            return Err(RuntimeError::new(format!("{math:?} on a Float")));
+        }
     })
 }
 

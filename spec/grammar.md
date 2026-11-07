@@ -61,6 +61,7 @@ ordinary identifiers, so `let adj = build_graph(edges)` is valid.
 | -------- | ------------------------------------ | ---------------------------------- |
 | Integer  | `0`, `42`, `1_000`, `0xff`, `0b1010` |                                    |
 | Float    | `1.0`, `3.14`, `1e-3`, `2.5e6`       | A `.` must be followed by a digit  |
+| Imaginary | `2.0i`, `3i`, `1e-3i`               | A number with `i` written directly after it |
 | Bool     | `true`, `false`                      |                                    |
 | Ket      | `\|0>`, `\|1>`, `\|+>`, `\|->`, `\|01>`, `\|+0->` | See below             |
 | Bra      | `<0\|`, `<1\|`, `<+\|`, `<-\|`, `<01\|`           | See below             |

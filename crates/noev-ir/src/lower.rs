@@ -827,10 +827,21 @@ impl Builder<'_> {
                 self.assign(temp.clone(), Rvalue::BigInt(text));
                 return Operand::Copy(temp);
             }
-            ExprKind::Float(v) if self.ty(id) == Ty::F32 => {
-                return Operand::Const(Const::F32(v as f32));
+            // A float or imaginary literal, of the type it took.
+            ExprKind::Float(v) => {
+                return Operand::Const(match self.ty(id) {
+                    Ty::F32 => Const::F32(v as f32),
+                    Ty::COMPLEX => Const::Complex(v, 0.0),
+                    Ty::C32 => Const::C32(v as f32, 0.0),
+                    _ => Const::Float(v),
+                });
             }
-            ExprKind::Float(v) => return Operand::Const(Const::Float(v)),
+            ExprKind::Imag(v) => {
+                return Operand::Const(match self.ty(id) {
+                    Ty::C32 => Const::C32(0.0, v as f32),
+                    _ => Const::Complex(0.0, v),
+                });
+            }
             ExprKind::Bool(v) => return Operand::Const(Const::Bool(v)),
             ExprKind::Unit => return Operand::Const(Const::Unit),
             _ => {}
@@ -997,6 +1008,7 @@ impl Builder<'_> {
             ExprKind::Int(_)
             | ExprKind::BigInt
             | ExprKind::Float(_)
+            | ExprKind::Imag(_)
             | ExprKind::Bool(_)
             | ExprKind::Unit => {
                 let op = self.operand(id);

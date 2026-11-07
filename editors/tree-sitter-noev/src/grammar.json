@@ -2561,6 +2561,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "imaginary"
+        },
+        {
+          "type": "SYMBOL",
           "name": "boolean"
         },
         {
@@ -3797,6 +3801,31 @@
           {
             "type": "PATTERN",
             "value": "[0-9][0-9_]*[eE][+-]?[0-9]+"
+          }
+        ]
+      }
+    },
+    "imaginary": {
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "PATTERN",
+                "value": "[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?"
+              },
+              {
+                "type": "PATTERN",
+                "value": "[0-9][0-9_]*([eE][+-]?[0-9]+)?"
+              }
+            ]
+          },
+          {
+            "type": "STRING",
+            "value": "i"
           }
         ]
       }

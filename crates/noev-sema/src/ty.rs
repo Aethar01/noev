@@ -65,6 +65,10 @@ pub enum TyKind {
     U64,
     /// `f32`. (`f64` is another name for `Float`.)
     F32,
+    /// `Complex`, two `Float`s (also called `c64`).
+    Complex,
+    /// `c32`, two `f32`s.
+    C32,
     /// `(A, B, …)`.
     Tuple(Box<[Ty]>),
     /// `[T; N]`.
@@ -193,6 +197,8 @@ basic! {
     U32 = 16: U32,
     U64 = 17: U64,
     F32 = 18: F32,
+    COMPLEX = 19: Complex,
+    C32 = 20: C32,
 }
 
 /// A sized integer type's size and signedness (`spec/types.md` §1).
@@ -280,7 +286,13 @@ impl Ty {
         matches!(self, Ty::FLOAT | Ty::F32)
     }
 
-    /// Whether it is a number: an integer or a float.
+    /// Whether it is `Complex` (also called `c64`) or `c32`.
+    pub fn is_complex(self) -> bool {
+        matches!(self, Ty::COMPLEX | Ty::C32)
+    }
+
+    /// Whether it is a number: an integer or a float. (Complex numbers have no order, so
+    /// they are not among them.)
     pub fn is_number(self) -> bool {
         self.is_integer() || self.is_float()
     }
@@ -411,7 +423,7 @@ impl Types {
         }
         match *self.kind(ty) {
             TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Bit | TyKind::String => true,
-            _ if ty.is_number() => true,
+            _ if ty.is_number() || ty.is_complex() => true,
             TyKind::Struct(id) => match &self.structs[id.index()].variants {
                 Some(variants) => variants
                     .iter()
@@ -474,6 +486,8 @@ impl Types {
             | TyKind::U32
             | TyKind::U64 => ty.width().expect("a sized integer").name(),
             TyKind::F32 => "f32".into(),
+            TyKind::Complex => "Complex".into(),
+            TyKind::C32 => "c32".into(),
             TyKind::Tuple(elems) => {
                 let elems: Vec<String> = elems.iter().map(|&t| self.display(t, ast)).collect();
                 if elems.len() == 1 {

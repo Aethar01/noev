@@ -17,6 +17,8 @@ no implicit conversions except the literal typing rules in §3.
 | `i8` `i16` `i32` `i64` | classical | Signed integers of that many bits                 |
 | `u8` `u16` `u32` `u64` | classical | Unsigned integers of that many bits               |
 | `f32`   | classical | 32-bit IEEE 754 float                                       |
+| `Complex` | classical | A complex number of two `Float`s, like Python's `complex`; also called `c64` |
+| `c32`   | classical | A complex number of two `f32`s                              |
 
 `Int` grows as needed, so results such as `1 << 100` and literals such as
 `123456789012345678901234567890` are exact. Values that fit in 64 bits, almost all of them in
@@ -37,6 +39,15 @@ on sized integers follows `Int`'s rules, except that a result outside the type's
 runtime error (`x + 1` fails when `x: u8` is 255; there is no silent wrapping). Shifts drop
 the bits shifted out, as in Rust and C, and shifting by the type's width or more is an error.
 `~` flips every bit of the type, so `~0` as a `u8` is `255`.
+
+**Complex numbers** are written with imaginary literals, a number with `i` directly after
+it: `1.0 + 2.0i`, `Complex::polar(1.0, theta)` for a phase. `i` alone is an ordinary name.
+`+`, `-`, `*`, `/`, unary `-`, `==` and `!=` work on two values of the same complex type;
+there is no ordering. Their methods: `re()` and `im()` (the parts, as `Float` or `f32`),
+`abs()` and `arg()` (modulus and phase), `conj()`, `exp()` and `sqrt()` (the principal
+root), and the associated function `polar(r, theta)`. As everywhere, nothing converts
+implicitly: `z * 2.0` works because the literal takes the type expected, but `z * x` with
+`x: Float` needs `Complex(x)`. A complex number prints as `1.0+2.0i`.
 
 `Bit` and `Bool` are separate types: `Bit` is data (a measurement outcome, part of a bit
 string), `Bool` is logic. Both can be used as an `if` or `while` condition (a `Bit` is true
@@ -139,7 +150,8 @@ makes sure a `Some` qubit is consumed.
 | Literal             | Type                                                         |
 | ------------------- | ------------------------------------------------------------ |
 | `42`, `0xff`        | `Int`, or the sized integer expected; `0` and `1` are `Bit` where a `Bit` is expected |
-| `1.0`, `1e-3`       | `Float`, or `f32` where one is expected                      |
+| `1.0`, `1e-3`       | `Float`, or `f32`, `Complex` or `c32` where one is expected  |
+| `2.0i`, `3i`        | `Complex`, or `c32` where one is expected                    |
 | `true`, `false`     | `Bool`                                                       |
 | `\|0>`, `\|+>`, …   | `Qubit` for one label, `[Qubit; N]` for N labels             |
 | `"text {x}"`        | `String`                                                     |
@@ -272,6 +284,8 @@ users can define conversions for their own types.
 | Any other integer → sized integer | `u8::try_from(n)` | `Ok` when it is in range, otherwise `Err` saying why |
 | Integer → `Float`, `f32`   | `Float(n)`, `f32(n)` | As `Int → Float`: rounded past the type's exact range |
 | `f32 ↔ Float`              | `Float(x)`, `f32(x)` | Exact widening; narrowing rounds to nearest (accepted by convention) |
+| Number → `Complex`, `c32`  | `Complex(x)`, `c32(x)` | The real part, rounded as for the float type; `c32 ↔ Complex` as `f32 ↔ Float` |
+| Complex → real             | `z.re()`, `z.abs()` | Say which real number: there is no `Float(z)` |
 | `[Bit; N]` ↔ `uN` (N = 8, 16, 32, 64) | `u8(bits)`, `x.bits()` | Exact; `bits[0]` is the most significant, so a bit string reads as the number it prints as: `u8(\|00000101>.measure()) == 5` |
 
 There are no conversions to or from `Qubit`. The only way from quantum to classical is
@@ -281,7 +295,7 @@ measurement.
 
 Every type is **copyable**, **affine** or **linear**:
 
-- `Int`, `Float`, the sized numbers, `Bool`, `Bit`, `String`, `Observable`,
+- `Int`, `Float`, the sized numbers, the complex numbers, `Bool`, `Bit`, `String`, `Observable`,
   `Distribution<T>`, `()` and shared references `ref T` are copyable.
 - Exclusive references `mut T` are affine: they cannot be copied, but can be dropped.
 - `Qubit` is linear: it cannot be copied or dropped, and must be consumed.

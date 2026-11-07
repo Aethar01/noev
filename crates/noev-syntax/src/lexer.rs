@@ -230,6 +230,12 @@ impl Lexer<'_> {
                 kind = TokenKind::Float;
             }
         }
+        // `2.0i`: an imaginary literal, when `i` does not start a longer name.
+        let next = self.peek(1);
+        if self.peek(0) == b'i' && !(next.is_ascii_alphanumeric() || next == b'_') {
+            self.pos += 1;
+            kind = TokenKind::Imag;
+        }
         self.push(kind, start);
     }
 
@@ -519,6 +525,9 @@ mod tests {
         assert_eq!(kinds("|+->\ny"), [Ket, Newline, Ident]);
         // A label in parentheses is part of the ket or bra; anything else in them is not.
         assert_eq!(kinds("|0(+i)>"), [Ket]);
+        // `i` against a number makes it imaginary, unless it starts a longer name.
+        assert_eq!(kinds("2.0i 3i 1e-3i"), [Imag, Imag, Imag]);
+        assert_eq!(kinds("2items"), [Int, Ident]);
         assert_eq!(kinds("<(-i)| q"), [Bra, Ident]);
         assert_eq!(kinds("|(+j)>"), [Pipe, LParen, Plus, Ident, RParen, Gt]);
     }

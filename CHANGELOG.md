@@ -7,6 +7,18 @@ before 1.0.
 
 ## [Unreleased]
 
+### Language
+
+- Complex numbers: `Complex` (two `Float`s, also called `c64`, like Python's `complex`) and
+  `c32` (two `f32`s), written with imaginary literals (`1.0 + 2.0i`, `3i`). `+ - * /`, `==`,
+  `re()`, `im()`, `abs()`, `arg()`, `conj()`, `exp()`, `sqrt()` and `Complex::polar(r, theta)`;
+  `Complex(x)` and `c32(z)` convert, and nothing converts implicitly. They print as
+  `1.0+2.0i`.
+
+### Editors
+
+- Hover on `Complex`, `c32` and their methods; imaginary literals in the tree-sitter grammar.
+
 ## [0.3.0] - 2026-11-07
 
 ### Language

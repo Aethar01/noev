@@ -303,6 +303,8 @@ pub enum ExprKind {
     BigInt,
     /// A float literal.
     Float(f64),
+    /// An imaginary literal, `2.0i`: its imaginary part.
+    Imag(f64),
     /// `true` or `false`.
     Bool(bool),
     /// A ket literal such as `|+0>`; the state is the text of the span.

@@ -12,6 +12,32 @@ pub fn display(program: &Program, value: &Value, ty: Ty) -> String {
     out
 }
 
+/// A `Complex` as `1.0+2.0i`, each part with `precision` digits after the point if given.
+pub fn complex(re: f64, im: f64, precision: Option<usize>) -> String {
+    let sign = if im.is_sign_negative() && !im.is_nan() {
+        '-'
+    } else {
+        '+'
+    };
+    match precision {
+        Some(p) => format!("{re:.p$}{sign}{:.p$}i", im.abs()),
+        None => format!("{re:?}{sign}{:?}i", im.abs()),
+    }
+}
+
+/// A `c32`, as [`complex`] writes a `Complex`, with `f32` digits.
+pub fn complex32(re: f32, im: f32, precision: Option<usize>) -> String {
+    let sign = if im.is_sign_negative() && !im.is_nan() {
+        '-'
+    } else {
+        '+'
+    };
+    match precision {
+        Some(p) => format!("{re:.p$}{sign}{:.p$}i", im.abs()),
+        None => format!("{re:?}{sign}{:?}i", im.abs()),
+    }
+}
+
 /// `value`, of type `ty`, formatted with `spec`.
 pub fn format(program: &Program, value: &Value, ty: Ty, spec: Option<&FormatSpec>) -> String {
     let Some(spec) = spec else {
@@ -39,6 +65,15 @@ pub fn format(program: &Program, value: &Value, ty: Ty, spec: Option<&FormatSpec
                 _ => m.to_string(),
             };
             (sign(*v < 0, spec.plus), digits, true)
+        }
+        // A complex number pads as a whole; a precision applies to both parts.
+        Value::Complex(re, im) => {
+            let p = spec.precision.map(|p| p as usize);
+            (String::new(), complex(*re, *im, p), false)
+        }
+        Value::C32(re, im) => {
+            let p = spec.precision.map(|p| p as usize);
+            (String::new(), complex32(*re, *im, p), false)
         }
         Value::F32(v) => {
             let magnitude = v.abs();
@@ -114,6 +149,8 @@ fn write_value(program: &Program, value: &Value, ty: Ty, out: &mut String) {
         (Value::F32(v), _) => {
             let _ = write!(out, "{v:?}");
         }
+        (Value::Complex(re, im), _) => out.push_str(&complex(*re, *im, None)),
+        (Value::C32(re, im), _) => out.push_str(&complex32(*re, *im, None)),
         // Debug formatting always shows a decimal point: `-1.0`, not `-1`.
         (Value::Float(v), _) => {
             let _ = write!(out, "{v:?}");

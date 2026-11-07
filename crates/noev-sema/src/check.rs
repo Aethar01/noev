@@ -1204,8 +1204,12 @@ impl Checker<'_> {
             ExprKind::Int(value) => self.int_literal(Some(value), expect, expr.span),
             ExprKind::BigInt => self.int_literal(None, expect, expr.span),
             ExprKind::Float(_) => match expect.ty().map(|t| self.t.types.deref(t)) {
-                Some(Ty::F32) => Ty::F32,
+                Some(t @ (Ty::F32 | Ty::COMPLEX | Ty::C32)) => t,
                 _ => Ty::FLOAT,
+            },
+            ExprKind::Imag(_) => match expect.ty().map(|t| self.t.types.deref(t)) {
+                Some(Ty::C32) => Ty::C32,
+                _ => Ty::COMPLEX,
             },
             ExprKind::Str(parts) => self.string(parts),
             ExprKind::Bool(_) => Ty::BOOL,
@@ -1328,6 +1332,7 @@ impl Checker<'_> {
                     UnaryOp::Neg => {
                         matches!(ty, Ty::INT | Ty::OBSERVABLE)
                             || ty.is_float()
+                            || ty.is_complex()
                             || ty.width().is_some_and(|w| w.signed)
                     }
                     UnaryOp::BitNot => ty.is_integer() || ty == Ty::BIT,
@@ -1355,7 +1360,7 @@ impl Checker<'_> {
                 let outer = expect
                     .ty()
                     .map(|t| self.t.types.deref(t))
-                    .filter(|&t| arithmetic && (t.is_number() || t == Ty::BIT))
+                    .filter(|&t| arithmetic && (t.is_number() || t.is_complex() || t == Ty::BIT))
                     .map_or(Expect::None, Expect::Hint);
                 let (lhs_ty, rhs_ty) = if self.is_literal(lhs) {
                     let rhs_ty = self.expr(rhs, outer);
@@ -2000,7 +2005,7 @@ impl Checker<'_> {
     /// side of an operator.
     fn is_literal(&self, id: ExprId) -> bool {
         match self.ast.expr(id).kind {
-            ExprKind::Int(_) | ExprKind::BigInt | ExprKind::Float(_) => true,
+            ExprKind::Int(_) | ExprKind::BigInt | ExprKind::Float(_) | ExprKind::Imag(_) => true,
             ExprKind::Unary {
                 op: UnaryOp::Neg,
                 operand,
@@ -2063,18 +2068,19 @@ impl Checker<'_> {
             // The shift amount is the same type, or an `Int`.
             Shl | Shr => (lhs.is_integer() && (rhs == lhs || rhs == Ty::INT)).then_some(lhs),
             Add | Sub => match (lhs, rhs) {
-                (a, b) if a == b && a.is_number() => Some(a),
+                (a, b) if a == b && (a.is_number() || a.is_complex()) => Some(a),
                 (Ty::OBSERVABLE, Ty::OBSERVABLE) => Some(Ty::OBSERVABLE),
                 _ => None,
             },
             Mul => match (lhs, rhs) {
-                (a, b) if a == b && a.is_number() => Some(a),
+                (a, b) if a == b && (a.is_number() || a.is_complex()) => Some(a),
                 (Ty::OBSERVABLE | Ty::FLOAT, Ty::OBSERVABLE) | (Ty::OBSERVABLE, Ty::FLOAT) => {
                     Some(Ty::OBSERVABLE)
                 }
                 _ => None,
             },
-            Div | Rem => (lhs == rhs && lhs.is_number()).then_some(lhs),
+            Div => (lhs == rhs && (lhs.is_number() || lhs.is_complex())).then_some(lhs),
+            Rem => (lhs == rhs && lhs.is_number()).then_some(lhs),
         };
         if let Some(ty) = result {
             return ty;
@@ -2085,16 +2091,24 @@ impl Checker<'_> {
             self.show(lhs),
             self.show(rhs)
         );
-        let diagnostic = self.error(span, message);
-        if matches!((lhs, rhs), (Ty::INT, Ty::FLOAT) | (Ty::FLOAT, Ty::INT)) {
-            diagnostic.help = Some(
-                "Noev does not convert between `Int` and `Float` implicitly; use `Float(n)` or a float literal such as `2.0`".into(),
-            );
+        let mixes_complex =
+            (lhs.is_complex() && rhs.is_number()) || (lhs.is_number() && rhs.is_complex());
+        let help = if matches!((lhs, rhs), (Ty::INT, Ty::FLOAT) | (Ty::FLOAT, Ty::INT)) {
+            Some("Noev does not convert between `Int` and `Float` implicitly; use `Float(n)` or a float literal such as `2.0`".to_string())
+        } else if mixes_complex {
+            let complex = self
+                .t
+                .types
+                .display(if lhs.is_complex() { lhs } else { rhs }, self.ast);
+            Some(format!(
+                "Noev does not convert to complex numbers implicitly; write `{complex}(x)`"
+            ))
         } else if lhs.is_number() && rhs.is_number() {
-            diagnostic.help = Some(
-                "Noev does not convert between number types implicitly; convert one side, as in `i64(x)` or `Int(x)`".into(),
-            );
-        }
+            Some("Noev does not convert between number types implicitly; convert one side, as in `i64(x)` or `Int(x)`".to_string())
+        } else {
+            None
+        };
+        self.error(span, message).help = help;
         match op {
             Or | And | Eq | NotEq | Lt | Le | Gt | Ge => Ty::BOOL,
             _ => Ty::ERROR,
@@ -2485,6 +2499,8 @@ impl Checker<'_> {
             );
             let help = if from.is_float() && target.is_integer() {
                 Some("say how to round: `x.trunc()`, `x.round()`, `x.floor()` or `x.ceil()`".into())
+            } else if from.is_complex() {
+                Some("say which real number: `z.re()`, `z.im()` or `z.abs()`".into())
             } else if from.is_integer() && target.width().is_some() {
                 let name = self.t.types.display(target, self.ast);
                 Some(format!(
@@ -2616,8 +2632,8 @@ impl Checker<'_> {
                 Some(
                     FormatKind::Binary | FormatKind::Octal | FormatKind::Hex | FormatKind::HexUpper,
                 ) if !ty.is_integer() => Some("`b`, `o`, `x` and `X` apply to integers"),
-                _ if spec.precision.is_some() && !ty.is_float() => {
-                    Some("a precision applies to floats")
+                _ if spec.precision.is_some() && !ty.is_float() && !ty.is_complex() => {
+                    Some("a precision applies to floats and complex numbers")
                 }
                 _ if spec.plus && !numeric => Some("`+` applies to numbers"),
                 _ if spec.zero && !numeric => Some("`0` padding applies to numbers"),

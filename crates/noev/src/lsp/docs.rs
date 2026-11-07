@@ -197,6 +197,24 @@ fn math(m: Math) -> (String, String) {
         ),
         Math::Floor => ("fn floor(self) -> Int", "Rounds down."),
         Math::Ceil => ("fn ceil(self) -> Int", "Rounds up."),
+        Math::Re => ("fn re(self) -> Float", "The real part of a complex number."),
+        Math::Im => (
+            "fn im(self) -> Float",
+            "The imaginary part of a complex number.",
+        ),
+        Math::Arg => (
+            "fn arg(self) -> Float",
+            "The phase of a complex number, in (−π, π]: `z == Complex::polar(z.abs(), z.arg())`.",
+        ),
+        Math::Conj => (
+            "fn conj(self) -> Self",
+            "The complex conjugate: `a+bi` to `a-bi`.",
+        ),
+        Math::Polar => (
+            "fn polar(r: Float, theta: Float) -> Complex",
+            "The complex number with modulus `r` and phase `theta`, such as a phase factor \
+             `Complex::polar(1.0, theta)`.",
+        ),
         Math::Bits => (
             "fn bits(self) -> [Bit; N]",
             "The bits of an unsigned integer, most significant first, so they print as the \
@@ -331,6 +349,11 @@ pub fn builtin_type(name: &str) -> Option<(String, String)> {
         "f32" => {
             "A 32-bit IEEE 754 float. Converts to and from `Float` with `Float(x)` and `f32(x)`."
         }
+        "Complex" | "c64" => {
+            "A complex number of two `Float`s, like Python's `complex`; `c64` is another name \
+             for it. Written with imaginary literals: `1.0 + 2.0i`."
+        }
+        "c32" => "A complex number of two `f32`s. Converts with `Complex(z)` and `c32(z)`.",
         _ => {
             let width = noev_sema::prelude::builtin_type(name)?.width()?;
             let kind = if width.signed {

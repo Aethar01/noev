@@ -851,6 +851,7 @@ impl Owner<'_> {
             | ExprKind::Int(_)
             | ExprKind::BigInt
             | ExprKind::Float(_)
+            | ExprKind::Imag(_)
             | ExprKind::Bool(_)
             | ExprKind::Unit
             | ExprKind::Path(_) => Vec::new(),

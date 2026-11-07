@@ -1396,6 +1396,11 @@ impl Parser<'_> {
                 let text = self.text(start).replace('_', "");
                 ExprKind::Float(text.parse().unwrap_or(0.0))
             }
+            Imag => {
+                self.bump();
+                let text = self.text(start).replace('_', "");
+                ExprKind::Imag(text.trim_end_matches('i').parse().unwrap_or(0.0))
+            }
             True | False => ExprKind::Bool(self.bump().kind == True),
             Ket => {
                 self.bump();

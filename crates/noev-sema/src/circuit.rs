@@ -454,6 +454,7 @@ pub fn is_pure(ast: &Ast, id: ExprId) -> bool {
         | ExprKind::Int(_)
         | ExprKind::BigInt
         | ExprKind::Float(_)
+        | ExprKind::Imag(_)
         | ExprKind::Bool(_) => true,
         ExprKind::Field { base, .. } | ExprKind::TupleIndex { base, .. } => is_pure(ast, base),
         ExprKind::Unary {
@@ -1257,6 +1258,7 @@ impl<'a> Walker<'a> {
             | ExprKind::Int(_)
             | ExprKind::BigInt
             | ExprKind::Float(_)
+            | ExprKind::Imag(_)
             | ExprKind::Bool(_)
             | ExprKind::Path(_)
             | ExprKind::Unit

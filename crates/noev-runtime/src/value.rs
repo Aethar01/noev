@@ -17,6 +17,10 @@ pub enum Value {
     Sized(i128, noev_sema::ty::Width),
     /// An `f32`.
     F32(f32),
+    /// A `Complex`: real and imaginary parts.
+    Complex(f64, f64),
+    /// A `c32`: real and imaginary parts.
+    C32(f32, f32),
     /// A `Float`.
     Float(f64),
     /// A `Bool`.
@@ -245,6 +249,8 @@ impl fmt::Display for Value {
             Value::Int(v) => write!(f, "{v}"),
             Value::Sized(v, _) => write!(f, "{v}"),
             Value::F32(v) => write!(f, "{v:?}"),
+            Value::Complex(re, im) => write!(f, "{}", crate::format::complex(*re, *im, None)),
+            Value::C32(re, im) => write!(f, "{}", crate::format::complex32(*re, *im, None)),
             Value::Float(v) => write!(f, "{v:?}"),
             Value::Bool(v) => write!(f, "{v}"),
             Value::Bit(v) => write!(f, "{}", u8::from(*v)),
