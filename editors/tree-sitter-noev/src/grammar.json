@@ -1802,6 +1802,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "preparation_test"
+        },
+        {
+          "type": "SYMBOL",
           "name": "_postfix"
         }
       ]
@@ -2277,6 +2281,40 @@
         {
           "type": "SYMBOL",
           "name": "bra"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_unary_like"
+        }
+      ]
+    },
+    "preparation_test": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "<"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "_line_start_angle"
+            }
+          ]
+        },
+        {
+          "type": "FIELD",
+          "name": "preparation",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_postfix"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "|"
         },
         {
           "type": "SYMBOL",
@@ -2961,69 +2999,73 @@
       ]
     },
     "expectation": {
-      "type": "PREC_RIGHT",
-      "value": 0,
+      "type": "PREC_DYNAMIC",
+      "value": 1,
       "content": {
-        "type": "SEQ",
-        "members": [
-          {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "STRING",
-                "value": "<"
-              },
-              {
+        "type": "PREC_RIGHT",
+        "value": 0,
+        "content": {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "<"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "_line_start_angle"
+                }
+              ]
+            },
+            {
+              "type": "FIELD",
+              "name": "preparation",
+              "content": {
                 "type": "SYMBOL",
-                "name": "_line_start_angle"
+                "name": "_postfix"
               }
-            ]
-          },
-          {
-            "type": "FIELD",
-            "name": "preparation",
-            "content": {
+            },
+            {
+              "type": "STRING",
+              "value": "|"
+            },
+            {
+              "type": "FIELD",
+              "name": "observable",
+              "content": {
+                "type": "SYMBOL",
+                "name": "_observable"
+              }
+            },
+            {
+              "type": "STRING",
+              "value": "|"
+            },
+            {
               "type": "SYMBOL",
               "name": "_postfix"
+            },
+            {
+              "type": "STRING",
+              "value": ">"
+            },
+            {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "within"
+                },
+                {
+                  "type": "BLANK"
+                }
+              ]
             }
-          },
-          {
-            "type": "STRING",
-            "value": "|"
-          },
-          {
-            "type": "FIELD",
-            "name": "observable",
-            "content": {
-              "type": "SYMBOL",
-              "name": "_observable"
-            }
-          },
-          {
-            "type": "STRING",
-            "value": "|"
-          },
-          {
-            "type": "SYMBOL",
-            "name": "_postfix"
-          },
-          {
-            "type": "STRING",
-            "value": ">"
-          },
-          {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "SYMBOL",
-                "name": "within"
-              },
-              {
-                "type": "BLANK"
-              }
-            ]
-          }
-        ]
+          ]
+        }
       }
     },
     "bra_expectation": {
@@ -3991,6 +4033,10 @@
     ],
     [
       "measurement_test",
+      "_observable"
+    ],
+    [
+      "preparation_test",
       "_observable"
     ],
     [

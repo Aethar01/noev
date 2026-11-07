@@ -189,6 +189,18 @@ fn adj_undoes_gates_and_functions() {
 }
 
 #[test]
+fn nested_adjoints_invert_in_order() {
+    // `adj twice` must undo the inner `adj turn` too, after `x`: it used to apply the inner
+    // inverse at once, out of order.
+    assert_eq!(
+        always(
+            "fn turn(q: mut Qubit) {\n q.h()\n q.s()\n}\nfn twice(q: mut Qubit) {\n q.x()\n adj turn(q)\n}\nfn test() -> Bit {\n let q = |0>\n twice(q)\n adj twice(q)\n mv q.measure()\n}"
+        ),
+        "0"
+    );
+}
+
+#[test]
 fn controlled_adjoint() {
     // ctrl on |1⟩ applies adj s then s: identity, so h brings |+⟩ back to |0⟩.
     assert_eq!(

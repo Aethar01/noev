@@ -172,3 +172,28 @@ fn main() {
           (ownership_expression
             (ownership)
             (identifier)))))))
+
+================================================================================
+Bra of a preparation
+================================================================================
+
+fn main() {
+    let hit = <bell()| mv pair
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_item
+    (identifier)
+    (parameters)
+    (block
+      (let_declaration
+        (identifier)
+        (preparation_test
+          (call_expression
+            (identifier)
+            (arguments))
+          (ownership_expression
+            (ownership)
+            (identifier)))))))

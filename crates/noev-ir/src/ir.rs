@@ -362,6 +362,20 @@ pub enum Terminator {
         /// Where to continue.
         next: Block,
     },
+    /// Undo the preparation `func(args)` on the qubits at `target` (`<ψ| x`, spec/ownership.md
+    /// §12): record its operations without running them, then apply them in reverse order,
+    /// each inverted, to `target`'s qubits, matched in the order the preparation returns its
+    /// own. Continue at `next`.
+    Undo {
+        /// The preparation.
+        func: FuncId,
+        /// Its classical arguments.
+        args: Vec<Operand>,
+        /// The qubits to undo it on: a `Qubit` or `[Qubit; N]`.
+        target: Place,
+        /// Where to continue.
+        next: Block,
+    },
     /// Stop the program if `cond` is false; otherwise continue at `next`.
     Assert {
         /// A `Bool`.
@@ -639,6 +653,21 @@ impl Program {
                     operand_text(cond),
                     then.0,
                     otherwise.0
+                )
+            }
+            Terminator::Undo {
+                func,
+                args,
+                target,
+                next,
+            } => {
+                let args: Vec<String> = args.iter().map(operand_text).collect();
+                format!(
+                    "undo {}({}) on {} -> bb{}",
+                    self.function_name(*func),
+                    args.join(", "),
+                    place_text(target),
+                    next.0
                 )
             }
             Terminator::Call {

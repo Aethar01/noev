@@ -1390,6 +1390,34 @@ impl Checker<'_> {
                 }
                 Ty::BOOL
             }
+            ExprKind::PrepTest { prep, operand } => {
+                let prep_ty = self.expr(prep, Expect::None);
+                let qubits = |types: &Types, t: Ty| {
+                    t == Ty::QUBIT || matches!(*types.kind(t), TyKind::Array(Ty::QUBIT, _))
+                };
+                let is_fn = matches!(self.t.callees[prep.index()], Some(Callee::Fn(_)));
+                let valid = is_fn && qubits(&self.t.types, prep_ty);
+                if !self.t.types.is_wildcard(prep_ty) && !valid {
+                    let span = self.ast.expr(prep).span;
+                    self.error(
+                        span,
+                        "a bra holds labels such as `<01|`, or a call to a function that prepares a `Qubit` or `[Qubit; N]`",
+                    );
+                }
+                let ty = self.expr(operand, Expect::None);
+                let ty = self.t.types.deref(ty);
+                let wild = self.t.types.is_wildcard(ty) || self.t.types.is_wildcard(prep_ty);
+                if !wild && valid && ty != prep_ty {
+                    let message = format!(
+                        "this bra's preparation makes {}, but the value is {}",
+                        self.show(prep_ty),
+                        self.show(ty)
+                    );
+                    let span = self.ast.expr(operand).span;
+                    self.error(span, message);
+                }
+                Ty::BOOL
+            }
             ExprKind::Expectation {
                 prep,
                 observable,

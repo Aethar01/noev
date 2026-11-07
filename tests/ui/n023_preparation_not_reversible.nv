@@ -1,0 +1,27 @@
+// N023: a bra's preparation is not reversible (spec/ownership.md §12).
+
+fn noisy() -> Qubit {
+    let q = |0>
+    let coin = |+>
+    if mv coin.measure() == 1 { q.x() }
+    mv q
+}
+
+fn through_a_call() -> Qubit {
+    noisy()
+}
+
+fn reset_inside() -> Qubit {
+    let q = |1>
+    q.reset()
+    mv q
+}
+
+fn main() {
+    let a = |0>
+    print(<noisy()| mv a)                   //~ N023
+    let b = |0>
+    print(<through_a_call()| mv b)          //~ N023
+    let c = |0>
+    print(<reset_inside()| mv c)            //~ N023
+}

@@ -1,0 +1,31 @@
+// A bra holding a preparation (spec/ownership.md §12): the preparation may create its
+// qubits and move them out, call reversible functions and other preparations, and take
+// classical arguments.
+
+fn tilt(q: mut Qubit, theta: Float) {
+    q.ry(theta)
+}
+
+fn tilted(theta: Float) -> Qubit {
+    let q = |0>
+    tilt(q, theta)
+    mv q
+}
+
+fn bell() -> [Qubit; 2] {
+    let r = |+0>
+    ctrl r[0] { r[1].x() }
+    mv r
+}
+
+fn bell_again() -> [Qubit; 2] {
+    let r = bell()
+    mv r
+}
+
+fn main() {
+    let q = tilted(0.3)
+    print(<tilted(0.3)| mv q)
+    let pair = bell()
+    print(<bell_again()| mv pair)
+}

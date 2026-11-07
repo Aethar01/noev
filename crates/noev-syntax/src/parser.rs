@@ -1788,6 +1788,24 @@ impl Parser<'_> {
         let bra_end = self.pos;
         self.expect(TokenKind::Pipe, "`|` after the preparation");
         let observable = self.binary(PREC_BIT_XOR);
+        // No closing ket: `<bell()| mv pair`, a measurement test against the preparation.
+        if !self.at(TokenKind::Pipe) {
+            if let ExprKind::Binary { op, .. } = self.ast.expr(observable).kind {
+                let span = self.span_of(observable);
+                self.error(span, "a measurement test applies to a single value")
+                    .with_help_mut(format!(
+                        "wrap it in parentheses if `{}` is meant to be measured",
+                        op.as_str()
+                    ));
+            }
+            return self.push(
+                ExprKind::PrepTest {
+                    prep,
+                    operand: observable,
+                },
+                start,
+            );
+        }
         self.expect(TokenKind::Pipe, "`|` and the preparation again");
         let ket_tokens = self.pos;
         let ket = self.postfix();

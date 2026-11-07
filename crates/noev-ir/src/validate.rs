@@ -147,6 +147,19 @@ pub fn validate(program: &Program) -> Vec<String> {
                     check_place(dest, &mut report);
                     vec![*next]
                 }
+                Terminator::Undo {
+                    func,
+                    args,
+                    target,
+                    next,
+                } => {
+                    if func.index() >= program.functions.len() {
+                        report(format!("unknown function {}", func.0));
+                    }
+                    args.iter().for_each(|a| check_operand(a, &mut report));
+                    check_place(target, &mut report);
+                    vec![*next]
+                }
                 Terminator::Assert { cond, next, .. } => {
                     check_operand(cond, &mut report);
                     vec![*next]

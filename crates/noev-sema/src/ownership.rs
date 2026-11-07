@@ -26,6 +26,7 @@ pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
         ast,
         typed,
         irreversible,
+        preparable: None,
         prints,
         diagnostics: Vec::new(),
         locals: vec![LocalInfo::default(); typed.locals.len()],
@@ -152,6 +153,9 @@ struct Owner<'a> {
     ast: &'a Ast,
     typed: &'a Typed,
     irreversible: Vec<Option<Irreversible>>,
+    /// For each function, why it cannot be undone as a bra's preparation, if it cannot.
+    /// Worked out when the first bra of a preparation needs it.
+    preparable: Option<Vec<Option<Irreversible>>>,
     /// For each function, where it prints (directly or through a call), if it does.
     prints: Vec<Option<Span>>,
     diagnostics: Vec<Diagnostic>,
@@ -209,6 +213,46 @@ fn infer_reversibility(ast: &Ast, typed: &Typed) -> Vec<Option<Irreversible>> {
             let mut found = None;
             walk_block(ast, body, &mut |node| {
                 if found.is_none() {
+                    found = irreversible_op(ast, typed, &result, &outside, node);
+                }
+            });
+            if found.is_some() {
+                result[index] = found;
+                changed = true;
+            }
+        }
+        if !changed {
+            return result;
+        }
+    }
+}
+
+/// For each function, why a bra cannot undo it as a preparation (`spec/ownership.md` §12): the
+/// first thing it does that is not reversible, other than creating qubits and moving them out.
+/// Repeats until nothing changes, as for reversibility, since preparations can call each
+/// other.
+fn infer_preparable(ast: &Ast, typed: &Typed) -> Vec<Option<Irreversible>> {
+    let mut result: Vec<Option<Irreversible>> = vec![None; ast.all_fns().len()];
+    loop {
+        let mut changed = false;
+        for (index, decl) in ast.all_fns().iter().enumerate() {
+            if result[index].is_some() || typed.fns[index].sig.reversible != Reversible::Infer {
+                continue;
+            }
+            let Some(body) = decl.body else { continue };
+            let info = &typed.fns[index];
+            let outside: Vec<LocalId> = info
+                .self_local
+                .into_iter()
+                .chain(info.params.iter().copied())
+                .collect();
+            let mut found = None;
+            walk_block(ast, body, &mut |node| {
+                let creates = matches!(node, Node::Expr(id) if matches!(
+                    ast.expr(id).kind,
+                    ExprKind::Ket { .. } | ExprKind::Own { kind: OwnKind::Mv, .. }
+                ));
+                if found.is_none() && !creates {
                     found = irreversible_op(ast, typed, &result, &outside, node);
                 }
             });
@@ -285,7 +329,9 @@ fn irreversible_op(
             let expr = ast.expr(id);
             match expr.kind {
                 ExprKind::Ket { .. } => (expr.span, "it creates qubits".into()),
-                ExprKind::BraTest { .. } => (expr.span, "it measures qubits".into()),
+                ExprKind::BraTest { .. } | ExprKind::PrepTest { .. } => {
+                    (expr.span, "it measures qubits".into())
+                }
                 ExprKind::Expectation { .. } => {
                     (expr.span, "it computes an expectation value".into())
                 }
@@ -382,6 +428,13 @@ fn walk_expr(ast: &Ast, id: ExprId, visit: &mut dyn FnMut(Node)) {
         ExprKind::Own { place, .. } => children.push(place),
         ExprKind::Adj(call) => children.push(call),
         ExprKind::BraTest { operand, .. } => children.push(operand),
+        // The preparation is undone, not run, so only its arguments are evaluated here.
+        ExprKind::PrepTest { prep, operand } => {
+            if let ExprKind::Call { args, .. } = ast.expr(prep).kind {
+                children.extend(ast.list(args));
+            }
+            children.push(operand);
+        }
         ExprKind::Expectation {
             observable,
             precision,
@@ -885,6 +938,14 @@ impl Owner<'_> {
                 self.release(&carried);
                 Vec::new()
             }
+            ExprKind::PrepTest { prep, operand } => {
+                self.not_reversible(expr.span, "measuring");
+                self.preparation(prep);
+                self.undoable(prep);
+                let carried = self.expr(operand, Use::Value);
+                self.release(&carried);
+                Vec::new()
+            }
             ExprKind::Expectation {
                 prep,
                 observable,
@@ -1365,6 +1426,27 @@ impl Owner<'_> {
                     .into(),
             );
         }
+    }
+
+    /// N023: a bra's preparation is undone, so it must be reversible apart from creating its
+    /// qubits.
+    fn undoable(&mut self, prep: ExprId) {
+        let Some(Callee::Fn(f)) = self.typed.callees[prep.index()] else {
+            return;
+        };
+        let preparable = self
+            .preparable
+            .get_or_insert_with(|| infer_preparable(self.ast, self.typed));
+        let Some(why) = preparable[f.index()].clone() else {
+            return;
+        };
+        let name = self.ast.name(self.ast.function(f).name).to_string();
+        let span = self.ast.expr(prep).span;
+        self.error("N023", span, format!("`{name}` cannot be undone: {}", why.why))
+            .with_label_mut(why.span, "not reversible")
+            .help = Some(
+            "a bra's preparation may create qubits, but otherwise only do what a reversible function may".into(),
+        );
     }
 
     /// N020: a preparation is run many times, so its arguments must be classical.

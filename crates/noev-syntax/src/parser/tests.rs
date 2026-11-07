@@ -114,6 +114,7 @@ fn sexp(ast: &Ast, source: &str, id: ExprId) -> String {
         ExprKind::Binary { op, lhs, rhs } => format!("({} {} {})", op.as_str(), e(lhs), e(rhs)),
         ExprKind::Own { kind, place } => format!("({} {})", kind.as_str(), e(place)),
         ExprKind::Adj(call) => format!("(adj {})", e(call)),
+        ExprKind::PrepTest { prep, operand } => format!("(test {} {})", e(prep), e(operand)),
         ExprKind::BraTest { state, operand, .. } => {
             format!("(test {} {})", state.text(source), e(operand))
         }

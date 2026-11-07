@@ -361,13 +361,26 @@ impl<'p> Machine<'p> {
                         let value = value?;
                         for mut op in ops.into_iter().rev() {
                             op.adjoint = !op.adjoint;
-                            self.execute(op)?;
+                            self.emit(op)?;
                         }
                         value
                     } else {
                         self.call(*func, args)?
                     };
                     self.store(dest, value)?;
+                    next.index()
+                }
+                Terminator::Undo {
+                    func,
+                    args,
+                    target,
+                    next,
+                } => {
+                    let args = args
+                        .iter()
+                        .map(|a| self.operand(a))
+                        .collect::<Result<Vec<_>>>()?;
+                    self.undo(*func, args, target)?;
                     next.index()
                 }
                 Terminator::Assert { cond, next, span } => {
@@ -801,13 +814,7 @@ impl Machine<'_> {
                     controls: self.controls.clone(),
                     targets,
                 };
-                match self.recording.last_mut() {
-                    Some(recording) => {
-                        recording.push(op);
-                        Ok(())
-                    }
-                    None => self.execute(op),
-                }
+                self.emit(op)
             }
             Stmt::Measure { dest, qubit } => {
                 let qubit = self.qubit(qubit)?;
@@ -949,6 +956,66 @@ impl Machine<'_> {
                 self.store(dest, value)
             }
         }
+    }
+
+    /// Applies a gate, or records it when a function's gates are being collected (`adj`, a
+    /// bra's preparation).
+    fn emit(&mut self, op: Op) -> Result<()> {
+        match self.recording.last_mut() {
+            Some(recording) => {
+                recording.push(op);
+                Ok(())
+            }
+            None => self.execute(op),
+        }
+    }
+
+    /// `<ψ| x` with a preparation `ψ = func(args)`: collects the gates it would apply to the
+    /// qubits it creates, frees those (still \|0⟩, since nothing ran), and applies the gates
+    /// to `target`'s qubits in reverse, inverted (`spec/ownership.md` §12).
+    fn undo(&mut self, func: FuncId, args: Vec<Value>, target: &Place) -> Result<()> {
+        self.recording.push(Vec::new());
+        let made = self.call(func, args);
+        let ops = self.recording.pop().expect("pushed above");
+        let mut fresh = Vec::new();
+        made?.qubits(&mut fresh);
+        let mut given = Vec::new();
+        self.load(target)?.qubits(&mut given);
+        if fresh.len() != given.len() {
+            return Err(RuntimeError::new(format!(
+                "the preparation makes {} qubits, but {} are tested",
+                fresh.len(),
+                given.len()
+            )));
+        }
+        for &qubit in &fresh {
+            self.free_unused(qubit)?;
+        }
+        let onto = |q: &usize| {
+            let k = fresh.iter().position(|f| f == q).ok_or_else(|| {
+                RuntimeError::new("the preparation acts on a qubit it does not return")
+            })?;
+            Ok(given[k])
+        };
+        for mut op in ops.into_iter().rev() {
+            op.adjoint = !op.adjoint;
+            op.targets = op.targets.iter().map(onto).collect::<Result<_>>()?;
+            op.controls = op.controls.iter().map(onto).collect::<Result<_>>()?;
+            self.emit(op)?;
+        }
+        Ok(())
+    }
+
+    /// Frees a qubit known to be in \|0⟩ because nothing has acted on it.
+    fn free_unused(&mut self, qubit: usize) -> Result<()> {
+        match &mut self.mode {
+            Mode::Build(recording) => recording.free.push((qubit, false)),
+            Mode::Simulate => {
+                self.session()?.release(qubit).map_err(backend_error)?;
+                self.free.push(qubit);
+            }
+        }
+        Ok(())
     }
 
     /// A qubit in \|0⟩: a released one, or a new one added to the state.

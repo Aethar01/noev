@@ -1,0 +1,27 @@
+// A bra holding a preparation tests for the state it prepares: certainly true for that
+// state, certainly false for an orthogonal one.
+
+fn bell() -> [Qubit; 2] {
+    let r = |+0>
+    ctrl r[0] { r[1].x() }
+    mv r
+}
+
+fn other_bell() -> [Qubit; 2] {
+    let r = |+1>
+    ctrl r[0] { r[1].x() }
+    mv r
+}
+
+fn tilted(theta: Float) -> Qubit {
+    let q = |0>
+    q.ry(theta)
+    mv q
+}
+
+fn main() {
+    print(sample 100 { <bell()| bell() }, sample 100 { <bell()| other_bell() })
+    print(sample 100 { <tilted(1.2)| tilted(1.2) })
+    let q = tilted(Float::PI)
+    print(<1| mv q)
+}

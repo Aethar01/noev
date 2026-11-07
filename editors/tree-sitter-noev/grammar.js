@@ -41,6 +41,8 @@ module.exports = grammar({
     [$._contextual_name, $.ownership],
     // `<s| x`: a measurement test, unless a ket follows and makes it an expectation value.
     [$.measurement_test, $._observable],
+    // `<bell()| x`: the same, with a preparation in the bra.
+    [$.preparation_test, $._observable],
     [$._contextual_name, $.with_expression],
     [$._contextual_name, $.ctrl_expression],
   ],
@@ -278,6 +280,7 @@ module.exports = grammar({
         $.ownership_expression,
         $.adj_expression,
         $.measurement_test,
+        $.preparation_test,
         $._postfix,
       ),
 
@@ -316,6 +319,15 @@ module.exports = grammar({
 
     // The operand is unary, so `<1| mv q and ok` is `(<1| mv q) and ok`.
     measurement_test: ($) => seq($.bra, $._unary_like),
+
+    // `<bell()| mv pair`: a measurement test against the state a preparation makes.
+    preparation_test: ($) =>
+      seq(
+        choice('<', $._line_start_angle),
+        field('preparation', $._postfix),
+        '|',
+        $._unary_like,
+      ),
 
     _postfix: ($) =>
       choice(
@@ -415,18 +427,22 @@ module.exports = grammar({
 
     array_repeat_expression: ($) => seq('[', $._expression, ';', $._expression, ']'),
 
-    // `<ψ| H |ψ>`, and `<+| H |+>` with a bra and a ket.
+    // `<ψ| H |ψ>`, and `<+| H |+>` with a bra and a ket. Preferred to a preparation test
+    // followed by `|`, as a bra is.
     expectation: ($) =>
-      prec.right(
-        seq(
-          choice('<', $._line_start_angle),
-          field('preparation', $._postfix),
-          '|',
-          field('observable', $._observable),
-          '|',
-          $._postfix,
-          '>',
-          optional($.within),
+      prec.dynamic(
+        1,
+        prec.right(
+          seq(
+            choice('<', $._line_start_angle),
+            field('preparation', $._postfix),
+            '|',
+            field('observable', $._observable),
+            '|',
+            $._postfix,
+            '>',
+            optional($.within),
+          ),
         ),
       ),
 

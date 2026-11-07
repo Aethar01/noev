@@ -531,6 +531,28 @@ The arguments of a preparation must be classical (copyable) values: no qubits, n
 no `mut` lends. A ket literal is always repeatable. Expectation values are not allowed in a
 reversible context (N013).
 
+A measurement test can hold a preparation too: `<bell()| mv pair` measures `pair` and is
+`true` when it was found in the state `bell()` prepares, with probability |⟨ψ|x⟩|² as for a
+ket's labels ([types.md](types.md) §3). The compiler undoes the preparation on `x`, applying
+its operations in reverse order, each inverted, and then tests every qubit for \|0⟩. So the
+preparation must be **reversible apart from creating its qubits**: it may create qubits with
+kets and move them out, but otherwise only do what a reversible function may (§7), and call
+only reversible functions or other such preparations. Its arguments are classical, as for an
+expectation value (N020), and it must give a `Qubit` or `[Qubit; N]`, the type of `x`.
+
+### N023: a bra's preparation is not reversible
+
+```noev
+fn noisy() -> Qubit {
+    let q = |0>
+    let coin = |+>
+    if mv coin.measure() == 1 { q.x() }
+    mv q
+}
+
+let hit = <noisy()| mv q     // error[N023]: `noisy` cannot be undone: it measures qubits
+```
+
 The same rule holds for the block of `sample` ([execution.md](execution.md) §3), which runs
 many times. Each run is given a copy of the classical values it reads from the code around
 it, so it may read them, but not use qubits from outside it, change outside variables, or
@@ -617,3 +639,4 @@ linear value's every case is handled, and its qubits consumed, on every path.
 | N020 | A repeated run is not repeatable                   |
 | N021 | A `circuit fn` is not a circuit ([execution.md](execution.md) §4) |
 | N022 | A repeated run prints ([execution.md](execution.md) §3) |
+| N023 | A bra's preparation is not reversible (§12)        |

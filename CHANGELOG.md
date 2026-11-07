@@ -34,6 +34,9 @@ before 1.0.
   length); values that fit in 64 bits stay machine integers. `/` truncates and `%` takes the
   dividend's sign; bitwise operators act as on endless two's complement. Converting a
   `Float` to an `Int` is exact (it used to saturate), and NaN or an infinity is an error.
+- A bra can hold a preparation: `<bell()| mv pair` is `true` when `pair` was in the state
+  `bell()` makes, undoing `bell()` on it and testing for \|0⟩. The preparation must be
+  reversible apart from creating its qubits (N023).
 - Type aliases: `type Byte = [Bit; 8]` is another name for the same type, including its
   variants, associated functions and literals for a struct or enum.
 - Kets and bras for the Y basis: `(+i)` and `(-i)`, a label in parentheses being one qubit
@@ -43,6 +46,8 @@ before 1.0.
 
 ### Compiler
 
+- `adj` of a function that itself calls `adj` inverts in the right order; the inner inverse
+  used to be applied at once.
 - Runtime errors in compound assignments (`d /= 0`) point at the statement.
 - A `match` on measurement results is classical control in the circuit, as an `if` is: one
   `if` per test its patterns make, and none for a test an enclosing one already decided.

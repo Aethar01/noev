@@ -512,7 +512,10 @@ fn infer_quantum(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<bool> {
 /// expectation values start runs of their own, so they are not.
 fn is_quantum_op(ast: &Ast, typed: &Typed, quantum: &[bool], e: ExprId) -> bool {
     match ast.expr(e).kind {
-        ExprKind::Ket { .. } | ExprKind::BraTest { .. } | ExprKind::Ctrl { .. } => true,
+        ExprKind::Ket { .. }
+        | ExprKind::BraTest { .. }
+        | ExprKind::PrepTest { .. }
+        | ExprKind::Ctrl { .. } => true,
         ExprKind::Call { .. } | ExprKind::MethodCall { .. } => match typed.callees[e.index()] {
             Some(Callee::Builtin(
                 Builtin::Gate(_)
@@ -604,6 +607,12 @@ fn children(ast: &Ast, node: Node, out: &mut Vec<Node>) {
                 ExprKind::Own { place, .. } => push(place),
                 ExprKind::Adj(call) => push(call),
                 ExprKind::BraTest { operand, .. } => push(operand),
+                ExprKind::PrepTest { prep, operand } => {
+                    if let ExprKind::Call { args, .. } = ast.expr(prep).kind {
+                        ast.list(args).iter().for_each(|&a| push(a));
+                    }
+                    push(operand);
+                }
                 ExprKind::Expectation {
                     observable,
                     precision,
@@ -1083,6 +1092,18 @@ impl<'a> Walker<'a> {
                 false
             }
             ExprKind::BraTest { operand, .. } => {
+                self.expr(operand, before);
+                true
+            }
+            // The preparation's arguments choose gates, as a gate's angle does.
+            ExprKind::PrepTest { prep, operand } => {
+                if let ExprKind::Call { args, .. } = ast.expr(prep).kind {
+                    for &arg in ast.list(args) {
+                        if self.expr(arg, before) && before {
+                            self.violate(ast.expr(arg).span, "used to choose a bra's preparation");
+                        }
+                    }
+                }
                 self.expr(operand, before);
                 true
             }

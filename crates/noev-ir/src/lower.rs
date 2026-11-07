@@ -409,6 +409,7 @@ fn successors(term: &Terminator) -> impl Iterator<Item = Block> {
     let (a, b) = match *term {
         Terminator::Goto(next)
         | Terminator::Call { next, .. }
+        | Terminator::Undo { next, .. }
         | Terminator::Assert { next, .. } => (Some(next), None),
         Terminator::Branch {
             then, otherwise, ..
@@ -422,6 +423,7 @@ fn successors_mut(term: &mut Terminator) -> Vec<&mut Block> {
     match term {
         Terminator::Goto(next)
         | Terminator::Call { next, .. }
+        | Terminator::Undo { next, .. }
         | Terminator::Assert { next, .. } => vec![next],
         Terminator::Branch {
             then,
@@ -1073,9 +1075,33 @@ impl Builder<'_> {
                 let b = self.operand(rhs);
                 self.set(&dest, Rvalue::Binary(op, a, b));
             }
+            ExprKind::PrepTest { prep, operand } => {
+                let (ExprKind::Call { args, .. }, Some(Callee::Fn(f))) =
+                    (ast.expr(prep).kind, self.typed.callees[prep.index()])
+                else {
+                    unreachable!("checked: a call to a preparation")
+                };
+                let args = ast.list(args).iter().map(|&a| self.operand(a)).collect();
+                let target = self.qubit_place(operand);
+                let next = self.new_block();
+                self.terminate_into(
+                    Terminator::Undo {
+                        func: FuncId(f.index() as u32),
+                        args,
+                        target: target.clone(),
+                        next,
+                    },
+                    next,
+                );
+                // Undone, the qubits are all |0⟩ exactly when they held the state.
+                let qubits = self.types.qubit_count(self.types.deref(self.ty(operand)));
+                let zeros = "0".repeat(qubits.unwrap_or(1) as usize);
+                self.bra_test(&zeros, target, dest);
+            }
             ExprKind::BraTest { state, operand, .. } => {
                 let state = &self.text(state)[1..state.len() as usize - 1];
-                self.bra_test(state, operand, dest);
+                let base = self.qubit_place(operand);
+                self.bra_test(state, base, dest);
             }
             ExprKind::Expectation {
                 prep,
@@ -1226,9 +1252,8 @@ impl Builder<'_> {
         }
     }
 
-    /// `<s| x`: measure each qubit in its label's basis and compare.
-    fn bra_test(&mut self, state: &str, operand: ExprId, dest: Option<Place>) {
-        let base = self.qubit_place(operand);
+    /// `<s| x`, with `x` at `base`: measure each qubit in its label's basis and compare.
+    fn bra_test(&mut self, state: &str, base: Place, dest: Option<Place>) {
         let array = labels(state).count() > 1;
         let mut result: Option<Operand> = None;
         for (k, label) in labels(state).enumerate() {

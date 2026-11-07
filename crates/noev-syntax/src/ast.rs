@@ -404,6 +404,14 @@ pub enum ExprKind {
         /// The value measured.
         operand: ExprId,
     },
+    /// `<ψ| x`: a measurement test against the state a preparation makes, by undoing it on
+    /// `x` and testing for all zeros (`spec/ownership.md` §12).
+    PrepTest {
+        /// The preparation: a call.
+        prep: ExprId,
+        /// The value measured.
+        operand: ExprId,
+    },
     /// `<ψ| observable |ψ>`: an expectation value. Both sides were checked to be the same
     /// preparation, so only one is kept.
     Expectation {
