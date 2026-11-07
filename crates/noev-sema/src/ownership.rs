@@ -332,6 +332,7 @@ fn irreversible_op(
                 ExprKind::BraTest { .. } | ExprKind::PrepTest { .. } => {
                     (expr.span, "it measures qubits".into())
                 }
+                ExprKind::Overlap { .. } => (expr.span, "it computes an amplitude".into()),
                 ExprKind::Expectation { .. } => {
                     (expr.span, "it computes an expectation value".into())
                 }
@@ -452,6 +453,11 @@ fn walk_expr(ast: &Ast, id: ExprId, visit: &mut dyn FnMut(Node)) {
             precision,
             ..
         } => children.extend([observable].into_iter().chain(precision)),
+        ExprKind::Overlap {
+            observable,
+            precision,
+            ..
+        } => children.extend(observable.into_iter().chain(precision)),
         // The body is a run of its own.
         ExprKind::Sample { shots, .. } => children.push(shots),
         ExprKind::Block(b) | ExprKind::Unsafe(b) => blocks.push(b),
@@ -959,6 +965,29 @@ impl Owner<'_> {
                 self.undoable(prep);
                 let carried = self.expr(operand, Use::Value);
                 self.release(&carried);
+                Vec::new()
+            }
+            ExprKind::Overlap {
+                bra,
+                ket,
+                observable,
+                precision,
+            } => {
+                if self.not_reversible(expr.span, "computing an amplitude") {
+                    return Vec::new();
+                }
+                // Both sides are undone or run controlled, many times (`spec/types.md` §3).
+                for prep in [bra, ket] {
+                    self.preparation(prep);
+                    self.undoable(prep);
+                    self.repeated_run_prints(prep, "an amplitude");
+                }
+                if let Some(observable) = observable {
+                    self.expr(observable, Use::Read);
+                }
+                if let Some(precision) = precision {
+                    self.expr(precision, Use::Read);
+                }
                 Vec::new()
             }
             ExprKind::Expectation {

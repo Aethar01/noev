@@ -214,6 +214,11 @@ pub trait Session {
         None
     }
 
+    /// The amplitude of the basis state with every qubit in \|0⟩, as (real, imaginary) parts.
+    fn zero_amplitude(&self) -> Option<Result<(f64, f64), BackendError>> {
+        None
+    }
+
     /// Samples the current state `shots` times without changing it, returning how often each
     /// outcome of `qubits` occurred, `qubits[k]` at bit `k`.
     fn sample(&mut self, _qubits: &[usize], _shots: usize) -> Option<Counts> {

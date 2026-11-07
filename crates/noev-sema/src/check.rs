@@ -1447,6 +1447,32 @@ impl Checker<'_> {
                 }
                 Ty::BOOL
             }
+            ExprKind::Overlap {
+                bra,
+                ket,
+                observable,
+                precision,
+            } => {
+                if let Some(precision) = precision {
+                    self.expr(precision, Expect::Ty(Ty::FLOAT));
+                }
+                let bra_ty = self.preparation_type(bra);
+                let ket_ty = self.preparation_type(ket);
+                if let (Some(a), Some(b)) = (bra_ty, ket_ty)
+                    && a != b
+                {
+                    let message = format!(
+                        "both sides must prepare the same qubits: {} and {}",
+                        self.show(a),
+                        self.show(b)
+                    );
+                    self.error(expr.span, message);
+                }
+                if let Some(observable) = observable {
+                    self.expr(observable, Expect::Ty(Ty::OBSERVABLE));
+                }
+                Ty::COMPLEX
+            }
             ExprKind::Expectation {
                 prep,
                 observable,
@@ -1971,6 +1997,30 @@ impl Checker<'_> {
             qubits = qubits.zip(count).map(|(a, b)| a + b);
         }
         qubits
+    }
+
+    /// The type a side of an amplitude prepares, if it is a preparation: fixed labels, or a
+    /// call to a function that gives a `Qubit` or `[Qubit; N]`.
+    fn preparation_type(&mut self, prep: ExprId) -> Option<Ty> {
+        let ty = self.expr(prep, Expect::None);
+        if self.t.types.is_wildcard(ty) {
+            return None;
+        }
+        let qubits =
+            ty == Ty::QUBIT || matches!(*self.t.types.kind(ty), TyKind::Array(Ty::QUBIT, _));
+        let shape = match self.ast.expr(prep).kind {
+            ExprKind::Ket { .. } => true,
+            _ => matches!(self.t.callees[prep.index()], Some(Callee::Fn(_))),
+        };
+        if qubits && shape {
+            return Some(ty);
+        }
+        let span = self.ast.expr(prep).span;
+        self.error(
+            span,
+            "a preparation is a ket's labels, or a call to a function that prepares a `Qubit` or `[Qubit; N]`",
+        );
+        None
     }
 
     /// An integer literal: `value`, or one too large for a `u64`. It is the sized integer or

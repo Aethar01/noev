@@ -418,8 +418,8 @@ let zero = <+| Z(0) |+>
 ```
 
 `ψ` is a **preparation**: a function call or a ket literal, which the runtime may evaluate
-many times. Both sides must be the same expression (transition amplitudes `<φ| H |ψ>` are not
-supported). The observable is an expression whose top level contains no `|` and no
+many times. With the same expression on both sides it is an expectation value; with
+different ones, a transition value (below). The observable is an expression whose top level contains no `|` and no
 comparison, so the `|` and `>` that close it are unambiguous. Inside the closing ket, `|`
 always starts the preparation, even after an operand.
 
@@ -429,7 +429,11 @@ test, and the expression must be a single operand (`<1| mv q`), so `<1| mv q and
 `(<1| mv q) and ok`. A `<` that does not form a bra literal, in operand position, starts a
 bra holding a preparation, which is told apart the same way: `<bell()| Z(0) |bell()>` is an
 expectation value, and `<bell()| mv pair` a measurement test against `bell()`'s state
-([ownership.md](ownership.md) §12).
+([ownership.md](ownership.md) §12). A bra followed directly by a ket, `<φ|ψ>`, is an
+amplitude, and different preparations on the two sides of `<φ| H |ψ>` make a transition
+value ([types.md](types.md) §3); `ψ` may be a call or labels (`<bell()|00>`, `<0|+>`).
+Since an expectation value or amplitude ends with `>`, a method call may follow it directly:
+`<ψ| H |ψ>.round()`, `<φ|ψ>.abs()`.
 
 `within ε` after an expectation value asks for a standard error of at most `ε` when the value
 is estimated ([types.md](types.md) §3). `ε` is a unary expression, so

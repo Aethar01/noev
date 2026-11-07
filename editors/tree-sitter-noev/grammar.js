@@ -43,6 +43,8 @@ module.exports = grammar({
     [$.measurement_test, $._observable],
     // `<bell()| x`: the same, with a preparation in the bra.
     [$.preparation_test, $._observable],
+    // `<0|bell()>`: an amplitude, unless the `>` compares a measurement test.
+    [$._postfix, $.amplitude],
     [$._contextual_name, $.with_expression],
     [$._contextual_name, $.ctrl_expression],
   ],
@@ -387,6 +389,7 @@ module.exports = grammar({
         $.array_repeat_expression,
         $.expectation,
         $.bra_expectation,
+        $.amplitude,
         $.if_expression,
         $.while_expression,
         $.for_expression,
@@ -451,7 +454,38 @@ module.exports = grammar({
     bra_expectation: ($) =>
       prec.dynamic(
         1,
-        prec.right(seq($.bra, field('observable', $._observable), $.ket, optional($.within))),
+        prec.right(
+          seq(
+            $.bra,
+            field('observable', $._observable),
+            // `|1>`, or `|prep()>` for a transition value to a preparation.
+            choice($.ket, seq('|', field('ket', $._postfix), '>')),
+            optional($.within),
+          ),
+        ),
+      ),
+
+    // `<0|+>`, `<bell()|00>`, `<00|bell()>`, `<φ|ψ>`: an amplitude.
+    amplitude: ($) =>
+      prec.dynamic(
+        2,
+        prec.right(
+          seq(
+            choice(
+              $.bra_ket,
+              seq(choice('<', $._line_start_angle), field('bra', $._postfix), $.ket),
+              seq($.bra, field('ket', $.call_expression), '>'),
+              seq(
+                choice('<', $._line_start_angle),
+                field('bra', $._postfix),
+                '|',
+                field('ket', $.call_expression),
+                '>',
+              ),
+            ),
+            optional($.within),
+          ),
+        ),
       ),
 
     within: ($) => seq('within', $._unary_like),
@@ -561,6 +595,9 @@ module.exports = grammar({
 
 
     bra: (_) => token(seq('<', /([01+\-]|\([+\-]i\)|\{([^{}]|\{[^{}]*\})*\})+/, '|')),
+
+    // `<0|+>`: fixed labels on both sides, one token, as a bra and a ket would be.
+    bra_ket: (_) => token(seq('<', /([01+\-]|\([+\-]i\))+/, '|', /([01+\-]|\([+\-]i\))+/, '>')),
 
     string: ($) =>
       seq(

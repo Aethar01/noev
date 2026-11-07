@@ -421,6 +421,18 @@ pub enum ExprKind {
         /// The value measured.
         operand: ExprId,
     },
+    /// `<φ|ψ>` (no observable), an amplitude, or `<φ| H |ψ>` with different preparations, a
+    /// transition value: a `Complex` (`spec/types.md` §3).
+    Overlap {
+        /// The bra's preparation: a ket expression or a call.
+        bra: ExprId,
+        /// The ket's preparation.
+        ket: ExprId,
+        /// The observable, for a transition value.
+        observable: Option<ExprId>,
+        /// The standard error wanted of each part when estimated (`within`).
+        precision: Option<ExprId>,
+    },
     /// `<ψ| observable |ψ>`: an expectation value. Both sides were checked to be the same
     /// preparation, so only one is kept.
     Expectation {

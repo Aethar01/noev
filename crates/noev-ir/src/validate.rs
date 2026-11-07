@@ -107,6 +107,27 @@ pub fn validate(program: &Program) -> Vec<String> {
                     Stmt::Print { args, .. } => args
                         .iter()
                         .for_each(|(op, _)| check_operand(op, &mut report)),
+                    Stmt::Overlap {
+                        dest,
+                        bra,
+                        ket,
+                        observable,
+                        precision,
+                    } => {
+                        check_place(dest, &mut report);
+                        observable
+                            .iter()
+                            .for_each(|o| check_operand(o, &mut report));
+                        precision.iter().for_each(|p| check_operand(p, &mut report));
+                        for prep in [bra, ket] {
+                            if let Prep::Call(func, args) = prep {
+                                if func.index() >= program.functions.len() {
+                                    report(format!("unknown function {}", func.0));
+                                }
+                                args.iter().for_each(|a| check_operand(a, &mut report));
+                            }
+                        }
+                    }
                     Stmt::Expectation {
                         dest,
                         prep,

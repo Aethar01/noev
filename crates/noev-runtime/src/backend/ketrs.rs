@@ -185,6 +185,16 @@ impl Session for KetrsSession {
         Some(self.state.expectation(&sum).map_err(sim_error))
     }
 
+    fn zero_amplitude(&self) -> Option<Result<(f64, f64), BackendError>> {
+        // With no qubits the state is the number 1.
+        let zero = self
+            .state
+            .amplitudes()
+            .first()
+            .map_or((1.0, 0.0), |a| (a.re, a.im));
+        Some(Ok(zero))
+    }
+
     fn sample(&mut self, qubits: &[usize], shots: usize) -> Option<Counts> {
         let mut counts: BTreeMap<u64, usize> = BTreeMap::new();
         for (index, count) in self.state.sample_counts(shots, &mut self.rng) {

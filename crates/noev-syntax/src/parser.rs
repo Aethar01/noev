@@ -1217,8 +1217,20 @@ impl Parser<'_> {
                 }
                 self.push(ExprKind::Adj(call), start)
             }
-            Bra => self.bra(),
-            Lt => self.expectation(),
+            // An expectation value or amplitude ends with `>`, so `.re()` may follow it.
+            Bra | Lt => {
+                let expr = if self.at(Bra) {
+                    self.bra()
+                } else {
+                    self.expectation()
+                };
+                match self.ast.expr(expr).kind {
+                    ExprKind::Expectation { .. } | ExprKind::Overlap { .. } => {
+                        self.postfix_from(expr)
+                    }
+                    _ => expr,
+                }
+            }
             _ => self.postfix(),
         }
     }
@@ -1331,8 +1343,13 @@ impl Parser<'_> {
     }
 
     fn postfix(&mut self) -> ExprId {
+        let expr = self.primary();
+        self.postfix_from(expr)
+    }
+
+    /// Field accesses, indexing and calls after `expr`.
+    fn postfix_from(&mut self, mut expr: ExprId) -> ExprId {
         use TokenKind::*;
-        let mut expr = self.primary();
         let start = self.span_of(expr);
         loop {
             match self.kind() {
@@ -1697,7 +1714,21 @@ impl Parser<'_> {
     /// `<s| observable |s>`.
     fn bra(&mut self) -> ExprId {
         let bra = self.bump().span;
+        // `<0|+>`: a ket's labels straight after, so an amplitude.
+        if let Some(end) = self.ket_rest(bra.end as usize) {
+            let ket_span = Span::new(bra.end - 1, end);
+            self.skip_to(end);
+            let bra_prep = self.state_prep(bra);
+            let ket = self.state_prep(ket_span);
+            return self.overlap(bra_prep, ket, None, bra);
+        }
         let operand = self.binary(PREC_BIT_XOR);
+        // `<0|bell()>`.
+        if self.at(TokenKind::Gt) && matches!(self.ast.expr(operand).kind, ExprKind::Call { .. }) {
+            self.bump();
+            let bra_prep = self.state_prep(bra);
+            return self.overlap(bra_prep, operand, None, bra);
+        }
         if !self.at(TokenKind::Pipe) {
             if let ExprKind::Binary { op, .. } = self.ast.expr(operand).kind {
                 let span = self.span_of(operand);
@@ -1718,38 +1749,28 @@ impl Parser<'_> {
                 bra,
             );
         }
+        // `<0| H |prep()>`: a transition value to a preparation.
+        if self.ket_rest(self.span().end as usize).is_none() {
+            self.bump();
+            let ket = self.postfix();
+            self.expect(TokenKind::Gt, "`>` to close the transition value");
+            let bra_prep = self.state_prep(bra);
+            return self.overlap(bra_prep, ket, Some(operand), bra);
+        }
         let ket = self.closing_ket();
         let source = self.source;
         let bra_state = &source[bra.start as usize + 1..bra.end as usize - 1];
-        let computed = bra_state.contains('{');
-        if computed {
-            self.error(bra, "an expectation value takes only fixed labels for now")
-                .with_help_mut("prepare the state in a function, as in `<prep(b)| H |prep(b)>`");
-        }
+        // `<0| H |1>`: a transition value.
         if let Some(ket) = ket {
             let ket_state = &source[ket.start as usize + 1..ket.end as usize - 1];
             if bra_state != ket_state {
-                self.error(
-                    ket,
-                    "both sides of an expectation value must be the same state",
-                )
-                .with_label_mut(bra, "the bra")
-                .with_help_mut(format!("write `|{bra_state}>`"));
+                let bra_prep = self.state_prep(bra);
+                let ket_prep = self.state_prep(ket);
+                return self.overlap(bra_prep, ket_prep, Some(operand), bra);
             }
         }
         let prep_span = ket.unwrap_or(bra);
-        let kind = if computed {
-            ExprKind::Error
-        } else {
-            ExprKind::Ket {
-                qubits: self.qubits(prep_span),
-                parts: List::default(),
-            }
-        };
-        let prep = self.ast.push_expr(Expr {
-            kind,
-            span: prep_span,
-        });
+        let prep = self.state_prep(prep_span);
         let precision = self.within();
         self.push(
             ExprKind::Expectation {
@@ -1759,6 +1780,58 @@ impl Parser<'_> {
             },
             bra,
         )
+    }
+
+    /// The labels of a bra or ket at `span` as a preparation, a ket expression; computed
+    /// labels are reported, since a preparation is run many times.
+    fn state_prep(&mut self, span: Span) -> ExprId {
+        let text = self.text(span);
+        let kind = if text.contains('{') {
+            self.error(span, "a preparation takes only fixed labels for now")
+                .with_help_mut("prepare the state in a function, as in `<prep(b)| H |prep(b)>`");
+            ExprKind::Error
+        } else {
+            ExprKind::Ket {
+                qubits: self.qubits(span),
+                parts: List::default(),
+            }
+        };
+        self.ast.push_expr(Expr { kind, span })
+    }
+
+    /// `<φ|ψ>` or `<φ| H |ψ>` with different sides, and its `within`, starting at `start`.
+    fn overlap(
+        &mut self,
+        bra: ExprId,
+        ket: ExprId,
+        observable: Option<ExprId>,
+        start: Span,
+    ) -> ExprId {
+        let precision = self.within();
+        self.push(
+            ExprKind::Overlap {
+                bra,
+                ket,
+                observable,
+                precision,
+            },
+            start,
+        )
+    }
+
+    /// The end of a ket's labels and `>` starting at byte `start`, if the source has them
+    /// there: what closes `<φ|` in `<φ|00>`.
+    fn ket_rest(&self, start: usize) -> Option<u32> {
+        let bytes = self.source.as_bytes();
+        let len = crate::state::scan(bytes.get(start..)?);
+        (len > 0 && bytes.get(start + len) == Some(&b'>')).then_some((start + len + 1) as u32)
+    }
+
+    /// Skips the tokens before byte `end`, which a ket read from the source covers.
+    fn skip_to(&mut self, end: u32) {
+        while self.span().start < end && !self.at(TokenKind::Eof) {
+            self.bump();
+        }
     }
 
     /// `within ε` after an expectation value.
@@ -1844,8 +1917,23 @@ impl Parser<'_> {
         let bra_tokens = self.pos;
         let prep = self.postfix();
         let bra_end = self.pos;
+        // `<bell()|00>`: an amplitude, with the ket's labels read from the source.
+        if self.at(TokenKind::Pipe)
+            && let Some(end) = self.ket_rest(self.span().end as usize)
+        {
+            let ket_span = Span::new(self.span().start, end);
+            self.skip_to(end);
+            let ket = self.state_prep(ket_span);
+            return self.overlap(prep, ket, None, start);
+        }
         self.expect(TokenKind::Pipe, "`|` after the preparation");
         let observable = self.binary(PREC_BIT_XOR);
+        // `<φ|ψ>`: an amplitude.
+        if self.at(TokenKind::Gt) && matches!(self.ast.expr(observable).kind, ExprKind::Call { .. })
+        {
+            self.bump();
+            return self.overlap(prep, observable, None, start);
+        }
         // No closing ket: `<bell()| mv pair`, a measurement test against the preparation.
         if !self.at(TokenKind::Pipe) {
             if let ExprKind::Binary { op, .. } = self.ast.expr(observable).kind {
@@ -1875,13 +1963,9 @@ impl Parser<'_> {
                 let (a, b) = (self.tokens[bra_tokens + i], self.tokens[ket_tokens + i]);
                 a.kind == b.kind && self.text(a.span) == self.text(b.span)
             });
+        // Different preparations: a transition value.
         if !same {
-            let (bra_span, ket_span) = (self.span_of(prep), self.span_of(ket));
-            self.error(
-                ket_span,
-                "both sides of an expectation value must be the same preparation",
-            )
-            .with_label_mut(bra_span, "the bra's preparation");
+            return self.overlap(prep, ket, Some(observable), start);
         }
         let precision = self.within();
         self.push(
@@ -2140,17 +2224,11 @@ impl Parser<'_> {
 /// In-place builders, for adding to a diagnostic after it has been pushed.
 trait DiagnosticExt {
     fn with_help_mut(&mut self, help: impl Into<String>) -> &mut Self;
-    fn with_label_mut(&mut self, span: Span, message: impl Into<String>) -> &mut Self;
 }
 
 impl DiagnosticExt for Diagnostic {
     fn with_help_mut(&mut self, help: impl Into<String>) -> &mut Self {
         self.help = Some(help.into());
-        self
-    }
-
-    fn with_label_mut(&mut self, span: Span, message: impl Into<String>) -> &mut Self {
-        self.labels.push((span, message.into()));
         self
     }
 }

@@ -932,6 +932,43 @@ impl Machine<'_> {
                 }
                 Ok(())
             }
+            Stmt::Overlap {
+                dest,
+                bra,
+                ket,
+                observable,
+                precision,
+            } => {
+                let observable = match observable {
+                    Some(o) => match self.operand(o)? {
+                        Value::Observable(observable) => Some(observable),
+                        _ => return Err(RuntimeError::new("expected an observable")),
+                    },
+                    None => None,
+                };
+                let precision = self.precision(precision.as_ref())?;
+                let bra_args = self.prep_args(bra)?;
+                let ket_args = self.prep_args(ket)?;
+                let value = self.repeated_run(|m| {
+                    let seed = m.rng.random();
+                    let sides = Sides {
+                        bra,
+                        bra_args,
+                        ket,
+                        ket_args,
+                    };
+                    let (re, im) = overlap(
+                        m.program,
+                        m.backend,
+                        &sides,
+                        observable.as_ref(),
+                        precision,
+                        seed,
+                    )?;
+                    Ok(Value::Complex(re, im))
+                })?;
+                self.store(dest, value)
+            }
             Stmt::Expectation {
                 dest,
                 prep,
@@ -972,6 +1009,52 @@ impl Machine<'_> {
                 })?;
                 self.store(dest, value)
             }
+        }
+    }
+
+    /// Applies a Pauli product to `qubits` (indices into them), each gate controlled by
+    /// `control` if given.
+    fn paulis(
+        &mut self,
+        product: &[(usize, Pauli)],
+        qubits: &[usize],
+        control: Option<usize>,
+    ) -> Result<()> {
+        for &(index, pauli) in product {
+            let qubit = *qubits.get(index).ok_or_else(|| {
+                RuntimeError::new(format!("the observable's qubit {index} is not prepared"))
+            })?;
+            let gate = match pauli {
+                Pauli::X => Gate::X,
+                Pauli::Y => Gate::Y,
+                Pauli::Z => Gate::Z,
+            };
+            let mut op = gate_op(gate, false, qubit);
+            op.controls.extend(control);
+            self.emit(op)?;
+        }
+        Ok(())
+    }
+
+    /// A `within` precision, or the default; it must be positive.
+    fn precision(&self, precision: Option<&Operand>) -> Result<f64> {
+        let precision = match precision {
+            Some(p) => self.float(p)?,
+            None => DEFAULT_PRECISION,
+        };
+        if !(precision > 0.0 && precision.is_finite()) {
+            return Err(RuntimeError::new(format!(
+                "a precision must be positive, not {precision}"
+            )));
+        }
+        Ok(precision)
+    }
+
+    /// The classical arguments of a preparation.
+    fn prep_args(&self, prep: &Prep) -> Result<Vec<Value>> {
+        match prep {
+            Prep::Ket(_) => Ok(Vec::new()),
+            Prep::Call(_, args) => args.iter().map(|a| self.operand(a)).collect(),
         }
     }
 
@@ -1021,40 +1104,75 @@ impl Machine<'_> {
         }
     }
 
-    /// `<ψ| x` with a preparation `ψ = func(args)`: collects the gates it would apply to the
-    /// qubits it creates, frees those (still \|0⟩, since nothing ran), and applies the gates
-    /// to `target`'s qubits in reverse, inverted (`spec/ownership.md` §12).
+    /// `<ψ| x` with a preparation `ψ = func(args)`: undoes it on `target`'s qubits
+    /// (`spec/ownership.md` §12).
     fn undo(&mut self, func: FuncId, args: Vec<Value>, target: &Place) -> Result<()> {
-        self.recording.push(Vec::new());
-        let made = self.call(func, args);
-        let ops = self.recording.pop().expect("pushed above");
-        let mut fresh = Vec::new();
-        made?.qubits(&mut fresh);
         let mut given = Vec::new();
         self.load(target)?.qubits(&mut given);
-        if fresh.len() != given.len() {
-            return Err(RuntimeError::new(format!(
-                "the preparation makes {} qubits, but {} are tested",
-                fresh.len(),
-                given.len()
-            )));
-        }
-        for &qubit in &fresh {
+        self.unprepare(&Prep::Call(func, Vec::new()), args, &given, None)
+    }
+
+    /// The gates a preparation would apply to the qubits it creates, without applying them;
+    /// the qubits, still \|0⟩, are freed. Returns the qubits it made, in order, and the gates.
+    fn record_prep(&mut self, prep: &Prep, args: Vec<Value>) -> Result<(Vec<usize>, Vec<Op>)> {
+        self.recording.push(Vec::new());
+        let made = self.prepare(prep, args);
+        let ops = self.recording.pop().expect("pushed above");
+        let made = made?;
+        for &qubit in &made {
             self.free_unused(qubit)?;
         }
-        let onto = |q: &usize| {
-            let k = fresh.iter().position(|f| f == q).ok_or_else(|| {
+        Ok((made, ops))
+    }
+
+    /// Applies `ops`, recorded on the qubits `from`, to the qubits `onto` instead: in reverse
+    /// and inverted when `inverse`, and each also controlled by `control` if given.
+    fn replay(
+        &mut self,
+        ops: Vec<Op>,
+        from: &[usize],
+        onto: &[usize],
+        inverse: bool,
+        control: Option<usize>,
+    ) -> Result<()> {
+        if from.len() != onto.len() {
+            return Err(RuntimeError::new(format!(
+                "the preparation makes {} qubits, but there are {}",
+                from.len(),
+                onto.len()
+            )));
+        }
+        let map = |q: &usize| {
+            let k = from.iter().position(|f| f == q).ok_or_else(|| {
                 RuntimeError::new("the preparation acts on a qubit it does not return")
             })?;
-            Ok(given[k])
+            Ok(onto[k])
         };
-        for mut op in ops.into_iter().rev() {
-            op.adjoint = !op.adjoint;
-            op.targets = op.targets.iter().map(onto).collect::<Result<_>>()?;
-            op.controls = op.controls.iter().map(onto).collect::<Result<_>>()?;
+        let ops: Vec<Op> = if inverse {
+            ops.into_iter().rev().collect()
+        } else {
+            ops
+        };
+        for mut op in ops {
+            op.adjoint ^= inverse;
+            op.targets = op.targets.iter().map(map).collect::<Result<_>>()?;
+            op.controls = op.controls.iter().map(map).collect::<Result<_>>()?;
+            op.controls.extend(control);
             self.emit(op)?;
         }
         Ok(())
+    }
+
+    /// Undoes `prep` on the qubits `onto`, controlled by `control` if given.
+    fn unprepare(
+        &mut self,
+        prep: &Prep,
+        args: Vec<Value>,
+        onto: &[usize],
+        control: Option<usize>,
+    ) -> Result<()> {
+        let (made, ops) = self.record_prep(prep, args)?;
+        self.replay(ops, &made, onto, true, control)
     }
 
     /// Frees a qubit known to be in \|0⟩ because nothing has acted on it.
@@ -1695,6 +1813,110 @@ fn expectation(
     Ok(total / runs as f64)
 }
 
+/// The two sides of an amplitude, with their arguments.
+struct Sides<'p> {
+    bra: &'p Prep,
+    bra_args: Vec<Value>,
+    ket: &'p Prep,
+    ket_args: Vec<Value>,
+}
+
+/// `<φ|ψ>`, or `<φ| H |ψ>` with an observable (`spec/types.md` §3), as (real, imaginary)
+/// parts: ⟨0…0| U_φ† P U_ψ |0…0⟩ summed over the terms P. Exact on a backend that sees the
+/// state; otherwise estimated with Hadamard tests.
+fn overlap(
+    program: &Program,
+    backend: &dyn Backend,
+    sides: &Sides,
+    observable: Option<&Observable>,
+    precision: f64,
+    seed: u64,
+) -> Result<(f64, f64)> {
+    let mut seeds = SmallRng::seed_from_u64(seed);
+    let identity = [(1.0, Vec::new())];
+    let terms = observable.map_or(&identity[..], |o| &o.terms[..]);
+    let weight: f64 = terms.iter().map(|(c, _)| c.abs()).sum();
+    let (mut re, mut im) = (0.0, 0.0);
+    for (coeff, product) in terms {
+        let (a, b) = if backend.exact_expectations() {
+            let mut machine = Machine::new(program, backend, seeds.random());
+            let qubits = machine.prepare(sides.ket, sides.ket_args.clone())?;
+            machine.paulis(product, &qubits, None)?;
+            machine.unprepare(sides.bra, sides.bra_args.clone(), &qubits, None)?;
+            match machine.session()?.zero_amplitude() {
+                Some(amplitude) => amplitude.map_err(backend_error)?,
+                None => return Err(RuntimeError::new("the simulator cannot read amplitudes")),
+            }
+        } else {
+            let shots = runs_for(coeff.abs(), weight, precision)?;
+            let mut part = |imaginary| {
+                hadamard_test(
+                    program, backend, sides, product, imaginary, shots, &mut seeds,
+                )
+            };
+            (part(false)?, part(true)?)
+        };
+        re += coeff * a;
+        im += coeff * b;
+    }
+    Ok((re, im))
+}
+
+/// One part of ⟨0…0| U_φ† P U_ψ |0…0⟩ by a Hadamard test, run as one circuit: an extra qubit in
+/// \|+⟩ (turned by `adj s` for the imaginary part) controls the whole of U_φ† P U_ψ, and the
+/// difference between its outcomes in the X basis is the part.
+fn hadamard_test(
+    program: &Program,
+    backend: &dyn Backend,
+    sides: &Sides,
+    product: &[(usize, Pauli)],
+    imaginary: bool,
+    shots: usize,
+    seeds: &mut SmallRng,
+) -> Result<f64> {
+    let mut builder =
+        Machine::new(program, backend, seeds.random()).with_mode(Mode::Build(Recording::default()));
+    let control = builder.allocate()?;
+    builder.emit(gate_op(Gate::H, false, control))?;
+    if imaginary {
+        builder.emit(gate_op(Gate::S, true, control))?;
+    }
+    let (made, ops) = builder.record_prep(sides.ket, sides.ket_args.clone())?;
+    let qubits: Vec<usize> = made
+        .iter()
+        .map(|_| builder.allocate())
+        .collect::<Result<_>>()?;
+    builder.replay(ops, &made, &qubits, false, Some(control))?;
+    builder.paulis(product, &qubits, Some(control))?;
+    builder.unprepare(sides.bra, sides.bra_args.clone(), &qubits, Some(control))?;
+    builder.emit(gate_op(Gate::H, false, control))?;
+    let Value::Clbit(clbit) = builder.measurement(control)? else {
+        unreachable!("measurements are recorded")
+    };
+    let Mode::Build(recording) = std::mem::take(&mut builder.mode) else {
+        unreachable!("the builder records")
+    };
+    let Some(counts) = backend.run_circuit(&recording.circuit, shots, seeds.random()) else {
+        return Err(RuntimeError::new(
+            "this backend can neither read amplitudes nor run circuits to estimate them",
+        ));
+    };
+    if !backend.executes() {
+        return Err(RuntimeError::unknown("the program uses an amplitude"));
+    }
+    let counts = counts.map_err(backend_error)?;
+    let (mut zeros, mut ones) = (0i64, 0i64);
+    for (bits, count) in counts {
+        if (bits >> clbit) & 1 == 0 {
+            zeros += count as i64;
+        } else {
+            ones += count as i64;
+        }
+    }
+    let runs = (zeros + ones).max(1);
+    Ok((zeros - ones) as f64 / runs as f64)
+}
+
 /// A set of Pauli terms that can be measured together: each qubit is measured in one basis.
 struct TermGroup<'o> {
     /// `(index in the preparation, basis)`.
@@ -1909,13 +2131,7 @@ impl Machine<'_> {
                 for label in noev_syntax::state::labels(state) {
                     let qubit = self.allocate()?;
                     for &gate in noev_ir::ir::label_gates(label) {
-                        self.execute(Op {
-                            gate,
-                            adjoint: false,
-                            params: Vec::new(),
-                            controls: Vec::new(),
-                            targets: vec![qubit],
-                        })?;
+                        self.emit(gate_op(gate, false, qubit))?;
                     }
                     qubits.push(Value::Qubit(qubit));
                 }

@@ -1131,25 +1131,34 @@ impl Builder<'_> {
                 let base = self.qubit_place(operand);
                 self.bra_test(&labels, base, dest);
             }
+            ExprKind::Overlap {
+                bra,
+                ket,
+                observable,
+                precision,
+            } => {
+                let precision = precision.map(|p| self.operand(p));
+                let (Some(bra), Some(ket)) = (self.prep(bra), self.prep(ket)) else {
+                    return;
+                };
+                let observable = observable.map(|o| self.operand(o));
+                let dest = dest.unwrap_or_else(|| self.temp(Ty::COMPLEX));
+                self.push(Stmt::Overlap {
+                    dest,
+                    bra,
+                    ket,
+                    observable,
+                    precision,
+                });
+            }
             ExprKind::Expectation {
                 prep,
                 observable,
                 precision,
             } => {
                 let precision = precision.map(|p| self.operand(p));
-                let prep = match ast.expr(prep).kind {
-                    ExprKind::Ket { .. } => {
-                        let span = ast.expr(prep).span;
-                        Prep::Ket(self.text(span)[1..span.len() as usize - 1].to_string())
-                    }
-                    ExprKind::Call { args, .. } => {
-                        let Some(Callee::Fn(f)) = self.typed.callees[prep.index()] else {
-                            return;
-                        };
-                        let args = ast.list(args).iter().map(|&a| self.operand(a)).collect();
-                        Prep::Call(FuncId(f.index() as u32), args)
-                    }
-                    _ => return,
+                let Some(prep) = self.prep(prep) else {
+                    return;
                 };
                 let observable = self.operand(observable);
                 let dest = dest.unwrap_or_else(|| self.temp(Ty::FLOAT));
@@ -1371,6 +1380,27 @@ impl Builder<'_> {
         }
         if let (Some(dest), Some(result)) = (dest, result) {
             self.assign(dest, Rvalue::Use(result));
+        }
+    }
+
+    /// A preparation: a ket's fixed labels, or a call with classical arguments.
+    fn prep(&mut self, prep: ExprId) -> Option<Prep> {
+        let ast = self.ast;
+        match ast.expr(prep).kind {
+            ExprKind::Ket { .. } => {
+                let span = ast.expr(prep).span;
+                Some(Prep::Ket(
+                    self.text(span)[1..span.len() as usize - 1].to_string(),
+                ))
+            }
+            ExprKind::Call { args, .. } => {
+                let Some(Callee::Fn(f)) = self.typed.callees[prep.index()] else {
+                    return None;
+                };
+                let args = ast.list(args).iter().map(|&a| self.operand(a)).collect();
+                Some(Prep::Call(FuncId(f.index() as u32), args))
+            }
+            _ => None,
         }
     }
 

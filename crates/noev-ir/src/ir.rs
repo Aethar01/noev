@@ -330,6 +330,19 @@ pub enum Stmt {
         /// default.
         precision: Option<Operand>,
     },
+    /// `<φ|ψ>` or `<φ| H |ψ>`: an amplitude or transition value, a `Complex`.
+    Overlap {
+        /// Where the `Complex` goes.
+        dest: Place,
+        /// The bra's preparation, undone.
+        bra: Prep,
+        /// The ket's preparation.
+        ket: Prep,
+        /// The observable between them, for a transition value.
+        observable: Option<Operand>,
+        /// The standard error wanted of each part when estimated (`within`).
+        precision: Option<Operand>,
+    },
 }
 
 /// How to record an `if` or `while` on a measurement result as classical control in a
@@ -591,6 +604,26 @@ impl Program {
                     args.join(", ")
                 )
             }
+            Stmt::Overlap {
+                dest,
+                bra,
+                ket,
+                observable,
+                precision,
+            } => {
+                let within = precision
+                    .as_ref()
+                    .map_or(String::new(), |p| format!(" within {}", operand_text(p)));
+                let between = observable
+                    .as_ref()
+                    .map_or(String::new(), |o| format!(" {} |", operand_text(o)));
+                format!(
+                    "{} = <{}|{between}{}>{within}",
+                    place_text(dest),
+                    self.prep_text(bra),
+                    self.prep_text(ket)
+                )
+            }
             Stmt::Expectation {
                 dest,
                 prep,
@@ -600,13 +633,7 @@ impl Program {
                 let within = precision
                     .as_ref()
                     .map_or(String::new(), |p| format!(" within {}", operand_text(p)));
-                let prep = match prep {
-                    Prep::Ket(state) => format!("|{state}>"),
-                    Prep::Call(func, args) => {
-                        let args: Vec<String> = args.iter().map(operand_text).collect();
-                        format!("{}({})", self.function_name(*func), args.join(", "))
-                    }
-                };
+                let prep = self.prep_text(prep);
                 format!(
                     "{} = expectation {prep}, {}{within}",
                     place_text(dest),
@@ -681,6 +708,16 @@ impl Program {
                     operand_text(index),
                     operand_text(bit)
                 )
+            }
+        }
+    }
+
+    fn prep_text(&self, prep: &Prep) -> String {
+        match prep {
+            Prep::Ket(state) => format!("|{state}>"),
+            Prep::Call(func, args) => {
+                let args: Vec<String> = args.iter().map(operand_text).collect();
+                format!("{}({})", self.function_name(*func), args.join(", "))
             }
         }
     }

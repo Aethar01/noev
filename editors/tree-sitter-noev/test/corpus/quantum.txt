@@ -197,3 +197,55 @@ fn main() {
           (ownership_expression
             (ownership)
             (identifier)))))))
+
+================================================================================
+Amplitudes and transition values
+================================================================================
+
+fn main() {
+    let a = <0|+>
+    let b = <bell()|00>
+    let c = <tilted(0.5)|tilted(1.0)> within 0.01
+    let d = <0| X(0) |1>
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_item
+    (identifier)
+    (parameters)
+    (block
+      (let_declaration
+        (identifier)
+        (amplitude
+          (bra_ket)))
+      (let_declaration
+        (identifier)
+        (amplitude
+          (call_expression
+            (identifier)
+            (arguments))
+          (ket)))
+      (let_declaration
+        (identifier)
+        (amplitude
+          (call_expression
+            (identifier)
+            (arguments
+              (float)))
+          (call_expression
+            (identifier)
+            (arguments
+              (float)))
+          (within
+            (float))))
+      (let_declaration
+        (identifier)
+        (bra_expectation
+          (bra)
+          (call_expression
+            (identifier)
+            (arguments
+              (integer)))
+          (ket))))))

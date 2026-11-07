@@ -14,10 +14,17 @@ before 1.0.
   `re()`, `im()`, `abs()`, `arg()`, `conj()`, `exp()`, `sqrt()` and `Complex::polar(r, theta)`;
   `Complex(x)` and `c32(z)` convert, and nothing converts implicitly. They print as
   `1.0+2.0i`.
+- Amplitudes `<φ|ψ>` and transition values `<φ| H |ψ>` (different preparations on the two
+  sides), as `Complex` numbers: `<0|+>`, `<bell()|00>`, `<0| X(0) |1>`. Exact on a
+  simulator, estimated with Hadamard tests elsewhere, `within ε` for each part. Both sides
+  must be reversible preparations (N023).
+- A method call may follow an expectation value or amplitude directly:
+  `<ψ| H |ψ>.round()`, `<φ|ψ>.abs()`.
 
 ### Editors
 
-- Hover on `Complex`, `c32` and their methods; imaginary literals in the tree-sitter grammar.
+- Hover on `Complex`, `c32` and their methods; imaginary literals, amplitudes and transition
+  values in the tree-sitter grammar.
 
 ## [0.3.0] - 2026-11-07
 

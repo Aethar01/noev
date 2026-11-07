@@ -8,6 +8,10 @@
       "required": true,
       "types": [
         {
+          "type": "amplitude",
+          "named": true
+        },
+        {
           "type": "array_expression",
           "named": true
         },
@@ -131,6 +135,174 @@
     }
   },
   {
+    "type": "amplitude",
+    "named": true,
+    "fields": {
+      "bra": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "amplitude",
+            "named": true
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "array_repeat_expression",
+            "named": true
+          },
+          {
+            "type": "block",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "bra_expectation",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "ctrl_expression",
+            "named": true
+          },
+          {
+            "type": "expectation",
+            "named": true
+          },
+          {
+            "type": "field_expression",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "imaginary",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "ket",
+            "named": true
+          },
+          {
+            "type": "match_expression",
+            "named": true
+          },
+          {
+            "type": "method_call_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "path",
+            "named": true
+          },
+          {
+            "type": "sample_expression",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "struct_expression",
+            "named": true
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "unit",
+            "named": true
+          },
+          {
+            "type": "unsafe_block",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          },
+          {
+            "type": "with_expression",
+            "named": true
+          }
+        ]
+      },
+      "ket": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "call_expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "bra",
+          "named": true
+        },
+        {
+          "type": "bra_ket",
+          "named": true
+        },
+        {
+          "type": "ket",
+          "named": true
+        },
+        {
+          "type": "within",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "arguments",
     "named": true,
     "fields": {},
@@ -140,6 +312,10 @@
       "types": [
         {
           "type": "adj_expression",
+          "named": true
+        },
+        {
+          "type": "amplitude",
           "named": true
         },
         {
@@ -299,6 +475,10 @@
       "types": [
         {
           "type": "adj_expression",
+          "named": true
+        },
+        {
+          "type": "amplitude",
           "named": true
         },
         {
@@ -493,6 +673,10 @@
       "types": [
         {
           "type": "adj_expression",
+          "named": true
+        },
+        {
+          "type": "amplitude",
           "named": true
         },
         {
@@ -694,6 +878,10 @@
           "named": true
         },
         {
+          "type": "amplitude",
+          "named": true
+        },
+        {
           "type": "array_expression",
           "named": true
         },
@@ -850,6 +1038,10 @@
         "types": [
           {
             "type": "adj_expression",
+            "named": true
+          },
+          {
+            "type": "amplitude",
             "named": true
           },
           {
@@ -1057,6 +1249,10 @@
             "named": true
           },
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -1214,6 +1410,10 @@
         "types": [
           {
             "type": "adj_expression",
+            "named": true
+          },
+          {
+            "type": "amplitude",
             "named": true
           },
           {
@@ -1449,6 +1649,10 @@
             "named": true
           },
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -1606,6 +1810,10 @@
       "types": [
         {
           "type": "adj_expression",
+          "named": true
+        },
+        {
+          "type": "amplitude",
           "named": true
         },
         {
@@ -1788,12 +1996,146 @@
     "type": "bra_expectation",
     "named": true,
     "fields": {
+      "ket": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "amplitude",
+            "named": true
+          },
+          {
+            "type": "array_expression",
+            "named": true
+          },
+          {
+            "type": "array_repeat_expression",
+            "named": true
+          },
+          {
+            "type": "block",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "bra_expectation",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "ctrl_expression",
+            "named": true
+          },
+          {
+            "type": "expectation",
+            "named": true
+          },
+          {
+            "type": "field_expression",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "imaginary",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "ket",
+            "named": true
+          },
+          {
+            "type": "match_expression",
+            "named": true
+          },
+          {
+            "type": "method_call_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "path",
+            "named": true
+          },
+          {
+            "type": "sample_expression",
+            "named": true
+          },
+          {
+            "type": "self",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "struct_expression",
+            "named": true
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "unit",
+            "named": true
+          },
+          {
+            "type": "unsafe_block",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          },
+          {
+            "type": "with_expression",
+            "named": true
+          }
+        ]
+      },
       "observable": {
         "multiple": false,
         "required": true,
         "types": [
           {
             "type": "adj_expression",
+            "named": true
+          },
+          {
+            "type": "amplitude",
             "named": true
           },
           {
@@ -1976,6 +2318,10 @@
         "multiple": false,
         "required": true,
         "types": [
+          {
+            "type": "amplitude",
+            "named": true
+          },
           {
             "type": "array_expression",
             "named": true
@@ -2231,6 +2577,10 @@
             "named": true
           },
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -2377,6 +2727,10 @@
         "required": true,
         "types": [
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -2503,6 +2857,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "amplitude",
+          "named": true
+        },
         {
           "type": "array_expression",
           "named": true
@@ -2718,6 +3076,10 @@
         "required": true,
         "types": [
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -2862,6 +3224,10 @@
       "types": [
         {
           "type": "adj_expression",
+          "named": true
+        },
+        {
+          "type": "amplitude",
           "named": true
         },
         {
@@ -3080,6 +3446,10 @@
             "named": true
           },
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -3231,6 +3601,10 @@
         "types": [
           {
             "type": "adj_expression",
+            "named": true
+          },
+          {
+            "type": "amplitude",
             "named": true
           },
           {
@@ -3595,6 +3969,10 @@
             "named": true
           },
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -3849,6 +4227,10 @@
             "named": true
           },
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -3999,6 +4381,10 @@
         "required": true,
         "types": [
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -4132,6 +4518,10 @@
       "types": [
         {
           "type": "adj_expression",
+          "named": true
+        },
+        {
+          "type": "amplitude",
           "named": true
         },
         {
@@ -4358,6 +4748,10 @@
             "named": true
           },
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -4581,6 +4975,10 @@
             "named": true
           },
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -4738,6 +5136,10 @@
         "types": [
           {
             "type": "adj_expression",
+            "named": true
+          },
+          {
+            "type": "amplitude",
             "named": true
           },
           {
@@ -4908,6 +5310,10 @@
       "types": [
         {
           "type": "adj_expression",
+          "named": true
+        },
+        {
+          "type": "amplitude",
           "named": true
         },
         {
@@ -5082,6 +5488,10 @@
         "required": true,
         "types": [
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -5215,6 +5625,10 @@
       "types": [
         {
           "type": "adj_expression",
+          "named": true
+        },
+        {
+          "type": "amplitude",
           "named": true
         },
         {
@@ -5374,6 +5788,10 @@
         "types": [
           {
             "type": "adj_expression",
+            "named": true
+          },
+          {
+            "type": "amplitude",
             "named": true
           },
           {
@@ -5569,6 +5987,10 @@
             "named": true
           },
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -5725,6 +6147,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "amplitude",
+          "named": true
+        },
         {
           "type": "array_expression",
           "named": true
@@ -5927,6 +6353,10 @@
       "types": [
         {
           "type": "adj_expression",
+          "named": true
+        },
+        {
+          "type": "amplitude",
           "named": true
         },
         {
@@ -6150,6 +6580,10 @@
             "named": true
           },
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -6328,6 +6762,10 @@
         "required": true,
         "types": [
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -6456,6 +6894,10 @@
       "types": [
         {
           "type": "adj_expression",
+          "named": true
+        },
+        {
+          "type": "amplitude",
           "named": true
         },
         {
@@ -6645,6 +7087,10 @@
           "named": true
         },
         {
+          "type": "amplitude",
+          "named": true
+        },
+        {
           "type": "array_expression",
           "named": true
         },
@@ -6811,6 +7257,10 @@
         "types": [
           {
             "type": "adj_expression",
+            "named": true
+          },
+          {
+            "type": "amplitude",
             "named": true
           },
           {
@@ -7150,6 +7600,10 @@
           "named": true
         },
         {
+          "type": "amplitude",
+          "named": true
+        },
+        {
           "type": "array_expression",
           "named": true
         },
@@ -7440,6 +7894,10 @@
           "named": true
         },
         {
+          "type": "amplitude",
+          "named": true
+        },
+        {
           "type": "array_expression",
           "named": true
         },
@@ -7685,6 +8143,10 @@
             "named": true
           },
           {
+            "type": "amplitude",
+            "named": true
+          },
+          {
             "type": "array_expression",
             "named": true
           },
@@ -7857,6 +8319,10 @@
       "types": [
         {
           "type": "adj_expression",
+          "named": true
+        },
+        {
+          "type": "amplitude",
           "named": true
         },
         {
@@ -8169,6 +8635,10 @@
   },
   {
     "type": "bra",
+    "named": true
+  },
+  {
+    "type": "bra_ket",
     "named": true
   },
   {

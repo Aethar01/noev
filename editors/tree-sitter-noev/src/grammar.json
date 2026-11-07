@@ -2625,6 +2625,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "amplitude"
+        },
+        {
+          "type": "SYMBOL",
           "name": "if_expression"
         },
         {
@@ -3094,8 +3098,161 @@
               }
             },
             {
-              "type": "SYMBOL",
-              "name": "ket"
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "ket"
+                },
+                {
+                  "type": "SEQ",
+                  "members": [
+                    {
+                      "type": "STRING",
+                      "value": "|"
+                    },
+                    {
+                      "type": "FIELD",
+                      "name": "ket",
+                      "content": {
+                        "type": "SYMBOL",
+                        "name": "_postfix"
+                      }
+                    },
+                    {
+                      "type": "STRING",
+                      "value": ">"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "within"
+                },
+                {
+                  "type": "BLANK"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "amplitude": {
+      "type": "PREC_DYNAMIC",
+      "value": 2,
+      "content": {
+        "type": "PREC_RIGHT",
+        "value": 0,
+        "content": {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "bra_ket"
+                },
+                {
+                  "type": "SEQ",
+                  "members": [
+                    {
+                      "type": "CHOICE",
+                      "members": [
+                        {
+                          "type": "STRING",
+                          "value": "<"
+                        },
+                        {
+                          "type": "SYMBOL",
+                          "name": "_line_start_angle"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "FIELD",
+                      "name": "bra",
+                      "content": {
+                        "type": "SYMBOL",
+                        "name": "_postfix"
+                      }
+                    },
+                    {
+                      "type": "SYMBOL",
+                      "name": "ket"
+                    }
+                  ]
+                },
+                {
+                  "type": "SEQ",
+                  "members": [
+                    {
+                      "type": "SYMBOL",
+                      "name": "bra"
+                    },
+                    {
+                      "type": "FIELD",
+                      "name": "ket",
+                      "content": {
+                        "type": "SYMBOL",
+                        "name": "call_expression"
+                      }
+                    },
+                    {
+                      "type": "STRING",
+                      "value": ">"
+                    }
+                  ]
+                },
+                {
+                  "type": "SEQ",
+                  "members": [
+                    {
+                      "type": "CHOICE",
+                      "members": [
+                        {
+                          "type": "STRING",
+                          "value": "<"
+                        },
+                        {
+                          "type": "SYMBOL",
+                          "name": "_line_start_angle"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "FIELD",
+                      "name": "bra",
+                      "content": {
+                        "type": "SYMBOL",
+                        "name": "_postfix"
+                      }
+                    },
+                    {
+                      "type": "STRING",
+                      "value": "|"
+                    },
+                    {
+                      "type": "FIELD",
+                      "name": "ket",
+                      "content": {
+                        "type": "SYMBOL",
+                        "name": "call_expression"
+                      }
+                    },
+                    {
+                      "type": "STRING",
+                      "value": ">"
+                    }
+                  ]
+                }
+              ]
             },
             {
               "type": "CHOICE",
@@ -3870,6 +4027,34 @@
         ]
       }
     },
+    "bra_ket": {
+      "type": "TOKEN",
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "<"
+          },
+          {
+            "type": "PATTERN",
+            "value": "([01+\\-]|\\([+\\-]i\\))+"
+          },
+          {
+            "type": "STRING",
+            "value": "|"
+          },
+          {
+            "type": "PATTERN",
+            "value": "([01+\\-]|\\([+\\-]i\\))+"
+          },
+          {
+            "type": "STRING",
+            "value": ">"
+          }
+        ]
+      }
+    },
     "string": {
       "type": "SEQ",
       "members": [
@@ -4067,6 +4252,10 @@
     [
       "preparation_test",
       "_observable"
+    ],
+    [
+      "_postfix",
+      "amplitude"
     ],
     [
       "_contextual_name",

@@ -24,4 +24,7 @@ fn main() {
     print(<through_a_call()| mv b)          //~ N023
     let c = |0>
     print(<reset_inside()| mv c)            //~ N023
+    // Both sides of an amplitude are undone or run controlled.
+    print(<noisy()|0>)                      //~ N023
+    print(<0| X(0) |noisy()>)               //~ N023
 }

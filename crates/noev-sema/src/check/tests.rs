@@ -371,6 +371,22 @@ fn complex_numbers() {
 }
 
 #[test]
+fn amplitudes() {
+    let prep = "fn p(t: Float) -> Qubit { let q = |0>\n q.ry(t)\n mv q }\n";
+    ok(&format!(
+        "{prep}fn f() -> Complex {{ <p(1.0)|p(2.0)> + <0|+> + <0| X(0) |p(0.5)> }}"
+    ));
+    assert_eq!(
+        one_error("fn f() -> Complex { <00|+> }"),
+        "both sides must prepare the same qubits: `[Qubit; 2]` and `Qubit`"
+    );
+    assert_eq!(
+        one_error(&format!("{prep}fn f() -> Float {{ <p(1.0)|p(2.0)> }}")),
+        "mismatched types: expected `Float`, found `Complex`"
+    );
+}
+
+#[test]
 fn type_aliases() {
     ok("type Byte = [Bit; 8]\nfn f(b: Byte) -> [Bit; 8] { b }");
     ok("type A = B\ntype B = Int\nfn f(a: A) -> Int { a + 1 }");

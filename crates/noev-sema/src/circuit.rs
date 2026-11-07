@@ -410,7 +410,9 @@ fn infer_recordable(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<bool> {
                 children(ast, node, &mut stack);
                 let Node::Expr(e) = node else { continue };
                 only &= match ast.expr(e).kind {
-                    ExprKind::Sample { .. } | ExprKind::Expectation { .. } => false,
+                    ExprKind::Sample { .. }
+                    | ExprKind::Expectation { .. }
+                    | ExprKind::Overlap { .. } => false,
                     _ => match typed.callees[e.index()] {
                         Some(Callee::Builtin(Builtin::Print { .. })) => false,
                         Some(Callee::Fn(f)) => result[f.index()],
@@ -626,6 +628,14 @@ fn children(ast: &Ast, node: Node, out: &mut Vec<Node>) {
                     ..
                 } => {
                     push(observable);
+                    precision.into_iter().for_each(&mut push);
+                }
+                ExprKind::Overlap {
+                    observable,
+                    precision,
+                    ..
+                } => {
+                    observable.into_iter().for_each(&mut push);
                     precision.into_iter().for_each(&mut push);
                 }
                 ExprKind::Block(b) | ExprKind::Unsafe(b) => out.push(Node::Block(b)),
@@ -890,9 +900,9 @@ impl<'a> Walker<'a> {
                 Node::Expr(e) => {
                     let span = ast.expr(e).span;
                     let why = match ast.expr(e).kind {
-                        ExprKind::Sample { .. } | ExprKind::Expectation { .. } => {
-                            Some("starts a repeated run")
-                        }
+                        ExprKind::Sample { .. }
+                        | ExprKind::Expectation { .. }
+                        | ExprKind::Overlap { .. } => Some("starts a repeated run"),
                         ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
                             match typed.callees[e.index()] {
                                 Some(Callee::Builtin(Builtin::Print { .. })) => Some("prints"),
@@ -1159,6 +1169,25 @@ impl<'a> Walker<'a> {
             ExprKind::Sample { shots, .. } => {
                 if self.expr(shots, before) && before {
                     self.violate(ast.expr(shots).span, "used as a shot count");
+                }
+                false
+            }
+            ExprKind::Overlap {
+                observable,
+                precision,
+                ..
+            } => {
+                if let Some(o) = observable
+                    && self.expr(o, before)
+                    && before
+                {
+                    self.violate(expr.span, "used in an observable");
+                }
+                if let Some(p) = precision
+                    && self.expr(p, before)
+                    && before
+                {
+                    self.violate(ast.expr(p).span, "used as a precision");
                 }
                 false
             }

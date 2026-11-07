@@ -115,6 +115,15 @@ fn sexp(ast: &Ast, source: &str, id: ExprId) -> String {
         ExprKind::Binary { op, lhs, rhs } => format!("({} {} {})", op.as_str(), e(lhs), e(rhs)),
         ExprKind::Own { kind, place } => format!("({} {})", kind.as_str(), e(place)),
         ExprKind::Adj(call) => format!("(adj {})", e(call)),
+        ExprKind::Overlap {
+            bra,
+            ket,
+            observable,
+            ..
+        } => match observable {
+            Some(o) => format!("(transition {} {} {})", e(bra), e(o), e(ket)),
+            None => format!("(amplitude {} {})", e(bra), e(ket)),
+        },
         ExprKind::PrepTest { prep, operand } => format!("(test {} {})", e(prep), e(operand)),
         ExprKind::BraTest { state, operand, .. } => {
             format!("(test {} {})", state.text(source), e(operand))
@@ -298,16 +307,18 @@ fn bras() {
 }
 
 #[test]
-fn expectation_must_repeat_its_preparation() {
-    let errs = errors("fn f() { <a(1)| Z(0) |a(2)> }");
+fn different_sides_make_transition_values_and_amplitudes() {
     assert_eq!(
-        errs,
-        ["both sides of an expectation value must be the same preparation"]
+        expr("<a(1)| Z(0) |a(2)>"),
+        "(transition (call a 1) (call Z 0) (call a 2))"
     );
-    let errs = errors("fn f() { <+| Z(0) |0> }");
+    assert_eq!(expr("<+| Z(0) |0>"), "(transition <+| (call Z 0) |0>)");
+    assert_eq!(expr("<0|+>"), "(amplitude <0| |+>)");
+    assert_eq!(expr("<bell()|00>"), "(amplitude (call bell ) |00>)");
+    assert_eq!(expr("<a(1)|a(2)>"), "(amplitude (call a 1) (call a 2))");
     assert_eq!(
-        errs,
-        ["both sides of an expectation value must be the same state"]
+        expr("<0| X(0) |p()>"),
+        "(transition <0| (call X 0) (call p ))"
     );
 }
 

@@ -255,9 +255,29 @@ what a quantum computer can physically return:
 | `<ψ\| H \|ψ>` | a preparation, re-run as needed      | the average of `H`: a `Float`              |
 
 So `<11| mv r` draws once from the distribution whose probability of `true` is
-`<ψ| P(0, 1) * P(1, 1) |ψ>`. The amplitude ⟨s|ψ⟩ itself cannot be observed, so Noev has no
-`<s|ψ>` form: in standard notation it means the amplitude, and giving it any other meaning
-would mislead.
+`<ψ| P(0, 1) * P(1, 1) |ψ>`.
+
+### Amplitudes and transition values
+
+With different preparations on the two sides, the forms mean what they do in physics, and
+give a `Complex`:
+
+| Form          | Value       |
+| ------------- | ----------- |
+| `<φ\|ψ>`      | ⟨φ\|ψ⟩, the amplitude of ψ along φ |
+| `<φ\| H \|ψ>` | ⟨φ\|H\|ψ⟩, a transition value       |
+
+`φ` and `ψ` are preparations of the same type, a `Qubit` or `[Qubit; N]`: ket literals with
+fixed labels, or calls to functions that are reversible apart from creating their qubits, as
+for a bra of a preparation ([ownership.md](ownership.md) §12, N023). If φ = U_φ\|0…0⟩ and
+ψ = U_ψ\|0…0⟩, the amplitude is ⟨0…0\|U_φ†U_ψ\|0…0⟩, so it depends on the gates the
+preparations apply, global phases included, as Noev's gates define them
+([core.md](core.md)). A simulator computes it exactly. Elsewhere it is estimated with
+Hadamard tests: one circuit for the real part and one for the imaginary part, each running
+the preparations controlled by an extra qubit, and `within ε` bounds each part's standard
+error. A transition value sums its terms' amplitudes ⟨φ\|Pᵢ\|ψ⟩, with each term's runs in
+proportion to its coefficient, as for an expectation value. When both sides are the same
+preparation, `<ψ| H |ψ>` is the expectation value above, a `Float`.
 
 ## 4. Conversions
 

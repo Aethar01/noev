@@ -1010,3 +1010,69 @@ if (c[0] == 1) {
 c[1] = measure q[1];"]
     );
 }
+
+/// Ketrs as a backend that cannot see its state: it only runs circuits, so expectation values
+/// and amplitudes are estimated by measuring.
+struct Blind;
+
+impl Backend for Blind {
+    fn name(&self) -> &str {
+        "blind"
+    }
+
+    fn session(&self, _seed: u64) -> Option<Box<dyn noev_runtime::backend::Session>> {
+        None
+    }
+
+    fn run_circuit(
+        &self,
+        circuit: &noev_runtime::backend::Circuit,
+        shots: usize,
+        seed: u64,
+    ) -> Option<Result<noev_runtime::backend::Counts, noev_runtime::backend::BackendError>> {
+        Ketrs.run_circuit(circuit, shots, seed)
+    }
+}
+
+/// The parts of the `Complex` that `main` prints, on `backend`.
+fn printed_complex(source: &str, backend: &dyn Backend) -> (f64, f64) {
+    let program = compile(source);
+    let out = Buffer::default();
+    run_main(
+        &program,
+        backend,
+        7,
+        Output {
+            stdout: Box::new(out.clone()),
+            stderr: Box::new(std::io::sink()),
+        },
+    )
+    .unwrap();
+    let text = String::from_utf8(out.0.borrow().clone()).unwrap();
+    let text = text.trim().trim_end_matches('i');
+    let split = text[1..].find(['+', '-']).map(|k| k + 1).unwrap();
+    (
+        text[..split].parse().unwrap(),
+        text[split..].parse().unwrap(),
+    )
+}
+
+#[test]
+fn amplitudes_exact_and_estimated() {
+    // ⟨+|S|+⟩ = (1 + i)/2, and ⟨0|Y|1⟩ = −i.
+    let phase = "fn phased() -> Qubit {\n let q = |+>\n q.s()\n mv q\n}\nfn main() {\n print(<+|phased()> within 0.02)\n}";
+    let transition = "fn main() {\n print(<0| Y(0) |1> within 0.02)\n}";
+    for (source, (re, im)) in [(phase, (0.5, 0.5)), (transition, (0.0, -1.0))] {
+        let (a, b) = printed_complex(source, &Ketrs);
+        assert!(
+            (a - re).abs() < 1e-12 && (b - im).abs() < 1e-12,
+            "exact: {a} {b}"
+        );
+        // Hadamard tests: within a few standard errors of 0.02.
+        let (a, b) = printed_complex(source, &Blind);
+        assert!(
+            (a - re).abs() < 0.08 && (b - im).abs() < 0.08,
+            "estimated: {a} {b}"
+        );
+    }
+}
