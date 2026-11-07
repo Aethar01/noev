@@ -305,6 +305,8 @@ program never breaks existing code; the reverse does.
 | Expectation precision | `<ψ\| H \|ψ> within ε`: a standard error, default 0.01; the runtime picks the runs; exact simulators ignore it | Decided  |
 | Quantum backends    | One interface, two levels: circuit (jobs) and gate (operation by operation); ketrs first | Decided  |
 | Unconsumed qubits   | Compile error now; goal is implicit free when provably \|0⟩ | Decided  |
+| Numbers             | `Int` of any size and `Float` a 64-bit float, as Python's `int` and `float`; sized `i8`…`i64`, `u8`…`u64`, `f32`, with `f64` another name for `Float`; no implicit conversions (0.3) | Decided  |
+| Complex numbers     | `Complex` (two `Float`s), with `c64` another name for it, and `c32` (two `f32`s), as `Float`/`f64` and `f32`; imaginary literals with an `i` suffix (`2.0i`, `3i`); no implicit conversions, except that literals take the type expected (0.4) | Decided  |
 
 ### References: Rust's model, Noev's spelling
 
@@ -398,6 +400,16 @@ Planned once milestones 1–7 are done, roughly in this order.
 
 Later: quantum integers (registers with reversible arithmetic, like Silq's `uint[n]`), which
 need generics and operator traits.
+
+### 0.4: complex numbers and amplitudes
+
+| #  | Step                          | Description                                                          | Status  |
+| -- | ----------------------------- | -------------------------------------------------------------------- | ------- |
+| 1  | `Complex` and `c32`           | Types, `i` literals, arithmetic, `re` `im` `abs` `arg` `conj` `exp` `sqrt`, `Complex::polar(r, θ)` for phases, conversions as for floats, printing (`1.0+2.0i`) | ☐ Todo |
+| 2  | Amplitudes                    | `<φ\|ψ>` as a `Complex`, and transition values `<φ\| H \|ψ>`: exact on simulators, estimated `within ε` elsewhere (Hadamard tests) | ☐ Todo |
+| 3  | Gates from matrices           | A gate given as a unitary matrix of `Complex` values, checked to be unitary, decomposed for backends that need named gates | ☐ Todo |
+| 4  | State inspection              | A simulator's amplitudes for a register, for debugging; an error on backends that cannot see the state | ☐ Todo |
+| 5  | Classical post-processing     | Standard-library routines on `[Complex; N]`, starting with the Fourier transform used after phase estimation | ☐ Todo |
 
 ### Compilation (`spec/runtime.md`)
 
