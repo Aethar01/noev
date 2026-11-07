@@ -379,7 +379,7 @@ module.exports = grammar({
 
     struct_expression: ($) =>
       seq(
-        field('name', alias($.identifier, $.type_identifier)),
+        field('name', choice(alias($.identifier, $.type_identifier), $.path)),
         '{',
         sepBy(',', $.field_initializer),
         '}',

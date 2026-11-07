@@ -476,6 +476,7 @@ impl Document {
                     Callee::Convert(ty) => {
                         return Some(docs::builtin(noev_sema::prelude::Builtin::Convert(ty)));
                     }
+                    Callee::Variant(s, index) => return self.describe_variant(s, index),
                     Callee::Fn(_) => {}
                 }
             }

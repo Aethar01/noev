@@ -8,3 +8,15 @@ fn chain_ends_in_measure() -> Bit {
     let q = |0>
     q.h().measure()                 //~ N007
 }
+
+enum Held {
+    Qubit(Qubit),
+    Nothing,
+}
+
+fn move_out_of_a_lent_match(h: ref Held) -> Bit {
+    match h {
+        Held::Qubit(q) => mv q.measure(),       //~ N007
+        Held::Nothing => 0,
+    }
+}

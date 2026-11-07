@@ -51,6 +51,8 @@ pub struct Program {
     pub struct_fields: Vec<Vec<String>>,
     /// Each enum's variant names, in declaration order; empty for a struct.
     pub variant_names: Vec<Vec<String>>,
+    /// The field names of each enum's variants, for variants with named fields.
+    pub variant_fields: Vec<Vec<Vec<String>>>,
 }
 
 /// A function's control-flow graph.

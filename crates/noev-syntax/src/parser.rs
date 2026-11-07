@@ -828,10 +828,22 @@ impl Parser<'_> {
                 break;
             }
             let start = self.span();
-            let (name, _) = self.name("a field name");
-            let pat = self.eat(Colon).then(|| self.pat());
+            let (name, name_span) = self.name("a field name");
+            // `field` alone is short for `field: field`.
+            let pat = if self.eat(Colon) {
+                self.pat()
+            } else {
+                self.ast.push_pat(Pat {
+                    kind: PatKind::Name(name),
+                    span: name_span,
+                })
+            };
             let span = start.to(self.prev_span());
-            self.ast.push_to(FieldPat { name, pat, span });
+            self.ast.push_to(FieldPat {
+                name,
+                pat: Some(pat),
+                span,
+            });
             self.skip_newlines();
             if !self.eat(Comma) {
                 break;

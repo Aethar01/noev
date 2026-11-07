@@ -39,6 +39,7 @@ pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
         unsafe_depth: 0,
         diverged: false,
         returns_ref: false,
+        lent_match: false,
     };
     for (index, decl) in ast.all_fns().iter().enumerate() {
         if let Some(body) = decl.body {
@@ -170,6 +171,8 @@ struct Owner<'a> {
     diverged: bool,
     /// Whether the current function returns a reference.
     returns_ref: bool,
+    /// While binding the pattern of a `match` on a lent value, where nothing is taken.
+    lent_match: bool,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -650,7 +653,8 @@ impl Owner<'_> {
                 }
             }
             PatKind::Wildcard => {
-                if !poisoned && types.linearity(ty) == Kind::Linear {
+                // In a lent `match`, `_` takes nothing.
+                if !poisoned && !self.lent_match && types.linearity(ty) == Kind::Linear {
                     let span = self.ast.pat(pat).span;
                     self.error("N003", span, "`_` would throw away qubits").help =
                         Some("bind them to a name and consume them, or measure them".into());
@@ -1046,6 +1050,26 @@ impl Owner<'_> {
     /// The arms of a `match` are branches: each starts from what was moved before it, and
     /// anything with qubits must be moved in all of them or none (N009).
     fn match_expr(&mut self, scrutinee: ExprId, arms: List<Arm>, use_: Use, span: Span) {
+        // `match mv x` and temporaries give the arms the parts; a place or a reference is lent
+        // to the names in the patterns, as the checker typed them (`spec/ownership.md` §13).
+        let scrutinee_ty = self.typed.ty(scrutinee);
+        let moved = matches!(
+            self.ast.expr(scrutinee).kind,
+            ExprKind::Own {
+                kind: OwnKind::Mv,
+                ..
+            }
+        );
+        let lend_mut = match *self.typed.types.kind(scrutinee_ty) {
+            TyKind::Ref { mutable, .. } => Some(mutable),
+            _ if !moved && self.place_of(scrutinee).is_some() => Some(false),
+            _ => None,
+        };
+        let lent = if moved { None } else { lend_mut };
+        let lent_place = match self.ast.expr(scrutinee).kind {
+            ExprKind::Own { place, .. } => self.place_of(place),
+            _ => self.place_of(scrutinee),
+        };
         self.expr(scrutinee, Use::Read);
         let before = self.moved.clone();
         let mut merged: Option<Vec<Moved>> = None;
@@ -1056,7 +1080,21 @@ impl Owner<'_> {
             let scope_mark = self.scope.len();
             let mut bound = Vec::new();
             let ty = self.typed.pat_types[arm.pat.index()];
+            self.lent_match = lent.is_some();
             self.bind(arm.pat, ty, false, &mut bound);
+            self.lent_match = false;
+            // The names bound to parts hold a lend on the matched place for their arm; they
+            // all end with it, so one lend, held by the first, covers them.
+            if let (Some(mutable), Some(place)) = (lent, &lent_place)
+                && let Some(&holder) = bound.iter().find(|&&l| {
+                    matches!(
+                        self.typed.types.kind(self.typed.local(l).ty),
+                        TyKind::Ref { .. }
+                    )
+                })
+            {
+                self.lend_place(place, scrutinee, mutable, false, Holder::Local(holder));
+            }
             let carried = self.expr(arm.body, use_);
             self.release(&carried);
             if !self.diverged {
@@ -1168,6 +1206,7 @@ impl Owner<'_> {
         let ok = match callee {
             Callee::Builtin(b) => b.reversible(),
             Callee::Convert(_) => true,
+            Callee::Variant(..) => false,
             Callee::Fn(f) => match self.typed.fns[f.index()].sig.reversible {
                 Reversible::Yes => true,
                 Reversible::No => false,
@@ -1516,7 +1555,7 @@ impl Owner<'_> {
         let Some(callee) = callee else { return };
         let (is_unsafe, reversible, name) = match callee {
             Callee::Builtin(b) => (b.is_unsafe(), b.reversible(), b.name().to_string()),
-            Callee::Convert(_) => (false, true, String::new()),
+            Callee::Convert(_) | Callee::Variant(..) => (false, true, String::new()),
             Callee::Fn(f) => {
                 let sig = &self.typed.fns[f.index()].sig;
                 let reversible = match sig.reversible {
@@ -1810,6 +1849,8 @@ impl Owner<'_> {
             p
         };
         match types.kind(ty) {
+            // An enum is moved whole: its parts are only taken by `match mv`.
+            &TyKind::Struct(s) if types.structs[s.index()].variants.is_some() => false,
             &TyKind::Struct(s) => types.structs[s.index()]
                 .fields
                 .iter()

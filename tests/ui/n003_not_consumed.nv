@@ -29,3 +29,26 @@ fn wildcard_in_patterns() {
     let (c, _) = mv t
     mv c.discard()
 }
+
+enum Held {
+    Qubit(Qubit),
+    Nothing,
+}
+
+fn enum_not_consumed() {
+    let h = Held::Qubit(|0>)
+}                                   //~ N003
+
+fn arm_keeps_its_qubit(h: Held) -> Bit {
+    match mv h {
+        Held::Qubit(q) => 0,        //~ N003
+        Held::Nothing => 0,
+    }
+}
+
+fn wildcard_drops_the_qubit(h: Held) -> Bit {
+    match mv h {
+        Held::Qubit(_) => 0,        //~ N003
+        Held::Nothing => 0,
+    }
+}

@@ -5,3 +5,25 @@ fn move_while_lent() -> Bit {
     let r = ref q
     mv q.measure()                  //~ N006
 }
+
+enum Held {
+    Qubit(Qubit),
+    Nothing,
+}
+
+fn give(h: Held) {
+    match mv h {
+        Held::Qubit(q) => mv q.discard(),
+        Held::Nothing => {}
+    }
+}
+
+fn moved_while_a_match_lends_it(h: Held) {
+    match h {
+        Held::Qubit(q) => {
+            give(mv h)              //~ N006
+            q.x()
+        }
+        Held::Nothing => give(mv h),
+    }
+}

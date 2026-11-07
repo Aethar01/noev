@@ -6514,6 +6514,10 @@
         "required": true,
         "types": [
           {
+            "type": "path",
+            "named": true
+          },
+          {
             "type": "type_identifier",
             "named": true
           }

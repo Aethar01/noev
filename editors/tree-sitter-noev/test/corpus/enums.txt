@@ -86,3 +86,30 @@ fn f() {
         (match_arm
           (wildcard)
           (integer))))))
+
+================================================================================
+Variant with fields
+================================================================================
+
+fn main() {
+    let o = Outcome::Retry { attempts: 2, last }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_item
+    (identifier)
+    (parameters)
+    (block
+      (let_declaration
+        (identifier)
+        (struct_expression
+          (path
+            (identifier)
+            (identifier))
+          (field_initializer
+            (field_identifier)
+            (integer))
+          (field_initializer
+            (field_identifier)))))))

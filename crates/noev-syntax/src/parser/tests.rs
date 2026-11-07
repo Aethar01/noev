@@ -475,7 +475,7 @@ fn match_and_patterns() {
     );
     assert_eq!(
         expr("match r { Outcome::Retry { attempts, by: (a, _), .. } => attempts, n => n }"),
-        "(match r ((Outcome::Retry {attempts by:(tuple a _) ..}) attempts) (n n))"
+        "(match r ((Outcome::Retry {attempts:attempts by:(tuple a _) ..}) attempts) (n n))"
     );
     assert_eq!(
         expr("match n { 0 => \"none\", -1 => \"minus\", _ => \"some\" }"),

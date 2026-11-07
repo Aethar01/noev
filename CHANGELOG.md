@@ -10,7 +10,11 @@ before 1.0.
 ### Language
 
 - Enums with plain variants (`enum Basis { X, Y, Z }`), with methods inside, compared with
-  `==`, and printed as `Basis::X`. Variants with data come next.
+  `==`, and printed as `Basis::X`.
+- Variants with data, as values (`Outcome::Success(Bit)`) or named fields
+  (`Outcome::Retry { attempts: Int }`), matched with `Name(a, b)`, `Name { field, .. }` and
+  nested patterns. `match mv x` takes the parts; matching a place or a reference lends them
+  (`ref` or `mut`), and an enum holding qubits must be consumed like any other (N003).
 - `match`, with variant, literal (`0`, `-1`, `true`, `"text"`), tuple, array and catch-all
   patterns. Every case must be covered; arms are branches for ownership (N009). A `match` on
   a measurement result runs shot by shot for now.

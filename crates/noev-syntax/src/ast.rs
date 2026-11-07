@@ -739,7 +739,8 @@ pub enum PatData {
 pub struct FieldPat {
     /// The field.
     pub name: Symbol,
-    /// Its pattern; `None` binds a variable named like the field.
+    /// Its pattern. The parser makes `field` alone into `field: field`, so it is always
+    /// there.
     pub pat: Option<PatId>,
     /// Where it is.
     pub span: Span,

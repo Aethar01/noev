@@ -63,6 +63,8 @@ pub enum Callee {
     Builtin(Builtin),
     /// A conversion, such as `Float(n)`.
     Convert(Ty),
+    /// An enum variant with values, such as `Outcome::Success(b)`.
+    Variant(StructId, u32),
 }
 
 /// An implicit conversion applied to an expression's value where it is used.
@@ -193,6 +195,7 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         ret: Ty::UNIT,
         loops: 0,
         runs: 0,
+        lent_bindings: None,
     };
     checker.collect();
     checker.check_bodies();
@@ -216,6 +219,8 @@ struct Checker<'a> {
     loops: u32,
     /// How many `sample` runs enclose the current code.
     runs: u32,
+    /// While binding a `match` arm's pattern on a lent value: whether the lend is `mut`.
+    lent_bindings: Option<bool>,
 }
 
 // Collecting items.
@@ -380,13 +385,6 @@ impl Checker<'_> {
                                 (data, fields.iter().map(|f| f.name).collect(), true)
                             }
                         };
-                        if !data.is_empty() {
-                            self.error(variant.span, "variants with data are not supported yet")
-                                .help = Some(
-                                "they come next in 0.2; until then, an enum's variants hold nothing"
-                                    .into(),
-                            );
-                        }
                         resolved.push(VariantDef {
                             name: variant.name,
                             span: variant.span,
@@ -777,6 +775,16 @@ impl Checker<'_> {
                 }
             }
             PatKind::Name(name) => {
+                // Matching a lent value: names of parts that can't be copied are references.
+                let ty = match self.lent_bindings {
+                    Some(lent_mut)
+                        if !self.t.types.is_wildcard(ty)
+                            && self.t.types.linearity(ty) != Kind::Copyable =>
+                    {
+                        self.t.types.reference(lent_mut, ty)
+                    }
+                    _ => ty,
+                };
                 let local = self.declare(name, ty, mutable, node.span);
                 self.t.pat_locals[pat.index()] = Some(local);
             }
@@ -873,17 +881,79 @@ impl Checker<'_> {
             return;
         };
         self.t.pat_variants[pat.index()] = Some(index);
-        let has_data = !matches!(data, PatData::None);
-        let variant_data = self
-            .t
-            .types
-            .variants(enum_ty)
-            .map_or(0, |v| v[index as usize].data.len());
-        if has_data && variant_data == 0 {
-            let message = format!("`{}` holds nothing to match", self.path_text(path));
-            self.error(span, message);
+        let variant = self.t.types.variants(enum_ty).expect("an enum")[index as usize].clone();
+        let path_text = self.path_text(path);
+        match data {
+            PatData::None => {
+                if !variant.data.is_empty() {
+                    let message = if variant.named {
+                        format!("`{path_text}` holds data; take it with `{path_text} {{ .. }}`")
+                    } else {
+                        let blanks = vec!["_"; variant.data.len()].join(", ");
+                        format!("`{path_text}` holds data; take it with `{path_text}({blanks})`")
+                    };
+                    self.error(span, message);
+                }
+            }
+            PatData::Tuple(pats) => {
+                let pats = ast.list(pats);
+                if variant.named || pats.len() != variant.data.len() {
+                    let message = if variant.named {
+                        format!("`{path_text}` has named fields; write `{path_text} {{ … }}`")
+                    } else if variant.data.is_empty() {
+                        format!("`{path_text}` holds nothing to match")
+                    } else {
+                        format!(
+                            "`{path_text}` holds {} value{}, but the pattern has {}",
+                            variant.data.len(),
+                            if variant.data.len() == 1 { "" } else { "s" },
+                            pats.len()
+                        )
+                    };
+                    self.error(span, message);
+                    self.bind_data_wildcard(data, mutable);
+                    return;
+                }
+                for (&p, &ty) in pats.iter().zip(&variant.data) {
+                    self.bind(p, ty, mutable);
+                }
+            }
+            PatData::Fields { fields, rest } => {
+                if !variant.named {
+                    let message = format!("`{path_text}` has no named fields");
+                    self.error(span, message);
+                    self.bind_data_wildcard(data, mutable);
+                    return;
+                }
+                let mut seen = Vec::new();
+                for field in ast.list(fields) {
+                    let Some(i) = variant.names.iter().position(|&n| n == field.name) else {
+                        let message =
+                            format!("`{path_text}` has no field `{}`", self.name(field.name));
+                        self.error(field.span, message);
+                        if let Some(p) = field.pat {
+                            self.bind(p, Ty::ERROR, mutable);
+                        }
+                        continue;
+                    };
+                    seen.push(field.name);
+                    if let Some(p) = field.pat {
+                        self.bind(p, variant.data[i], mutable);
+                    }
+                }
+                let missing: Vec<&str> = variant
+                    .names
+                    .iter()
+                    .filter(|n| !seen.contains(n))
+                    .map(|&n| self.name(n))
+                    .collect();
+                if !rest && !missing.is_empty() {
+                    let message = format!("missing fields: `{}`", missing.join("`, `"));
+                    self.error(span, message).help =
+                        Some("name them, or end the pattern with `..` to ignore the rest".into());
+                }
+            }
         }
-        self.bind_data_wildcard(data, mutable);
     }
 
     /// Checks the sub-patterns of a variant's data against unknown types, so names in them
@@ -898,11 +968,8 @@ impl Checker<'_> {
             }
             PatData::Fields { fields, .. } => {
                 for field in self.ast.list(fields) {
-                    match field.pat {
-                        Some(p) => self.bind(p, Ty::ERROR, mutable),
-                        None => {
-                            self.declare(field.name, Ty::ERROR, mutable, field.span);
-                        }
+                    if let Some(p) = field.pat {
+                        self.bind(p, Ty::ERROR, mutable);
                     }
                 }
             }
@@ -920,8 +987,25 @@ impl Checker<'_> {
             PatKind::Literal(_) => true,
             PatKind::Variant { .. } => {
                 let ty = self.t.pat_types[pat.index()];
-                self.t.types.variants(ty).is_none_or(|v| v.len() > 1)
+                self.t.types.variants(ty).is_none_or(|v| v.len() > 1) || self.data_refutable(pat)
             }
+        }
+    }
+
+    /// Whether a variant pattern's data patterns can fail to match.
+    fn data_refutable(&self, pat: PatId) -> bool {
+        let ast = self.ast;
+        let PatKind::Variant { data, .. } = ast.pat(pat).kind else {
+            return false;
+        };
+        match data {
+            PatData::None => false,
+            PatData::Tuple(pats) => ast.list(pats).iter().any(|&p| self.refutable(p)),
+            PatData::Fields { fields, .. } => ast
+                .list(fields)
+                .iter()
+                .filter_map(|f| f.pat)
+                .any(|p| self.refutable(p)),
         }
     }
 }
@@ -1315,6 +1399,16 @@ impl Checker<'_> {
                 unreachable!("only enums have variants")
             };
             self.t.res[id.index()] = Res::Variant(s, index);
+            let variant = &self.t.types.variants(ty).expect("an enum")[index as usize];
+            if !variant.data.is_empty() {
+                let path = self.path_text(segments);
+                let message = if variant.named {
+                    format!("`{path}` holds data; write `{path} {{ … }}`")
+                } else {
+                    format!("`{path}` holds data; write `{path}(…)`")
+                };
+                self.error(span, message);
+            }
             return ty;
         }
         if let [ty_name, name] = *self.ast.list(segments)
@@ -1371,6 +1465,43 @@ impl Checker<'_> {
 
     fn struct_lit(&mut self, path: ExprId, inits: List<FieldInit>, span: Span) -> Ty {
         let ast = self.ast;
+        // `Enum::Variant { … }`: a variant with named fields.
+        if let ExprKind::Path(segments) = ast.expr(path).kind
+            && let [enum_name, name] = *ast.list(segments)
+            && let Some(enum_ty) = self.path_type(enum_name)
+            && let Some(index) = self.variant_index(enum_ty, name)
+        {
+            let TyKind::Struct(s) = *self.t.types.kind(enum_ty) else {
+                unreachable!("only enums have variants")
+            };
+            self.t.res[path.index()] = Res::Variant(s, index);
+            let variant = self.t.types.variants(enum_ty).expect("an enum")[index as usize].clone();
+            if !variant.named {
+                let message = if variant.data.is_empty() {
+                    format!(
+                        "`{}` holds nothing; write it without braces",
+                        self.path_text(segments)
+                    )
+                } else {
+                    format!(
+                        "`{}` holds values by position; write `{}(…)`",
+                        self.path_text(segments),
+                        self.path_text(segments)
+                    )
+                };
+                self.error(span, message);
+                self.skip_inits(inits);
+                return enum_ty;
+            }
+            let fields: Vec<(Symbol, Ty)> = variant
+                .names
+                .iter()
+                .copied()
+                .zip(variant.data.iter().copied())
+                .collect();
+            self.field_inits(inits, &fields, enum_ty, span);
+            return enum_ty;
+        }
         let struct_ty = match ast.expr(path).kind {
             ExprKind::Name(name) => self.path_type(name),
             _ => None,
@@ -1378,11 +1509,7 @@ impl Checker<'_> {
         let Some(struct_ty) = struct_ty else {
             let span = ast.expr(path).span;
             self.error(span, "cannot find this struct");
-            for init in ast.list(inits) {
-                if let Some(value) = init.value {
-                    self.expr(value, Expect::None);
-                }
-            }
+            self.skip_inits(inits);
             return Ty::ERROR;
         };
         let Some(id) = self.struct_of(struct_ty) else {
@@ -1390,13 +1517,45 @@ impl Checker<'_> {
             self.error(span, message);
             return Ty::ERROR;
         };
+        if self.t.types.structs[id.index()].variants.is_some() {
+            let message = format!(
+                "{} is an enum; write one of its variants, such as `{}::…`",
+                self.show(struct_ty),
+                self.t.types.display(struct_ty, ast)
+            );
+            self.error(span, message);
+            self.skip_inits(inits);
+            return Ty::ERROR;
+        }
         let fields = self.t.types.structs[id.index()].fields.clone();
+        self.field_inits(inits, &fields, struct_ty, span);
+        struct_ty
+    }
+
+    fn skip_inits(&mut self, inits: List<FieldInit>) {
+        for init in self.ast.list(inits) {
+            if let Some(value) = init.value {
+                self.expr(value, Expect::None);
+            }
+        }
+    }
+
+    /// Checks `field: value` (or `field` alone, a variable of that name) against `fields`,
+    /// each given exactly once.
+    fn field_inits(
+        &mut self,
+        inits: List<FieldInit>,
+        fields: &[(Symbol, Ty)],
+        owner: Ty,
+        span: Span,
+    ) {
+        let ast = self.ast;
         let mut seen: Vec<Symbol> = Vec::new();
         for init in ast.list(inits) {
             let Some(&(_, field_ty)) = fields.iter().find(|(n, _)| *n == init.name) else {
                 let message = format!(
                     "{} has no field `{}`",
-                    self.show(struct_ty),
+                    self.show(owner),
                     self.name(init.name)
                 );
                 self.error(init.span, message);
@@ -1444,7 +1603,6 @@ impl Checker<'_> {
             let message = format!("missing fields: `{}`", missing.join("`, `"));
             self.error(span, message);
         }
-        struct_ty
     }
 
     fn condition(&mut self, cond: ExprId) {
@@ -1531,13 +1689,18 @@ impl Checker<'_> {
         let ast = self.ast;
         let scrutinee_ty = self.expr(scrutinee, Expect::None);
         let ty = self.t.types.deref(scrutinee_ty);
-        if !self.t.types.is_wildcard(ty) && self.t.types.linearity(ty) != Kind::Copyable {
-            let span = ast.expr(scrutinee).span;
-            let message = format!("matching {} is not supported yet", self.show(ty));
-            self.error(span, message).help = Some(
-                "matching values that hold qubits comes with variants with data, in 0.2".into(),
-            );
-        }
+        // `match mv x` and temporaries give the arms the parts; a place or a reference lends
+        // them (`spec/ownership.md` §13).
+        let lent = match ast.expr(scrutinee).kind {
+            ExprKind::Own {
+                kind: OwnKind::Mv, ..
+            } => None,
+            _ => match *self.t.types.kind(scrutinee_ty) {
+                TyKind::Ref { mutable, .. } => Some(mutable),
+                _ if self.is_place(scrutinee) => Some(false),
+                _ => None,
+            },
+        };
         let arms = ast.list(arms);
         if arms.is_empty() {
             self.error(span, "a `match` needs at least one arm");
@@ -1547,7 +1710,9 @@ impl Checker<'_> {
         let mut all_never = true;
         for arm in arms {
             let mark = self.scope.len();
+            self.lent_bindings = lent;
             self.bind(arm.pat, ty, false);
+            self.lent_bindings = None;
             let arm_expect = match expect {
                 Expect::Discard | Expect::Ty(_) => expect,
                 Expect::None | Expect::Hint(_) => match result {
@@ -1573,6 +1738,18 @@ impl Checker<'_> {
         }
     }
 
+    /// Whether `id` names a place: a variable, or a field or element of one.
+    fn is_place(&self, id: ExprId) -> bool {
+        match self.ast.expr(id).kind {
+            ExprKind::Name(_) => matches!(self.t.res[id.index()], Res::Local(_)),
+            ExprKind::Field { base, .. }
+            | ExprKind::TupleIndex { base, .. }
+            | ExprKind::Index { base, .. } => self.is_place(base),
+            ExprKind::Own { place, .. } => self.is_place(place),
+            _ => false,
+        }
+    }
+
     /// Reports the values of `ty` no arm covers.
     fn check_exhaustive(&mut self, ty: Ty, arms: &[Arm], span: Span) {
         if self.t.types.is_wildcard(ty) || arms.iter().any(|a| !self.refutable(a.pat)) {
@@ -1582,6 +1759,7 @@ impl Checker<'_> {
         let missing: Vec<String> = if let Some(variants) = self.t.types.variants(ty) {
             let covered: Vec<u32> = arms
                 .iter()
+                .filter(|a| !self.data_refutable(a.pat))
                 .filter_map(|a| self.t.pat_variants[a.pat.index()])
                 .collect();
             let enum_name = self.t.types.display(ty, ast);
@@ -1723,6 +1901,12 @@ impl Checker<'_> {
             ExprKind::Path(segments) => {
                 if let [ty_name, name] = *ast.list(segments)
                     && let Some(ty) = self.path_type(ty_name)
+                    && let Some(index) = self.variant_index(ty, name)
+                {
+                    return self.variant_call(id, ty, index, segments, args, span);
+                }
+                if let [ty_name, name] = *ast.list(segments)
+                    && let Some(ty) = self.path_type(ty_name)
                 {
                     if let Some((callee_kind, sig)) = self.lookup_method(ty, name) {
                         self.t.callees[id.index()] = Some(callee_kind);
@@ -1749,6 +1933,43 @@ impl Checker<'_> {
                 self.skip_args(args)
             }
         }
+    }
+
+    /// `Enum::Variant(values…)`: like a call to a function taking the variant's data.
+    fn variant_call(
+        &mut self,
+        id: ExprId,
+        enum_ty: Ty,
+        index: u32,
+        segments: List<Symbol>,
+        args: &[ExprId],
+        span: Span,
+    ) -> Ty {
+        let TyKind::Struct(s) = *self.t.types.kind(enum_ty) else {
+            unreachable!("only enums have variants")
+        };
+        let variant = self.t.types.variants(enum_ty).expect("an enum")[index as usize].clone();
+        let path = self.path_text(segments);
+        if variant.named || variant.data.is_empty() {
+            let message = if variant.named {
+                format!("`{path}` has named fields; write `{path} {{ … }}`")
+            } else {
+                format!("`{path}` holds nothing; write it without `(…)`")
+            };
+            self.error(span, message);
+            self.skip_args(args);
+            return enum_ty;
+        }
+        self.t.callees[id.index()] = Some(Callee::Variant(s, index));
+        let sig = Sig {
+            receiver: None,
+            params: variant.data.clone(),
+            ret: enum_ty,
+            is_unsafe: false,
+            reversible: Reversible::Yes,
+        };
+        self.check_args(&sig, None, args, span);
+        enum_ty
     }
 
     /// A method or associated function of `ty`, built-in or declared in a struct.

@@ -2631,13 +2631,22 @@
           "type": "FIELD",
           "name": "name",
           "content": {
-            "type": "ALIAS",
-            "content": {
-              "type": "SYMBOL",
-              "name": "identifier"
-            },
-            "named": true,
-            "value": "type_identifier"
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "ALIAS",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "identifier"
+                },
+                "named": true,
+                "value": "type_identifier"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "path"
+              }
+            ]
           }
         },
         {

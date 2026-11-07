@@ -1,0 +1,4 @@
+(Outcome::Success(1), Outcome::Success(0), Outcome::Retry { attempts: 3, last: 0 }, Outcome::Failed)
+success with 1 success with 0 retry 3, last 0 failed
+true false
+1 0

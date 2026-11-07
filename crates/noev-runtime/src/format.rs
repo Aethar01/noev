@@ -145,11 +145,31 @@ fn write_value(program: &Program, value: &Value, ty: Ty, out: &mut String) {
         (Value::Distribution(d), _) => {
             let _ = write!(out, "{d}");
         }
-        (Value::Variant(index, _), &TyKind::Struct(s)) => {
+        (Value::Variant(index, data), &TyKind::Struct(s)) => {
+            let i = *index as usize;
             let variant = program.variant_names[s.index()]
-                .get(*index as usize)
+                .get(i)
                 .map_or("?", String::as_str);
             let _ = write!(out, "{}::{variant}", program.struct_names[s.index()]);
+            let def = types.structs[s.index()]
+                .variants
+                .as_ref()
+                .and_then(|v| v.get(i));
+            let Some(def) = def.filter(|_| !data.is_empty()) else {
+                return;
+            };
+            let names = &program.variant_fields[s.index()][i];
+            out.push_str(if def.named { " { " } else { "(" });
+            for (k, (item, &t)) in data.iter().zip(&def.data).enumerate() {
+                if k > 0 {
+                    out.push_str(", ");
+                }
+                if def.named {
+                    let _ = write!(out, "{}: ", names[k]);
+                }
+                write_value(program, item, t, out);
+            }
+            out.push_str(if def.named { " }" } else { ")" });
         }
         (Value::Variant(index, _), _) => {
             let _ = write!(out, "<variant {index}>");

@@ -1,0 +1,45 @@
+// Variants with data: building, matching, lending and moving, and printing.
+
+enum Outcome {
+    Success(Bit),
+    Retry { attempts: Int, last: Bit },
+    Failed
+}
+
+enum Spare {
+    One(Qubit),
+    Empty
+}
+
+fn describe(o: Outcome) -> String {
+    match o {
+        Outcome::Success(1) => "success with 1",
+        Outcome::Success(b) => "success with {b}",
+        Outcome::Retry { attempts, last } => "retry {attempts}, last {last}",
+        Outcome::Failed => "failed",
+    }
+}
+
+fn read(s: Spare) -> Bit {
+    match mv s {
+        Spare::One(q) => mv q.measure(),
+        Spare::Empty => 0,
+    }
+}
+
+fn flip(s: mut Spare) {
+    match s {
+        Spare::One(q) => q.x(),
+        Spare::Empty => {}
+    }
+}
+
+fn main() {
+    let all = (Outcome::Success(1), Outcome::Success(0), Outcome::Retry { attempts: 3, last: 0 }, Outcome::Failed)
+    print(all)
+    print(describe(all.0), describe(all.1), describe(all.2), describe(all.3))
+    print(all.0 == Outcome::Success(1), all.0 == all.1)
+    let mut s = Spare::One(|0>)
+    flip(mut s)
+    print(read(mv s), read(Spare::Empty))
+}

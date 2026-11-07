@@ -1260,6 +1260,8 @@ impl<'a> Walker<'a> {
             }
             // `Bool(b)` and `Bit(flag)` are logic, so allowed.
             Some(Callee::Convert(Ty::BOOL | Ty::BIT)) => any,
+            // Building a variant stores its values, which the rule allows.
+            Some(Callee::Variant(..)) => any,
             Some(Callee::Convert(_)) => {
                 if any && before {
                     self.violate(ast.expr(id).span, "converted to a number");

@@ -1,0 +1,74 @@
+// Variants with values and named fields, holding classical data and qubits.
+
+enum Outcome {
+    Success(Bit),
+    Retry { attempts: Int, last: Bit },
+    Failed
+
+    fn succeeded(ref self) -> Bool {
+        match self {
+            Outcome::Success(_) => true,
+            _ => false,
+        }
+    }
+}
+
+/// A qubit, or none.
+enum Spare {
+    One(Qubit),
+    Two(Qubit, Qubit),
+    Empty
+}
+
+fn make(n: Int) -> Spare {
+    match n {
+        0 => Spare::Empty,
+        1 => Spare::One(|+>),
+        _ => Spare::Two(|0>, |1>),
+    }
+}
+
+// Moved in: every arm consumes what it takes.
+fn use_up(s: Spare) -> Int {
+    match mv s {
+        Spare::One(q) => Int(mv q.measure()),
+        Spare::Two(a, b) => {
+            mv a.discard()
+            Int(mv b.measure())
+        }
+        Spare::Empty => 0,
+    }
+}
+
+// Lent: nothing is taken, and gates can still act through the references.
+fn flip_all(s: mut Spare) {
+    match s {
+        Spare::One(q) => q.x(),
+        Spare::Two(a, b) => {
+            a.x()
+            b.x()
+        }
+        Spare::Empty => {}
+    }
+}
+
+fn count(s: ref Spare) -> Int {
+    match s {
+        Spare::One(_) => 1,
+        Spare::Two(_, _) => 2,
+        Spare::Empty => 0,
+    }
+}
+
+fn main() {
+    let o = Outcome::Retry { attempts: 2, last: 1 }
+    let n = match o {
+        Outcome::Retry { attempts, .. } => attempts,
+        Outcome::Success(b) => Int(b),
+        Outcome::Failed => -1,
+    }
+    print(o, n, o.succeeded())
+    let mut s = make(2)
+    flip_all(mut s)
+    print(count(ref s), use_up(mv s))
+}

@@ -603,7 +603,9 @@ impl Machine<'_> {
         let mut value = &self.frames[ptr.frame][ptr.local];
         for &step in &ptr.path {
             value = match value {
-                Value::Aggregate(items) => &items[step],
+                Value::Aggregate(items) | Value::Variant(_, items) => items
+                    .get(step)
+                    .ok_or_else(|| RuntimeError::new("this variant does not hold that value"))?,
                 other => return Err(RuntimeError::new(format!("cannot take part of {other:?}"))),
             };
         }
@@ -614,7 +616,9 @@ impl Machine<'_> {
         let mut value = &mut self.frames[ptr.frame][ptr.local];
         for &step in &ptr.path {
             value = match value {
-                Value::Aggregate(items) => &mut items[step],
+                Value::Aggregate(items) | Value::Variant(_, items) => items
+                    .get_mut(step)
+                    .ok_or_else(|| RuntimeError::new("this variant does not hold that value"))?,
                 other => return Err(RuntimeError::new(format!("cannot take part of {other:?}"))),
             };
         }
