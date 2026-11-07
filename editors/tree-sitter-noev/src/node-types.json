@@ -6478,6 +6478,10 @@
         {
           "type": "trait_item",
           "named": true
+        },
+        {
+          "type": "type_item",
+          "named": true
         }
       ]
     }
@@ -6818,6 +6822,52 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "type_item",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "type_identifier",
+            "named": true
+          }
+        ]
+      },
+      "type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "array_type",
+            "named": true
+          },
+          {
+            "type": "generic_type",
+            "named": true
+          },
+          {
+            "type": "reference_type",
+            "named": true
+          },
+          {
+            "type": "tuple_type",
+            "named": true
+          },
+          {
+            "type": "type_path",
+            "named": true
+          },
+          {
+            "type": "unit_type",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {

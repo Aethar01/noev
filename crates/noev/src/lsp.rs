@@ -446,6 +446,12 @@ impl Document {
         if let Some(f) = self.function_named_at(offset) {
             return Some(self.describe_fn(f));
         }
+        // A type in a parameter's or variable's annotation, rather than the variable.
+        if let Some(name) = self.type_named_at(offset)
+            && let Some(found) = self.describe_struct(name)
+        {
+            return Some(found);
+        }
         if let Some(local) = self.local_declared_at(offset) {
             return Some(self.describe_local(local));
         }
@@ -457,11 +463,6 @@ impl Document {
         }
         if let Some((s, index)) = self.variant_pattern_at(offset) {
             return self.describe_variant(s, index);
-        }
-        if let Some(name) = self.type_named_at(offset)
-            && let Some(found) = self.describe_struct(name)
-        {
-            return Some(found);
         }
         let expr = self.expr_at(offset)?;
         let kind = ast.expr(expr).kind;
@@ -657,6 +658,12 @@ impl Document {
                     code.push('}');
                     Some((code, self.doc_comment(item.span).unwrap_or_default()))
                 }
+                ItemKind::Type { name: n, ty, .. } if n == name => {
+                    let span = ast.ty(ty).span;
+                    let named = &self.text[span.start as usize..span.end as usize];
+                    let code = format!("type {} = {named}", ast.name(name));
+                    Some((code, self.doc_comment(item.span).unwrap_or_default()))
+                }
                 _ => None,
             })
             .or_else(|| {
@@ -725,6 +732,9 @@ impl Document {
                     name, name_span, ..
                 }
                 | ItemKind::Enum {
+                    name, name_span, ..
+                }
+                | ItemKind::Type {
                     name, name_span, ..
                 } => (name, name_span),
                 _ => continue,
@@ -1079,6 +1089,9 @@ impl Document {
                 }
                 | ItemKind::Enum {
                     name: n, name_span, ..
+                }
+                | ItemKind::Type {
+                    name: n, name_span, ..
                 } if n == name => Some(name_span),
                 _ => None,
             })
@@ -1132,6 +1145,22 @@ impl Document {
                 let item = ast.item(item);
                 match item.kind {
                     ItemKind::Fn(f) => Some(function(f, SymbolKind::FUNCTION)),
+                    ItemKind::Type {
+                        name,
+                        name_span,
+                        ty,
+                    } => {
+                        let span = ast.ty(ty).span;
+                        let named = self.text[span.start as usize..span.end as usize].to_string();
+                        Some(symbol(
+                            ast.name(name).to_string(),
+                            Some(named),
+                            SymbolKind::TYPE_PARAMETER,
+                            item.span,
+                            name_span,
+                            None,
+                        ))
+                    }
                     ItemKind::Enum {
                         name,
                         name_span,

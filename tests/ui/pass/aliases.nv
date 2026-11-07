@@ -1,0 +1,27 @@
+// Type aliases (spec/types.md §2): another name for the same type.
+
+/// Eight measured bits.
+type Byte = [Bit; 8]
+type Register = [Qubit; 8]
+type Reading = Result<Byte, String>
+type Pair = Point
+
+struct Point {
+    x: Int
+    y: Int
+    fn origin() -> Self { Point { x: 0, y: 0 } }
+}
+
+fn read(r: Register) -> Byte { mv r.measure() }
+
+fn checked(b: Byte) -> Reading {
+    if b[0] == 1 { Ok(b) } else { Err("low bit is 0") }
+}
+
+fn main() {
+    let r: Register = |10110011>
+    print(checked(read(mv r)))
+    let p = Pair { x: 1, y: 2 }
+    let o = Pair::origin()
+    print(p.x + o.y)
+}

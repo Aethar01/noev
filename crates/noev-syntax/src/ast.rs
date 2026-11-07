@@ -882,6 +882,15 @@ pub enum ItemKind {
         /// Methods and associated functions.
         methods: List<FnId>,
     },
+    /// `type Name = Type`: another name for a type.
+    Type {
+        /// The alias.
+        name: Symbol,
+        /// Where the name is.
+        name_span: Span,
+        /// The type it names.
+        ty: TypeId,
+    },
     /// `trait Name { … }` (Reserved).
     Trait {
         /// The trait's name.

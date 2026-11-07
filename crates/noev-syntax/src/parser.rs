@@ -331,6 +331,17 @@ impl Parser<'_> {
             _ if self.at_fn_start() => ItemKind::Fn(self.fn_decl(true)),
             TokenKind::Struct => self.struct_def(),
             TokenKind::Enum => self.enum_def(),
+            TokenKind::Type => {
+                self.bump();
+                let (name, name_span) = self.name("a type name");
+                self.expect(TokenKind::Eq, "`=`");
+                let ty = self.ty();
+                ItemKind::Type {
+                    name,
+                    name_span,
+                    ty,
+                }
+            }
             TokenKind::Trait => self.trait_def(),
             TokenKind::Impl => self.impl_def(),
             TokenKind::Extern => {

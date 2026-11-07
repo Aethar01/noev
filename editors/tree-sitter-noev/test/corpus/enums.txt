@@ -113,3 +113,24 @@ fn main() {
             (integer))
           (field_initializer
             (field_identifier)))))))
+
+================================================================================
+Type alias
+================================================================================
+
+type Reading = Result<[Bit; 8], String>
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (type_item
+    (type_identifier)
+    (generic_type
+      (type_path
+        (type_identifier))
+      (array_type
+        (type_path
+          (type_identifier))
+        (integer))
+      (type_path
+        (type_identifier)))))

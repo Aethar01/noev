@@ -173,7 +173,9 @@ Terminals are quoted. `sep` is a line break (as defined above), `;` or `,` where
 
 ```ebnf
 program     = { item } ;
-item        = struct_def | enum_def | fn_def | trait_def | impl_def | extern_def ;
+item        = struct_def | enum_def | type_alias | fn_def | trait_def | impl_def | extern_def ;
+
+type_alias  = "type" IDENT "=" type ;
 
 struct_def  = "struct" IDENT "{" { member ( sep | "," ) } "}" ;
 member      = field | fn_def ;

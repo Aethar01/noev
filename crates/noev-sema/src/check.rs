@@ -197,6 +197,9 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         runs: 0,
         lent_bindings: None,
         std_enums: FxHashMap::default(),
+        aliases: FxHashMap::default(),
+        alias_types: FxHashMap::default(),
+        resolving_aliases: Vec::new(),
     };
     checker.collect();
     checker.check_bodies();
@@ -224,6 +227,12 @@ struct Checker<'a> {
     lent_bindings: Option<bool>,
     /// The `Option` and `Result` types made so far, by name and type arguments.
     std_enums: FxHashMap<(Symbol, Vec<Ty>), StructId>,
+    /// Type aliases: the type each names, and where its name is.
+    aliases: FxHashMap<Symbol, (TypeId, Span)>,
+    /// The aliases resolved so far.
+    alias_types: FxHashMap<Symbol, Ty>,
+    /// The aliases being resolved, innermost last, to catch one that names itself.
+    resolving_aliases: Vec<Symbol>,
 }
 
 // Collecting items.
@@ -269,8 +278,31 @@ impl Checker<'_> {
         self.t.types.basis = Some(basis_ty);
         let std_types = self.t.types.structs.len() as u32;
 
-        // Struct and enum names next, so field and parameter types can refer to any of them.
+        // Struct, enum and alias names next, so field and parameter types can refer to any
+        // of them.
         for &item in items {
+            if let ItemKind::Type {
+                name,
+                name_span,
+                ty,
+            } = ast.item(item).kind
+            {
+                let text = self.name(name).to_string();
+                if prelude::builtin_type(&text).is_some() {
+                    let message =
+                        format!("`{text}` is a built-in type; an alias needs a name of its own");
+                    self.error(name_span, message);
+                } else if self.aliases.insert(name, (ty, name_span)).is_some()
+                    || self
+                        .struct_names
+                        .get(&name)
+                        .is_some_and(|e| e.0 >= std_types)
+                {
+                    let message = format!("the type `{text}` is defined twice");
+                    self.error(name_span, message);
+                }
+                continue;
+            }
             let (name, name_span, is_enum) = match ast.item(item).kind {
                 ItemKind::Struct {
                     name, name_span, ..
@@ -282,7 +314,7 @@ impl Checker<'_> {
             };
             let id = StructId(self.t.types.structs.len() as u32);
             let earlier = self.struct_names.insert(name, id);
-            if earlier.is_some_and(|e| e.0 >= std_types) {
+            if earlier.is_some_and(|e| e.0 >= std_types) || self.aliases.contains_key(&name) {
                 let message = format!("the type `{}` is defined twice", self.name(name));
                 self.error(name_span, message);
             }
@@ -294,6 +326,13 @@ impl Checker<'_> {
                 args: Vec::new(),
                 bare: false,
             });
+        }
+
+        // Every alias, so a broken one is reported even if nothing uses it.
+        let mut aliases: Vec<Symbol> = self.aliases.keys().copied().collect();
+        aliases.sort_by_key(|a| self.aliases[a].1.start);
+        for alias in aliases {
+            self.alias_type(alias);
         }
 
         self.t.fns = ast
@@ -429,9 +468,31 @@ impl Checker<'_> {
                     self.error(item.span, "`impl` blocks are not supported yet")
                         .help = Some("methods go inside the struct".into());
                 }
-                ItemKind::Error => {}
+                ItemKind::Type { .. } | ItemKind::Error => {}
             }
         }
+    }
+
+    /// The type the alias `name` names, if there is one (`spec/types.md` §2).
+    fn alias_type(&mut self, name: Symbol) -> Option<Ty> {
+        if let Some(&ty) = self.alias_types.get(&name) {
+            return Some(ty);
+        }
+        let &(id, span) = self.aliases.get(&name)?;
+        if self.resolving_aliases.contains(&name) {
+            let message = format!("the alias `{}` names itself", self.name(name));
+            self.error(span, message).help = Some(
+                "an alias names another type; for a type that holds itself, use an enum".into(),
+            );
+            self.alias_types.insert(name, Ty::ERROR);
+            return Some(Ty::ERROR);
+        }
+        self.resolving_aliases.push(name);
+        let ty = self.resolve_type(id);
+        self.resolving_aliases.pop();
+        // A cycle through this alias was reported where it closed.
+        let ty = *self.alias_types.entry(name).or_insert(ty);
+        Some(ty)
     }
 
     /// `main` takes no parameters and returns `()` (`spec/execution.md` §6).
@@ -543,7 +604,7 @@ impl Checker<'_> {
             }
             TypeKind::Path(segments) => {
                 if let [single] = ast.list(segments) {
-                    let name = self.name(*single);
+                    let name = ast.name(*single);
                     if let Some(ty) = prelude::builtin_type(name) {
                         return ty;
                     }
@@ -556,6 +617,9 @@ impl Checker<'_> {
                     }
                     if let Some(&id) = self.struct_names.get(single) {
                         return self.t.types.struct_ty(id);
+                    }
+                    if let Some(ty) = self.alias_type(*single) {
+                        return ty;
                     }
                     if name == "Option" || name == "Result" {
                         let example = if name == "Option" {
@@ -1433,8 +1497,10 @@ impl Checker<'_> {
         if text == "Self" {
             return self.self_ty;
         }
-        let id = *self.struct_names.get(&name)?;
-        Some(self.t.types.struct_ty(id))
+        if let Some(&id) = self.struct_names.get(&name) {
+            return Some(self.t.types.struct_ty(id));
+        }
+        self.alias_type(name)
     }
 
     /// A path used as a value: a variant such as `Basis::X`, or a constant such as `Float::PI`.

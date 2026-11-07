@@ -38,6 +38,8 @@ logical qubit. The compiler and runtime decide which physical qubit that is.
   [grammar.md](grammar.md) §2). Any field may be of any type, so a struct can mix classical
   and quantum fields freely.
 - **Enums**: a value that is one of several variants, each with its own data (below).
+- **Type aliases** `type Byte = [Bit; 8]`: another name for a type, interchangeable with it
+  everywhere (below).
 - **Distributions** `Distribution<T>`: how often each value of a classical type `T` occurred
   in repeated runs, made by `sample` ([execution.md](execution.md) §3). Copyable.
 - **References** `ref T` (shared) and `mut T` (exclusive). See
@@ -76,6 +78,23 @@ enum Outcome {
   variants' data (§5), and ownership follows from that ([ownership.md](ownership.md) §13).
 - Enums whose data can be compared can be compared with `==` and `!=`: same variant and
   equal data.
+
+**Type aliases** name a type that is long or used often:
+
+```noev
+type Byte = [Bit; 8]
+type Register = [Qubit; 8]
+type Reading = Result<Byte, String>
+
+fn read(r: Register) -> Byte { mv r.measure() }
+```
+
+An alias is the same type as what it names, not a new one: a `Byte` is a `[Bit; 8]`, passes
+where one is expected, and is linear, copyable or neither exactly as that type is. It can name
+any type, including another alias, but not itself, directly or through others. An alias of a
+struct or enum also names its variants, associated functions and literals (`R::new()`,
+`R { … }`). Error messages show the type an alias names. For a type that is new, so that it
+cannot be mixed up with what it holds, declare a struct.
 
 **`Option` and `Result`** are built-in enums until Noev has generics (§6), like
 `Distribution<T>`:

@@ -389,7 +389,7 @@ Planned once milestones 1–7 are done, roughly in this order.
 | #  | Step                          | Description                                                          | Status  |
 | -- | ----------------------------- | -------------------------------------------------------------------- | ------- |
 | 1  | Y-basis kets and bras         | `(+i)` and `(-i)`: a label in parentheses is one qubit               | ☑ Done |
-| 2  | Type aliases                  | `type Byte = [Bit; 8]`: another name for the same type                | ☐ Todo |
+| 2  | Type aliases                  | `type Byte = [Bit; 8]`: another name for the same type                | ☑ Done |
 | 3  | Arbitrary-precision `Int`     | Never overflows; small values stay as fast as `i64`                   | ☐ Todo |
 | 4  | Sized numbers                 | `i8`…`i64`, `u8`…`u64`, `f32`, `f64`; checked conversions; bit arrays as unsigned numbers | ☐ Todo |
 | 5  | Arbitrary-precision `Float`   | Semantics to decide: precision of division and functions              | ☐ Todo |

@@ -49,9 +49,26 @@ module.exports = grammar({
     source_file: ($) => repeat($._item),
 
     _item: ($) =>
-      choice($.struct_item, $.enum_item, $.function_item, $.trait_item, $.impl_item, $.extern_item),
+      choice(
+        $.struct_item,
+        $.enum_item,
+        $.type_item,
+        $.function_item,
+        $.trait_item,
+        $.impl_item,
+        $.extern_item,
+      ),
 
     // Items
+
+    // `type Byte = [Bit; 8]`.
+    type_item: ($) =>
+      seq(
+        'type',
+        field('name', alias($.identifier, $.type_identifier)),
+        '=',
+        field('type', $._type),
+      ),
 
     struct_item: ($) =>
       seq(

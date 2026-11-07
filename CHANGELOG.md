@@ -23,6 +23,8 @@ before 1.0.
   patterns. Every case must be covered, looking inside tuples, arrays and variants' data
   (`(0, 0)`, `(0, 1)`, `(1, _)` cover a pair of bits), and an error names a value no arm
   takes, such as `(1, 1)` or `Some(1)`. Arms are branches for ownership (N009).
+- Type aliases: `type Byte = [Bit; 8]` is another name for the same type, including its
+  variants, associated functions and literals for a struct or enum.
 - Kets and bras for the Y basis: `(+i)` and `(-i)`, a label in parentheses being one qubit
   (`|0(+i)>` is two qubits, `<(-i)| mv q` tests for \|−i⟩).
 - `measure_in(Basis::X)` measures a qubit, or every qubit of an array, in the X, Y or Z
@@ -38,6 +40,8 @@ before 1.0.
 
 - Enums and `match` in the tree-sitter grammar and the language server (hover, go to
   definition, symbols); hover on type names, `Self` included.
+- Hover on a type in a parameter's annotation shows the type, not the parameter; aliases
+  have hover, go to definition and symbols.
 - Hover and go to definition on fields everywhere: where they are declared, in struct
   literals (`Retry { attempts: 2 }`) and in patterns; on variants where they are declared
   and where they are called with their data.

@@ -63,3 +63,9 @@ fn option_arm_keeps_its_qubit(o: Option<Qubit>) {
         None => {}
     }
 }
+
+type Pair = [Qubit; 2]
+
+fn alias_not_consumed() {
+    let p: Pair = |01>
+}                                   //~ N003

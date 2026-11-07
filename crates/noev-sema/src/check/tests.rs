@@ -296,6 +296,25 @@ fn coverage_looks_inside_patterns() {
 }
 
 #[test]
+fn type_aliases() {
+    ok("type Byte = [Bit; 8]\nfn f(b: Byte) -> [Bit; 8] { b }");
+    ok("type A = B\ntype B = Int\nfn f(a: A) -> Int { a + 1 }");
+    ok("struct P { x: Int }\ntype Q = P\nfn f() -> Int { let q = Q { x: 1 }\n q.x }");
+    assert_eq!(
+        one_error("type A = B\ntype B = A\nfn f() {}"),
+        "the alias `A` names itself"
+    );
+    assert_eq!(
+        one_error("type Int = Bit\nfn f() {}"),
+        "`Int` is a built-in type; an alias needs a name of its own"
+    );
+    assert_eq!(
+        one_error("type P = Int\nstruct P { x: Int }\nfn f() {}"),
+        "the type `P` is defined twice"
+    );
+}
+
+#[test]
 fn ui_tests_type_check_cleanly() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/ui");
     let mut stack = vec![std::path::PathBuf::from(dir)];
