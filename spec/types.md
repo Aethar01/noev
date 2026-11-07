@@ -7,13 +7,24 @@ no implicit conversions except the literal typing rules in §3.
 
 | Type    | Kind      | Description                                                 |
 | ------- | --------- | ----------------------------------------------------------- |
-| `Int`   | classical | 64-bit signed integer                                       |
+| `Int`   | classical | An integer of any size: never overflows                     |
 | `Float` | classical | 64-bit IEEE 754 float                                       |
 | `Bool`  | classical | `true` or `false`                                           |
 | `Bit`   | classical | A classical bit, usually the result of a measurement        |
 | `Qubit` | quantum   | Ownership of one logical qubit                              |
 | `String`| classical | Immutable text                                              |
 | `()`    | classical | Unit; the type of statements and of functions with no `->` |
+
+`Int` grows as needed, so results such as `1 << 100` and literals such as
+`123456789012345678901234567890` are exact. Values that fit in 64 bits, almost all of them in
+practice, are as fast as a machine integer. Its operators:
+
+- `/` truncates toward zero and `%` takes the sign of the dividend, as in Rust and C; dividing
+  by zero is a runtime error.
+- `&`, `|`, `^` and `~` act as on an endless two's-complement number, so `~0 == -1`; `>>`
+  rounds toward negative infinity. Shifting by a negative amount is a runtime error.
+- Where a machine-sized number is needed (an array index, a shot count) a value out of that
+  range is a runtime error.
 
 `Bit` and `Bool` are separate types: `Bit` is data (a measurement outcome, part of a bit
 string), `Bool` is logic. Both can be used as an `if` or `while` condition (a `Bit` is true
@@ -222,8 +233,8 @@ users can define conversions for their own types.
 
 | Conversion                 | Form              | Rule                                  |
 | -------------------------- | ----------------- | ------------------------------------- |
-| `Int → Float`              | `Float(n)`        | Exact up to 2⁵³, rounded to nearest beyond (accepted as lossless by convention) |
-| `Float → Int`              | `f.trunc()`, `f.round()`, `f.floor()`, `f.ceil()` | Saturates at the `Int` range; NaN is a runtime error |
+| `Int → Float`              | `Float(n)`        | Exact up to 2⁵³, rounded to nearest beyond, infinite past the `Float` range (accepted as lossless by convention) |
+| `Float → Int`              | `f.trunc()`, `f.round()`, `f.floor()`, `f.ceil()` | Exact; NaN and infinities are runtime errors |
 | `Bit ↔ Bool`               | `Bool(b)`, `Bit(flag)` | `1` ↔ `true`                     |
 | `Bit → Int`, `Bool → Int`  | `Int(b)`          | `0` or `1`                            |
 | `Int → Bit`                | none in v0.1      | Write `if n == 0 { 0 } else { 1 }`, or wait for `Bit::try_from` |

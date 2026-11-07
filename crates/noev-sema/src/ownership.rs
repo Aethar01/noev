@@ -784,6 +784,7 @@ impl Owner<'_> {
         match expr.kind {
             ExprKind::Error
             | ExprKind::Int(_)
+            | ExprKind::BigInt
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
             | ExprKind::Unit

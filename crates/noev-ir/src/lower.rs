@@ -478,7 +478,10 @@ impl Builder<'_> {
                         Rvalue::Binary(op, Operand::Copy(target.clone()), value)
                     }
                 };
+                // `d /= 0` fails here, so errors point at the statement.
+                let outer = std::mem::replace(&mut self.span, stmt.span);
                 self.assign(target, rvalue);
+                self.span = outer;
             }
             StmtKind::Return(value) => {
                 if let Some(value) = value {
@@ -799,7 +802,16 @@ impl Builder<'_> {
             ExprKind::Int(v) if self.ty(id) == Ty::BIT => {
                 return Operand::Const(Const::Bit(v == 1));
             }
-            ExprKind::Int(v) => return Operand::Const(Const::Int(v as i64)),
+            ExprKind::Int(v) if let Ok(v) = i64::try_from(v) => {
+                return Operand::Const(Const::Int(v));
+            }
+            // Past `i64`: computed from its text (spec/types.md §1).
+            ExprKind::Int(_) | ExprKind::BigInt => {
+                let temp = self.temp(Ty::INT);
+                let text = self.text(expr.span).to_string();
+                self.assign(temp.clone(), Rvalue::BigInt(text));
+                return Operand::Copy(temp);
+            }
             ExprKind::Float(v) => return Operand::Const(Const::Float(v)),
             ExprKind::Bool(v) => return Operand::Const(Const::Bool(v)),
             ExprKind::Unit => return Operand::Const(Const::Unit),
@@ -951,7 +963,6 @@ impl Builder<'_> {
         target
     }
 
-    /// Computes an expression into `dest`, or for its effects only.
     /// Lowers an expression into `dest`; its statements carry its span, unless a part of it
     /// has its own.
     fn expr_into(&mut self, id: ExprId, dest: Option<Place>) {
@@ -965,7 +976,11 @@ impl Builder<'_> {
         let expr = *ast.expr(id);
         match expr.kind {
             ExprKind::Error | ExprKind::With { .. } => {}
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Unit => {
+            ExprKind::Int(_)
+            | ExprKind::BigInt
+            | ExprKind::Float(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Unit => {
                 let op = self.operand(id);
                 self.set(&dest, Rvalue::Use(op));
             }

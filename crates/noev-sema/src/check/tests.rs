@@ -296,6 +296,11 @@ fn coverage_looks_inside_patterns() {
 }
 
 #[test]
+fn literals_of_any_size() {
+    ok("fn f() -> Int { 123456789012345678901234567890 + 0xffff_ffff_ffff_ffff_ff }");
+}
+
+#[test]
 fn type_aliases() {
     ok("type Byte = [Bit; 8]\nfn f(b: Byte) -> [Bit; 8] { b }");
     ok("type A = B\ntype B = Int\nfn f(a: A) -> Int { a + 1 }");

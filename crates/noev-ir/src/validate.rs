@@ -59,7 +59,7 @@ pub fn validate(program: &Program) -> Vec<String> {
                                 check_operand(index, &mut report);
                                 check_operand(bit, &mut report);
                             }
-                            Rvalue::FloatConst(_) | Rvalue::Identity => {}
+                            Rvalue::FloatConst(_) | Rvalue::BigInt(_) | Rvalue::Identity => {}
                             Rvalue::Format(parts) => {
                                 for part in parts {
                                     if let FormatPart::Value(op, _, _) = part {

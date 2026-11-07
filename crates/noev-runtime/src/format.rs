@@ -20,15 +20,14 @@ pub fn format(program: &Program, value: &Value, ty: Ty, spec: Option<&FormatSpec
     // The text before padding, and whether it is a number (for alignment and zero padding).
     let (sign, digits, numeric) = match value {
         Value::Int(v) => {
-            let magnitude = v.unsigned_abs();
             let digits = match spec.kind {
-                Some(FormatKind::Binary) => format!("{magnitude:b}"),
-                Some(FormatKind::Octal) => format!("{magnitude:o}"),
-                Some(FormatKind::Hex) => format!("{magnitude:x}"),
-                Some(FormatKind::HexUpper) => format!("{magnitude:X}"),
-                _ => magnitude.to_string(),
+                Some(FormatKind::Binary) => v.magnitude_digits(2),
+                Some(FormatKind::Octal) => v.magnitude_digits(8),
+                Some(FormatKind::Hex) => v.magnitude_digits(16),
+                Some(FormatKind::HexUpper) => v.magnitude_digits(16).to_uppercase(),
+                _ => v.magnitude_digits(10),
             };
-            (sign(*v < 0, spec.plus), digits, true)
+            (sign(v.is_negative(), spec.plus), digits, true)
         }
         Value::Float(v) => {
             let magnitude = v.abs();
@@ -257,7 +256,7 @@ mod tests {
     #[test]
     fn specs() {
         let p = empty_program();
-        let int = |v: i64, s: &str| format(&p, &Value::Int(v), Ty::INT, Some(&spec(s)));
+        let int = |v: i64, s: &str| format(&p, &Value::Int(v.into()), Ty::INT, Some(&spec(s)));
         let float = |v: f64, s: &str| format(&p, &Value::Float(v), Ty::FLOAT, Some(&spec(s)));
         assert_eq!(int(42, ">5"), "   42");
         assert_eq!(int(42, "<5"), "42   ");

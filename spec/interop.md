@@ -23,7 +23,7 @@ written.
 
 | Noev                     | Rust                         | C                    | Python          |
 | ------------------------ | ---------------------------- | -------------------- | --------------- |
-| `Int`                    | `i64`                        | `int64_t`            | `int`           |
+| `Int`                    | `i64`, checked               | `int64_t`, checked   | `int`           |
 | `Float`                  | `f64`                        | `double`             | `float`         |
 | `Bool`                   | `bool`                       | `bool`               | `bool`          |
 | `Bit`                    | `noev::Bit`                  | `uint8_t` (0 or 1)   | `int` (0 or 1)  |
@@ -31,6 +31,8 @@ written.
 | `(A, B)`, `[T; N]`       | tuples, `[T; N]`             | not supported at first | tuples, lists |
 | classical structs        | generated, or `noev::Value`  | not supported at first | objects       |
 | `Observable`             | `noev::Observable`           | not supported        | object          |
+
+"Checked": an `Int` outside the 64-bit range is an error where it crosses.
 
 Quantum work is done by calling Noev functions that create and consume their own qubits,
 such as a function returning an expectation value. The host never holds a qubit.

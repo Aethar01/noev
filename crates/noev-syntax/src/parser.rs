@@ -1385,7 +1385,11 @@ impl Parser<'_> {
         let kind = match self.kind() {
             Int => {
                 self.bump();
-                ExprKind::Int(self.int_value(start).unwrap_or(0))
+                // `Int` has any size (spec/types.md §1); only large ones need their text.
+                match parse_u64(self.text(start)) {
+                    Some(value) => ExprKind::Int(value),
+                    None => ExprKind::BigInt,
+                }
             }
             Float => {
                 self.bump();
@@ -1452,22 +1456,13 @@ impl Parser<'_> {
         self.push(kind, start)
     }
 
+    /// An integer literal that must fit in a `u64` (an array length, a pattern).
     fn int_value(&mut self, span: Span) -> Option<u64> {
-        let text = self.text(span).replace('_', "");
-        let value = if let Some(hex) = text.strip_prefix("0x") {
-            u64::from_str_radix(hex, 16)
-        } else if let Some(bin) = text.strip_prefix("0b") {
-            u64::from_str_radix(bin, 2)
-        } else {
-            text.parse()
-        };
-        match value {
-            Ok(value) => Some(value),
-            Err(_) => {
-                self.error(span, "integer literal is too large");
-                None
-            }
+        let value = parse_u64(self.text(span));
+        if value.is_none() {
+            self.error(span, "integer literal is too large here");
         }
+        value
     }
 
     fn path_expr(&mut self) -> ExprId {
@@ -2081,6 +2076,19 @@ impl DiagnosticExt for Diagnostic {
     fn with_label_mut(&mut self, span: Span, message: impl Into<String>) -> &mut Self {
         self.labels.push((span, message.into()));
         self
+    }
+}
+
+/// An integer literal's value (decimal, `0x…` or `0b…`, with `_` between digits), if it fits
+/// in a `u64`.
+fn parse_u64(text: &str) -> Option<u64> {
+    let text = text.replace('_', "");
+    if let Some(hex) = text.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16).ok()
+    } else if let Some(bin) = text.strip_prefix("0b") {
+        u64::from_str_radix(bin, 2).ok()
+    } else {
+        text.parse().ok()
     }
 }
 

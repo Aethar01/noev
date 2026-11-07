@@ -793,6 +793,8 @@ dependencies = [
  "noev-ir",
  "noev-sema",
  "noev-syntax",
+ "num-bigint",
+ "num-traits",
  "rand 0.9.5",
 ]
 

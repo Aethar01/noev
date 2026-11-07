@@ -1,0 +1,25 @@
+// `Int` has any size (spec/types.md §1): it never overflows, and small values stay small.
+
+fn factorial(n: Int) -> Int {
+    let mut r = 1
+    for i in 1..n + 1 {
+        r *= i
+    }
+    r
+}
+
+fn main() {
+    let mut n = 9223372036854775807
+    n += 1
+    print(n, -n - 1, n - 1)
+    print(factorial(30), factorial(30) / factorial(28))
+    print(123456789012345678901234567890 % 1000, 0xffff_ffff_ffff_ffff_ff)
+    // Endless two's complement, and `>>` rounding down.
+    print(1 << 100, (1 << 100) >> 99, ~(1 << 70), -(1 << 70) >> 69)
+    print("{factorial(25):x} {factorial(22):+}")
+    // Division truncates toward zero; the remainder has the dividend's sign.
+    print(-7 / 2, -7 % 2, -(1 << 80) / 3, -(1 << 80) % 3)
+    print(Float(1 << 80), (2.5e20).trunc())
+    let a = [10, 20, 30]
+    print(a[n - 9223372036854775807])
+}

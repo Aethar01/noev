@@ -55,6 +55,7 @@ fn sexp(ast: &Ast, source: &str, id: ExprId) -> String {
     match expr.kind {
         ExprKind::Error => "<error>".into(),
         ExprKind::Int(v) => v.to_string(),
+        ExprKind::BigInt => expr.span.text(source).into(),
         ExprKind::Float(v) => format!("{v:?}"),
         ExprKind::Bool(v) => v.to_string(),
         ExprKind::Ket { .. } => expr.span.text(source).into(),

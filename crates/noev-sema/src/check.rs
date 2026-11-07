@@ -1186,6 +1186,7 @@ impl Checker<'_> {
                     Ty::INT
                 }
             }
+            ExprKind::BigInt => Ty::INT,
             ExprKind::Float(_) => Ty::FLOAT,
             ExprKind::Str(parts) => self.string(parts),
             ExprKind::Bool(_) => Ty::BOOL,

@@ -4,6 +4,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::backend::Condition;
+use crate::int::Int;
 
 /// A value held by a local or computed by an expression.
 #[derive(Clone, Debug, PartialEq)]
@@ -11,7 +12,7 @@ pub enum Value {
     /// `()`, and the contents of a local before it is assigned.
     Unit,
     /// An `Int`.
-    Int(i64),
+    Int(Int),
     /// A `Float`.
     Float(f64),
     /// A `Bool`.
@@ -373,7 +374,7 @@ mod tests {
     fn bit_strings() {
         let bits = Value::Aggregate(vec![Value::Bit(false), Value::Bit(true)]);
         assert_eq!(bits.to_string(), "01");
-        let mixed = Value::Aggregate(vec![Value::Int(3), Value::Bool(true)]);
+        let mixed = Value::Aggregate(vec![Value::Int(Int::from(3)), Value::Bool(true)]);
         assert_eq!(mixed.to_string(), "(3, true)");
     }
 }

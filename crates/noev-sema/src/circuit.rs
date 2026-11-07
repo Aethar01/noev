@@ -450,7 +450,11 @@ pub fn short_circuit_free(ast: &Ast, cond: ExprId) -> bool {
 /// fields, and logic and comparisons of them.
 pub fn is_pure(ast: &Ast, id: ExprId) -> bool {
     match ast.expr(id).kind {
-        ExprKind::Name(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
+        ExprKind::Name(_)
+        | ExprKind::Int(_)
+        | ExprKind::BigInt
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_) => true,
         ExprKind::Field { base, .. } | ExprKind::TupleIndex { base, .. } => is_pure(ast, base),
         ExprKind::Unary {
             op: UnaryOp::Not | UnaryOp::BitNot,
@@ -1211,6 +1215,7 @@ impl<'a> Walker<'a> {
             }
             ExprKind::Error
             | ExprKind::Int(_)
+            | ExprKind::BigInt
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
             | ExprKind::Ket { .. }

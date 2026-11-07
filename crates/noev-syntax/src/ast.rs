@@ -296,6 +296,8 @@ pub enum ExprKind {
     Error,
     /// An integer literal.
     Int(u64),
+    /// An integer literal too large for a `u64`; its value is the text of the span.
+    BigInt,
     /// A float literal.
     Float(f64),
     /// `true` or `false`.

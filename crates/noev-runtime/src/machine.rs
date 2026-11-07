@@ -22,6 +22,7 @@ use std::rc::Rc;
 
 use crate::backend::{Backend, BackendError, Circuit, Condition, Instruction, Op, Session};
 use crate::format;
+use crate::int::Int;
 use crate::value::{Observable, Pauli, Pointer, Value};
 
 /// Where a program's output goes.
@@ -614,7 +615,14 @@ impl Machine<'_> {
                 },
                 Proj::Field(i) => ptr.path.push(*i as usize),
                 Proj::Index(index) => {
-                    let index = self.int(index)?;
+                    let index = match self.value(index)? {
+                        Value::Int(v) => v,
+                        other => {
+                            return Err(RuntimeError::new(format!(
+                                "expected an Int, found {other:?}"
+                            )));
+                        }
+                    };
                     let len = match self.get(&ptr)? {
                         Value::Aggregate(items) => items.len(),
                         other => {
@@ -623,11 +631,12 @@ impl Machine<'_> {
                             )));
                         }
                     };
-                    if index < 0 || index as usize >= len {
+                    let Some(index) = index.to_i64().filter(|&i| i >= 0 && (i as usize) < len)
+                    else {
                         return Err(RuntimeError::new(format!(
                             "index {index} is out of range for an array of length {len}"
                         )));
-                    }
+                    };
                     ptr.path.push(index as usize);
                 }
             }
@@ -677,7 +686,7 @@ impl Machine<'_> {
             Operand::Copy(place) | Operand::Move(place) => self.load(place),
             Operand::Const(c) => Ok(match *c {
                 Const::Unit => Value::Unit,
-                Const::Int(v) => Value::Int(v),
+                Const::Int(v) => Value::Int(Int::from(v)),
                 Const::Float(v) => Value::Float(v),
                 Const::Bool(v) => Value::Bool(v),
                 Const::Bit(v) => Value::Bit(v),
@@ -715,9 +724,12 @@ impl Machine<'_> {
         }
     }
 
+    /// An `Int` where a machine-sized one is needed (an index, a count).
     fn int(&self, op: &Operand) -> Result<i64> {
         match self.value(op)? {
-            Value::Int(v) => Ok(v),
+            Value::Int(v) => v
+                .to_i64()
+                .ok_or_else(|| RuntimeError::new(format!("{v} is too large here"))),
             other => Err(RuntimeError::new(format!(
                 "expected an Int, found {other:?}"
             ))),
@@ -1079,6 +1091,10 @@ impl Machine<'_> {
                     .collect::<Result<Vec<_>>>()?;
                 maths(*math, &args)?
             }
+            Rvalue::BigInt(text) => Value::Int(
+                Int::parse(text)
+                    .ok_or_else(|| RuntimeError::new(format!("`{text}` is not an Int")))?,
+            ),
             Rvalue::FloatConst(c) => Value::Float(match c {
                 FloatConst::Pi => std::f64::consts::PI,
                 FloatConst::Tau => std::f64::consts::TAU,
@@ -1099,7 +1115,7 @@ impl Machine<'_> {
                 ops.iter().map(|o| self.operand(o)).collect::<Result<_>>()?,
             ),
             Rvalue::Tag(op) => match self.value(op)? {
-                Value::Variant(index, _) => Value::Int(index as i64),
+                Value::Variant(index, _) => Value::Int(Int::from(i64::from(index))),
                 other => {
                     return Err(RuntimeError::new(format!(
                         "expected an enum value, found {other:?}"
@@ -1119,8 +1135,8 @@ impl Machine<'_> {
                     Ok(format::display(m.program, &m.value(&ops[i])?, *elem))
                 };
                 match method {
-                    DistMethod::Shots => Value::Int(dist.shots as i64),
-                    DistMethod::Count => Value::Int(dist.count(&key(self, 1)?) as i64),
+                    DistMethod::Shots => Value::Int(Int::from(dist.shots as i64)),
+                    DistMethod::Count => Value::Int(Int::from(dist.count(&key(self, 1)?) as i64)),
                     DistMethod::Probability => {
                         Value::Float(dist.count(&key(self, 1)?) as f64 / dist.shots as f64)
                     }
@@ -1165,44 +1181,44 @@ impl Machine<'_> {
 
 fn unary(op: UnOp, x: Value) -> Result<Value> {
     Ok(match (op, x) {
-        (UnOp::Neg, Value::Int(v)) => Value::Int(v.checked_neg().ok_or_else(overflow)?),
+        (UnOp::Neg, Value::Int(v)) => Value::Int(v.neg()),
         (UnOp::Neg, Value::Float(v)) => Value::Float(-v),
         (UnOp::Neg, Value::Observable(o)) => Value::Observable(o.scale(-1.0)),
-        (UnOp::BitNot, Value::Int(v)) => Value::Int(!v),
+        (UnOp::BitNot, Value::Int(v)) => Value::Int(v.not()),
         (UnOp::BitNot, Value::Bit(v)) => Value::Bit(!v),
         (UnOp::Not, Value::Bool(v)) => Value::Bool(!v),
         (op, x) => return Err(RuntimeError::new(format!("cannot apply {op:?} to {x:?}"))),
     })
 }
 
-fn overflow() -> RuntimeError {
-    RuntimeError::new("integer overflow")
-}
-
 fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
     use BinOp::*;
     Ok(match (a, b) {
         (Value::Int(a), Value::Int(b)) => match op {
-            Add => Value::Int(a.checked_add(b).ok_or_else(overflow)?),
-            Sub => Value::Int(a.checked_sub(b).ok_or_else(overflow)?),
-            Mul => Value::Int(a.checked_mul(b).ok_or_else(overflow)?),
+            Add => Value::Int(a.add(&b)),
+            Sub => Value::Int(a.sub(&b)),
+            Mul => Value::Int(a.mul(&b)),
             Div => Value::Int(
-                a.checked_div(b)
-                    .ok_or_else(|| RuntimeError::new("division by zero or overflow"))?,
+                a.div(&b)
+                    .ok_or_else(|| RuntimeError::new("division by zero"))?,
             ),
             Rem => Value::Int(
-                a.checked_rem(b)
-                    .ok_or_else(|| RuntimeError::new("remainder by zero or overflow"))?,
+                a.rem(&b)
+                    .ok_or_else(|| RuntimeError::new("remainder by zero"))?,
             ),
-            BitAnd => Value::Int(a & b),
-            BitOr => Value::Int(a | b),
-            BitXor => Value::Int(a ^ b),
+            BitAnd => Value::Int(a.and(&b)),
+            BitOr => Value::Int(a.or(&b)),
+            BitXor => Value::Int(a.xor(&b)),
             Shl | Shr => {
-                let shift = u32::try_from(b)
-                    .ok()
-                    .filter(|&s| s < 64)
+                let shift = b
+                    .to_i64()
+                    .and_then(|s| u32::try_from(s).ok())
                     .ok_or_else(|| RuntimeError::new(format!("cannot shift by {b}")))?;
-                Value::Int(if op == Shl { a << shift } else { a >> shift })
+                Value::Int(if op == Shl {
+                    a.shl(shift)
+                } else {
+                    a.shr(shift)
+                })
             }
             Eq => Value::Bool(a == b),
             NotEq => Value::Bool(a != b),
@@ -1273,8 +1289,8 @@ fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
 
 fn convert(target: Ty, value: Value) -> Result<Value> {
     Ok(match (target, value) {
-        (Ty::FLOAT, Value::Int(v)) => Value::Float(v as f64),
-        (Ty::INT, Value::Bit(v) | Value::Bool(v)) => Value::Int(i64::from(v)),
+        (Ty::FLOAT, Value::Int(v)) => Value::Float(v.to_f64()),
+        (Ty::INT, Value::Bit(v) | Value::Bool(v)) => Value::Int(Int::from(i64::from(v))),
         (Ty::BIT, Value::Bool(v)) => Value::Bit(v),
         (Ty::BOOL, Value::Bit(v)) => Value::Bool(v),
         (_, value) => value,
@@ -1288,18 +1304,17 @@ fn maths(math: Math, args: &[Value]) -> Result<Value> {
             "expected a Float, found {other:?}"
         ))),
     };
+    // Exact, as spec/types.md §4 requires; NaN and infinities have no integer.
     let to_int = |x: f64| -> Result<Value> {
-        if x.is_nan() {
-            return Err(RuntimeError::new("cannot convert NaN to an Int"));
-        }
-        // `as` saturates at the Int range, as spec/types.md §4 requires.
-        Ok(Value::Int(x as i64))
+        Int::from_f64(x)
+            .map(Value::Int)
+            .ok_or_else(|| RuntimeError::new(format!("cannot convert {x} to an Int")))
     };
     if let Some(Value::Int(a)) = args.first() {
         return Ok(Value::Int(match (math, args.get(1)) {
-            (Math::Abs, _) => a.checked_abs().ok_or_else(overflow)?,
-            (Math::Min, Some(Value::Int(b))) => *a.min(b),
-            (Math::Max, Some(Value::Int(b))) => *a.max(b),
+            (Math::Abs, _) => a.abs(),
+            (Math::Min, Some(Value::Int(b))) => a.min(b).clone(),
+            (Math::Max, Some(Value::Int(b))) => a.max(b).clone(),
             _ => return Err(RuntimeError::new(format!("{math:?} on Int"))),
         }));
     }

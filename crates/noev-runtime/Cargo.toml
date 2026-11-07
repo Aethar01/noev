@@ -14,6 +14,9 @@ ketrs = { version = "0.1.1", optional = true }
 noev-ir = { path = "../noev-ir" }
 noev-sema = { path = "../noev-sema" }
 noev-syntax = { path = "../noev-syntax" }
+# Arbitrary-precision `Int` (spec/types.md §1).
+num-bigint = { version = "0.4.8", default-features = false, features = ["std"] }
+num-traits = { version = "0.2.19", default-features = false, features = ["std"] }
 rand = { version = "0.9", default-features = false, features = ["small_rng"] }
 
 [features]

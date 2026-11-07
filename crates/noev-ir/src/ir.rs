@@ -197,6 +197,8 @@ pub enum Rvalue {
     Math(Math, Vec<Operand>),
     /// A `Float` constant.
     FloatConst(FloatConst),
+    /// An `Int` literal too large for [`Const::Int`], as written (`0x…`, `0b…`, `_`).
+    BigInt(String),
     /// `X(i)`, `Y(i)` or `Z(i)`.
     Pauli(Pauli, Operand),
     /// `I()`.
@@ -554,6 +556,7 @@ impl Program {
             }
             Rvalue::Convert(ty, op) => format!("{}({})", self.type_name(*ty), operand_text(op)),
             Rvalue::Math(math, ops) => format!("{math:?}({})", list(ops)).to_lowercase(),
+            Rvalue::BigInt(text) => text.clone(),
             Rvalue::FloatConst(c) => format!(
                 "Float::{}",
                 match c {

@@ -23,6 +23,10 @@ before 1.0.
   patterns. Every case must be covered, looking inside tuples, arrays and variants' data
   (`(0, 0)`, `(0, 1)`, `(1, _)` cover a pair of bits), and an error names a value no arm
   takes, such as `(1, 1)` or `Some(1)`. Arms are branches for ownership (N009).
+- `Int` has any size and never overflows (`1 << 100`, `factorial(30)`, literals of any
+  length); values that fit in 64 bits stay machine integers. `/` truncates and `%` takes the
+  dividend's sign; bitwise operators act as on endless two's complement. Converting a
+  `Float` to an `Int` is exact (it used to saturate), and NaN or an infinity is an error.
 - Type aliases: `type Byte = [Bit; 8]` is another name for the same type, including its
   variants, associated functions and literals for a struct or enum.
 - Kets and bras for the Y basis: `(+i)` and `(-i)`, a label in parentheses being one qubit
@@ -32,6 +36,7 @@ before 1.0.
 
 ### Compiler
 
+- Runtime errors in compound assignments (`d /= 0`) point at the statement.
 - A `match` on measurement results is classical control in the circuit, as an `if` is: one
   `if` per test its patterns make, and none for a test an enclosing one already decided.
   Teleportation corrected by a `match` is one circuit with four branches.
