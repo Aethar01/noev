@@ -8,7 +8,7 @@ no implicit conversions except the literal typing rules in §3.
 | Type    | Kind      | Description                                                 |
 | ------- | --------- | ----------------------------------------------------------- |
 | `Int`   | classical | An integer of any size: never overflows                     |
-| `Float` | classical | 64-bit IEEE 754 float                                       |
+| `Float` | classical | 64-bit IEEE 754 float, like Python's `float`; also called `f64` |
 | `Bool`  | classical | `true` or `false`                                           |
 | `Bit`   | classical | A classical bit, usually the result of a measurement        |
 | `Qubit` | quantum   | Ownership of one logical qubit                              |
@@ -16,7 +16,7 @@ no implicit conversions except the literal typing rules in §3.
 | `()`    | classical | Unit; the type of statements and of functions with no `->` |
 | `i8` `i16` `i32` `i64` | classical | Signed integers of that many bits                 |
 | `u8` `u16` `u32` `u64` | classical | Unsigned integers of that many bits               |
-| `f32` `f64` | classical | IEEE 754 floats of that many bits                         |
+| `f32`   | classical | 32-bit IEEE 754 float                                       |
 
 `Int` grows as needed, so results such as `1 << 100` and literals such as
 `123456789012345678901234567890` are exact. Values that fit in 64 bits, almost all of them in
@@ -31,11 +31,12 @@ practice, are as fast as a machine integer. Its operators:
 
 **Sized numbers** are for when the size matters: data with a fixed layout, a measured
 register read as a number, a host function's arguments. `Int` and `Float` are the defaults,
-and each sized type is its own type, mixed with no other without a conversion (§4).
-Arithmetic on sized integers follows `Int`'s rules, except that a result outside the type's
-range is a runtime error (`x + 1` fails when `x: u8` is 255; there is no silent wrapping). Shifts drop the
-bits shifted out, as in Rust and C, and shifting by the type's width or more is an error. `~`
-flips every bit of the type, so `~0` as a `u8` is `255`.
+as `int` and `float` are in Python, and each sized type is its own type, mixed with no other
+without a conversion (§4); `f64` is not a sized type but another name for `Float`. Arithmetic
+on sized integers follows `Int`'s rules, except that a result outside the type's range is a
+runtime error (`x + 1` fails when `x: u8` is 255; there is no silent wrapping). Shifts drop
+the bits shifted out, as in Rust and C, and shifting by the type's width or more is an error.
+`~` flips every bit of the type, so `~0` as a `u8` is `255`.
 
 `Bit` and `Bool` are separate types: `Bit` is data (a measurement outcome, part of a bit
 string), `Bool` is logic. Both can be used as an `if` or `while` condition (a `Bit` is true
@@ -138,7 +139,7 @@ makes sure a `Some` qubit is consumed.
 | Literal             | Type                                                         |
 | ------------------- | ------------------------------------------------------------ |
 | `42`, `0xff`        | `Int`, or the sized integer expected; `0` and `1` are `Bit` where a `Bit` is expected |
-| `1.0`, `1e-3`       | `Float`, or `f32`/`f64` where one is expected                |
+| `1.0`, `1e-3`       | `Float`, or `f32` where one is expected                      |
 | `true`, `false`     | `Bool`                                                       |
 | `\|0>`, `\|+>`, …   | `Qubit` for one label, `[Qubit; N]` for N labels             |
 | `"text {x}"`        | `String`                                                     |
@@ -253,8 +254,8 @@ users can define conversions for their own types.
 | `Int → Bit`                | none in v0.1      | Write `if n == 0 { 0 } else { 1 }`, or wait for `Bit::try_from` |
 | Sized integer → `Int`, or to a sized integer that holds every value | `Int(x)`, `i64(x)` | Exact (`u8 → i16`, `i32 → i64`, `u32 → u64`) |
 | Any other integer → sized integer | `u8::try_from(n)` | `Ok` when it is in range, otherwise `Err` saying why |
-| Integer → `Float`, `f32`, `f64` | `Float(n)`, `f64(n)` | As `Int → Float`: rounded past the type's exact range |
-| `f32 ↔ f64 ↔ Float`        | `f64(x)`, `f32(x)`, `Float(x)` | Exact widening; narrowing rounds to nearest (accepted by convention) |
+| Integer → `Float`, `f32`   | `Float(n)`, `f32(n)` | As `Int → Float`: rounded past the type's exact range |
+| `f32 ↔ Float`              | `Float(x)`, `f32(x)` | Exact widening; narrowing rounds to nearest (accepted by convention) |
 | `[Bit; N]` ↔ `uN` (N = 8, 16, 32, 64) | `u8(bits)`, `x.bits()` | Exact; `bits[0]` is the most significant, so a bit string reads as the number it prints as: `u8(\|00000101>.measure()) == 5` |
 
 There are no conversions to or from `Qubit`. The only way from quantum to classical is

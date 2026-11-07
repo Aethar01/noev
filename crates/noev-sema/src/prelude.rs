@@ -252,7 +252,8 @@ pub fn builtin_type(name: &str) -> Option<Ty> {
         "u32" => Ty::U32,
         "u64" => Ty::U64,
         "f32" => Ty::F32,
-        "f64" => Ty::F64,
+        // `Float` is a 64-bit IEEE 754 float, as Python's `float` is.
+        "f64" => Ty::FLOAT,
         _ => return None,
     })
 }
@@ -308,8 +309,8 @@ pub fn method(types: &mut Types, base: Ty, name: &str) -> Option<(Builtin, Sig)>
                 Sig::new(Some(OwnKind::Mv), vec![types.basis?], bits, No),
             ))
         }
-        // `Float`, `f32` and `f64` have the same methods, each on its own type.
-        TyKind::Float | TyKind::F32 | TyKind::F64 => {
+        // `Float` and `f32` have the same methods, each on its own type.
+        TyKind::Float | TyKind::F32 => {
             use Math::*;
             let f = base;
             let (math, params, ret) = match name {

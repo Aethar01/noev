@@ -311,7 +311,9 @@ pub fn builtin_type(name: &str) -> Option<(String, String)> {
             "An integer of any size: it never overflows. Values that fit in 64 bits are as \
                   fast as a machine integer."
         }
-        "Float" => "A 64-bit IEEE 754 float.",
+        "Float" | "f64" => {
+            "A 64-bit IEEE 754 float, like Python's `float`; `f64` is another name for it."
+        }
         "Bool" => "`true` or `false`: logic, for conditions, `and`, `or` and `not`.",
         "Bit" => {
             "A classical bit, usually a measurement result: data, where `Bool` is logic. \
@@ -326,9 +328,8 @@ pub fn builtin_type(name: &str) -> Option<(String, String)> {
             "A real-weighted sum of products of Pauli operators, for expectation \
                          values: `-1.0 * Z(0) * Z(1) + 0.5 * X(0)`."
         }
-        "f32" | "f64" => {
-            "An IEEE 754 float of that many bits. Converts to and from `Float` with \
-                          `Float(x)` and `f32(x)`."
+        "f32" => {
+            "A 32-bit IEEE 754 float. Converts to and from `Float` with `Float(x)` and `f32(x)`."
         }
         _ => {
             let width = noev_sema::prelude::builtin_type(name)?.width()?;

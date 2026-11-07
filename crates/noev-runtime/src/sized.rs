@@ -1,6 +1,6 @@
 //! Sized numbers (`spec/types.md` §1): `i8`…`u64` and `f32`. Every integer value fits in an
 //! `i128`, so each operation is computed there and then checked against the type's range.
-//! `f64` values are `Float`s while `Float` is 64 bits.
+//! `f64` is another name for `Float`.
 
 use noev_ir::ir::BinOp;
 use noev_sema::ty::Width;

@@ -402,7 +402,6 @@ impl Program {
             | TyKind::U32
             | TyKind::U64 => ty.width().expect("a sized integer").name(),
             TyKind::F32 => "f32".into(),
-            TyKind::F64 => "f64".into(),
             TyKind::Tuple(elems) => {
                 let elems: Vec<String> = elems.iter().map(|&t| self.type_name(t)).collect();
                 format!("({})", elems.join(", "))

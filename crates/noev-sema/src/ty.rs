@@ -63,10 +63,8 @@ pub enum TyKind {
     U32,
     /// `u64`.
     U64,
-    /// `f32`.
+    /// `f32`. (`f64` is another name for `Float`.)
     F32,
-    /// `f64`.
-    F64,
     /// `(A, B, …)`.
     Tuple(Box<[Ty]>),
     /// `[T; N]`.
@@ -192,7 +190,6 @@ basic! {
     U32 = 16: U32,
     U64 = 17: U64,
     F32 = 18: F32,
-    F64 = 19: F64,
 }
 
 /// A sized integer type's size and signedness (`spec/types.md` §1).
@@ -275,9 +272,9 @@ impl Ty {
         self == Ty::INT || self.width().is_some()
     }
 
-    /// Whether it is `Float`, `f32` or `f64`.
+    /// Whether it is `Float` (also called `f64`) or `f32`.
     pub fn is_float(self) -> bool {
-        matches!(self, Ty::FLOAT | Ty::F32 | Ty::F64)
+        matches!(self, Ty::FLOAT | Ty::F32)
     }
 
     /// Whether it is a number: an integer or a float.
@@ -474,7 +471,6 @@ impl Types {
             | TyKind::U32
             | TyKind::U64 => ty.width().expect("a sized integer").name(),
             TyKind::F32 => "f32".into(),
-            TyKind::F64 => "f64".into(),
             TyKind::Tuple(elems) => {
                 let elems: Vec<String> = elems.iter().map(|&t| self.display(t, ast)).collect();
                 if elems.len() == 1 {

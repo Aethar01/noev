@@ -17,8 +17,10 @@ fn main() {
     print(checksum([1, 2, 4, 8]), u8(5).bits(), u8(|00000101>.measure()))
     print(Int(z) + 1, i64(y), u16(x) * 300, u8::try_from(300), u8::try_from(-1 + 2))
     let f: f32 = 0.1
+    // `f64` is another name for `Float`.
     let g: f64 = 0.1
-    print(f, g, f64(f), f32(g), Float(x) / 4.0)
+    let h: Float = g
+    print(f, h, Float(f), f32(g), Float(x) / 4.0)
     print("{x:08b} {z:x} {y:+} {f:.3}")
     print(i32(-7) / 2, i32(-7) % 2, (y + 1).abs(), x.min(10), x.max(250))
     match x {

@@ -308,7 +308,8 @@ fn sized_numbers() {
     ok("fn f(x: u8) -> Int { Int(x) + Int(i64(-1)) + Int(u16(x)) }");
     ok("fn f(bits: [Bit; 8]) -> [Bit; 8] { u8(bits).bits() }");
     ok("fn f(n: Int) -> Bool { match u8::try_from(n) { Ok(_) => true, Err(_) => false } }");
-    ok("fn f(x: f32) -> f64 { f64(x.sqrt()) + 1.0 }");
+    ok("fn f(x: f32) -> f64 { Float(x.sqrt()) + 1.0 }");
+    ok("fn f(x: Float) -> f64 { x }");
     assert_eq!(
         one_error("fn f() -> u8 { 256 }"),
         "this literal does not fit in `u8`, which holds 0 to 255"

@@ -1190,7 +1190,7 @@ impl Checker<'_> {
             ExprKind::Int(value) => self.int_literal(Some(value), expect, expr.span),
             ExprKind::BigInt => self.int_literal(None, expect, expr.span),
             ExprKind::Float(_) => match expect.ty().map(|t| self.t.types.deref(t)) {
-                Some(t @ (Ty::F32 | Ty::F64)) => t,
+                Some(Ty::F32) => Ty::F32,
                 _ => Ty::FLOAT,
             },
             ExprKind::Str(parts) => self.string(parts),

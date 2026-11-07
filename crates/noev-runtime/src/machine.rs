@@ -1322,8 +1322,7 @@ fn convert(target: Ty, value: Value) -> Result<Value> {
         _ => None,
     };
     Ok(match (target, value) {
-        // `f64` values are `Float`s.
-        (Ty::FLOAT | Ty::F64, value) if let Some(x) = float(&value) => Value::Float(x),
+        (Ty::FLOAT, value) if let Some(x) = float(&value) => Value::Float(x),
         // Rounded to nearest, from a value already a float or an exact one otherwise.
         (Ty::F32, Value::Sized(v, _)) => Value::F32(v as f32),
         (Ty::F32, value) if let Some(x) = float(&value) => Value::F32(x as f32),

@@ -23,7 +23,8 @@ before 1.0.
   patterns. Every case must be covered, looking inside tuples, arrays and variants' data
   (`(0, 0)`, `(0, 1)`, `(1, _)` cover a pair of bits), and an error names a value no arm
   takes, such as `(1, 1)` or `Some(1)`. Arms are branches for ownership (N009).
-- Sized numbers: `i8`…`i64`, `u8`…`u64`, `f32` and `f64`, each its own type. Literals take
+- Sized numbers: `i8`…`i64`, `u8`…`u64` and `f32`, each its own type; `f64` is another name
+  for `Float`, which stays a 64-bit float like Python's `float`. Literals take
   the type expected (`let x: u8 = 200`, `x + 1`), and one that does not fit is an error.
   Overflow is a runtime error; shifts drop the bits shifted out. `i64(x)` converts when every
   value fits, `u8::try_from(n)` gives a `Result` otherwise, and `u8(bits)` and `x.bits()` read

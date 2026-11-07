@@ -391,8 +391,8 @@ Planned once milestones 1–7 are done, roughly in this order.
 | 1  | Y-basis kets and bras         | `(+i)` and `(-i)`: a label in parentheses is one qubit               | ☑ Done |
 | 2  | Type aliases                  | `type Byte = [Bit; 8]`: another name for the same type                | ☑ Done |
 | 3  | Arbitrary-precision `Int`     | Never overflows; small values stay as fast as `i64`                   | ☑ Done |
-| 4  | Sized numbers                 | `i8`…`i64`, `u8`…`u64`, `f32`, `f64`; checked conversions; bit arrays as unsigned numbers | ☑ Done |
-| 5  | Arbitrary-precision `Float`   | Semantics to decide: precision of division and functions              | ☐ Todo |
+| 4  | Sized numbers                 | `i8`…`i64`, `u8`…`u64`, `f32`; checked conversions; bit arrays as unsigned numbers | ☑ Done |
+| 5  | `Float` as Python's `float`   | Decided: stays a 64-bit IEEE 754 float, with `f64` another name for it | ☑ Done |
 | 6  | Bras of preparations          | `<bell()| mv pair`: a measurement test against any reversible preparation | ☐ Todo |
 | 7  | Computed labels               | `|0{b}>`, `<{bits}| mv r`: a `Bit`, `[Bit; N]` or `State` value as labels | ☐ Todo |
 
