@@ -781,8 +781,8 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Whether an `if` or `while` on a measurement result can become classical control in
-    /// the circuit: the variables from outside it that it changes, or why not. Inside, it may
+    /// Whether an `if`, `match` or `while` on a measurement result can become classical
+    /// control in the circuit: the variables from outside it that it changes, or why not. Inside, it may
     /// do anything a run does except print, start repeated runs or leave early; the only
     /// outside variables it may change are `Bit`s and `Bool`s, which the circuit keeps in
     /// classical bits.
@@ -795,14 +795,21 @@ impl<'a> Walker<'a> {
     ) -> Result<Vec<LocalId>, (Span, String)> {
         let ast = self.cx.ast;
         let typed = self.cx.typed;
+        let is_match = matches!(ast.expr(id).kind, ExprKind::Match { .. });
         let what = if repeats {
             "a loop on a measurement result"
+        } else if is_match {
+            "a `match` on a measurement result"
         } else {
             "a branch on a measurement result"
         };
         let says = |why: &str| format!("{what} {why}");
         if !repeats && !matches!(typed.types.deref(typed.ty(id)), Ty::UNIT | Ty::NEVER) {
-            let why = "an `if` on a measurement result gives a value";
+            let why = if is_match {
+                "a `match` on a measurement result gives a value"
+            } else {
+                "an `if` on a measurement result gives a value"
+            };
             return Err((ast.expr(id).span, why.into()));
         }
         // A loop's condition is evaluated again on every pass, so it must be plain logic.
@@ -1154,8 +1161,10 @@ impl<'a> Walker<'a> {
                 let condition = self.expr(scrutinee, before);
                 if condition && before {
                     self.info.feedback = true;
-                    let why = "a `match` on a measurement result";
-                    self.unsupported(ast.expr(scrutinee).span, why.into());
+                    let bodies: Vec<Node> =
+                        ast.list(arms).iter().map(|a| Node::Expr(a.body)).collect();
+                    let result = self.recordable_control(id, scrutinee, &bodies, false);
+                    self.control(id, result);
                 }
                 self.control += u32::from(condition);
                 let mut tainted = condition;

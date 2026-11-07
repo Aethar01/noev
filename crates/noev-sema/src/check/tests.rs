@@ -271,6 +271,31 @@ fn option_and_result() {
 }
 
 #[test]
+fn coverage_looks_inside_patterns() {
+    ok("fn f(m: (Bit, Bit)) -> Int { match m { (0, 0) => 0, (0, 1) => 1, (1, _) => 2 } }");
+    ok("fn f(o: Option<Bit>) -> Int { match o { Some(0) => 0, Some(1) => 1, None => 2 } }");
+    ok("fn f(p: (Int, Bit)) -> Int { match p { (0, _) => 0, (_, 1) => 1, (_, 0) => 2 } }");
+    assert_eq!(
+        one_error(
+            "fn f(m: (Bit, Bit)) -> Int { match m { (0, 0) => 0, (0, 1) => 1, (1, 0) => 2 } }"
+        ),
+        "this `match` does not cover `(1, 1)`"
+    );
+    assert_eq!(
+        one_error("fn f(o: Option<Bit>) -> Int { match o { Some(0) => 0 } }"),
+        "this `match` does not cover `Some(1)`, `None`"
+    );
+    assert_eq!(
+        one_error("fn f(a: [Bool; 2]) -> Int { match a { [true, _] => 0, [false, false] => 1 } }"),
+        "this `match` does not cover `[false, true]`"
+    );
+    assert_eq!(
+        one_error("fn f(n: Int) -> Int { match n { 0 => 1 } }"),
+        "this `match` does not cover every `Int`"
+    );
+}
+
+#[test]
 fn ui_tests_type_check_cleanly() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/ui");
     let mut stack = vec![std::path::PathBuf::from(dir)];

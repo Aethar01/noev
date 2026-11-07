@@ -513,7 +513,13 @@ impl Builder<'_> {
     /// `match`: the scrutinee once, then each arm's test in turn, going to the first arm
     /// that fits. A variant's data is only looked at once its variant has matched. The checker
     /// made sure some arm always fits.
-    fn match_into(&mut self, scrutinee: ExprId, arms: ast::List<ast::Arm>, dest: Option<Place>) {
+    fn match_into(
+        &mut self,
+        id: ExprId,
+        scrutinee: ExprId,
+        arms: ast::List<ast::Arm>,
+        dest: Option<Place>,
+    ) {
         let ty = self.ty(scrutinee);
         let held = self.temp(ty);
         let op = self.operand(scrutinee);
@@ -525,9 +531,11 @@ impl Builder<'_> {
             held
         };
         let join = self.new_block();
+        // On a measurement result in a circuit, each test is an `if` recorded up to `join`.
+        let control = self.control(id, join, false);
         for arm in self.ast.list(arms).to_vec() {
             let next = self.new_block();
-            self.test_or_jump(arm.pat, &value, next);
+            self.test_or_jump(arm.pat, &value, next, &control);
             self.bind(arm.pat, value.clone());
             self.expr_into(arm.body, dest.clone());
             self.terminate_into(Terminator::Goto(join), next);
@@ -536,8 +544,14 @@ impl Builder<'_> {
     }
 
     /// Continues in a fresh block if the value at `place` fits `pat`, and goes to `fail` if it
-    /// does not.
-    fn test_or_jump(&mut self, pat: ast::PatId, place: &Place, fail: Block) {
+    /// does not. Each test's branch is `control`.
+    fn test_or_jump(
+        &mut self,
+        pat: ast::PatId,
+        place: &Place,
+        fail: Block,
+        control: &Option<Box<Control>>,
+    ) {
         let ast = self.ast;
         let ty = self.typed.pat_types[pat.index()];
         let check = |this: &mut Self, cond: Operand| {
@@ -547,7 +561,7 @@ impl Builder<'_> {
                     cond,
                     then: pass,
                     otherwise: fail,
-                    control: None,
+                    control: control.clone(),
                 },
                 pass,
             );
@@ -581,7 +595,7 @@ impl Builder<'_> {
                     self.compare(Operand::Copy(tag), Operand::Const(Const::Int(index as i64)));
                 check(self, cond);
                 for (i, p) in self.variant_parts(pat, data) {
-                    self.test_or_jump(p, &place.with(Proj::Field(i)), fail);
+                    self.test_or_jump(p, &place.with(Proj::Field(i)), fail, control);
                 }
             }
             ast::PatKind::Tuple(pats) | ast::PatKind::Array(pats) => {
@@ -592,7 +606,7 @@ impl Builder<'_> {
                     } else {
                         place.with(Proj::Index(Operand::Const(Const::Int(i as i64))))
                     };
-                    self.test_or_jump(p, &part, fail);
+                    self.test_or_jump(p, &part, fail, control);
                 }
             }
         }
@@ -980,7 +994,7 @@ impl Builder<'_> {
                 Res::Variant(_, index) => self.set(&dest, Rvalue::Variant(index, Vec::new())),
                 _ => {}
             },
-            ExprKind::Match { scrutinee, arms } => self.match_into(scrutinee, arms, dest),
+            ExprKind::Match { scrutinee, arms } => self.match_into(id, scrutinee, arms, dest),
             ExprKind::Name(_)
             | ExprKind::Field { .. }
             | ExprKind::TupleIndex { .. }

@@ -121,6 +121,9 @@ pub struct Recording {
     /// How many recorded loops enclose the current point: a qubit allocated in a loop's body
     /// may have been used in the previous pass, so it is reset.
     loops: u32,
+    /// The conditions the enclosing recorded branches decided, and how: inside
+    /// `if (c[0] == 0)`, testing `c[0] == 0` again needs no `if` of its own.
+    decided: Vec<(Condition, bool)>,
     /// When recording `main` as a one-shot circuit: the results of the repeated runs it
     /// starts (`sample`, expectation values), in order. They are computed while recording and
     /// reused when its classical code runs for the outcome, so each runs once.
@@ -375,6 +378,12 @@ impl<'p> Machine<'p> {
                     next.index()
                 }
                 Terminator::Return => return Ok(()),
+                // A recorded branch that no shot takes: a `match`'s last test failing.
+                Terminator::Unreachable
+                    if stop.is_some() && matches!(self.mode, Mode::Build(_)) =>
+                {
+                    return Ok(());
+                }
                 Terminator::Unreachable => {
                     return Err(RuntimeError::new(format!(
                         "reached unreachable code in `{}`",
@@ -407,16 +416,23 @@ impl<'p> Machine<'p> {
             let Some(condition) = self.operand(cond)?.condition() else {
                 return Ok(None);
             };
+            if let Some(known) = self.decided(&condition) {
+                return Ok(Some(if known { then } else { otherwise }));
+            }
             let before = self.load_all(&carried)?;
             let free = self.recording().free.clone();
-            let (mut then_steps, then_values) =
-                self.record_branch(function, then, control.join, &carried)?;
+            self.recording().decided.push((condition.clone(), true));
+            let then_result = self.record_branch(function, then, control.join, &carried);
+            self.recording().decided.pop();
+            let (mut then_steps, then_values) = then_result?;
             let then_free = std::mem::replace(&mut self.recording().free, free);
             for (place, value) in carried.iter().zip(&before) {
                 self.store(place, value.clone())?;
             }
-            let (mut else_steps, else_values) =
-                self.record_branch(function, otherwise, control.join, &carried)?;
+            self.recording().decided.push((condition.clone(), false));
+            let else_result = self.record_branch(function, otherwise, control.join, &carried);
+            self.recording().decided.pop();
+            let (mut else_steps, else_values) = else_result?;
             // A qubit either branch freed is free, and may need a reset.
             let recording = self.recording();
             for (qubit, dirty) in then_free {
@@ -461,9 +477,12 @@ impl<'p> Machine<'p> {
             return Ok(None);
         };
         let free = self.recording().free.clone();
+        // Each pass decides its own conditions.
+        let decided = std::mem::take(&mut self.recording().decided);
         self.recording().loops += 1;
         let result = self.record_branch(function, then, control.join, &carried);
         self.recording().loops -= 1;
+        self.recording().decided = decided;
         let (mut body, values) = result?;
         for ((place, (bit, clbit)), value) in carried.iter().zip(&bits).zip(&values) {
             body.push(assign(*clbit, value)?);
@@ -487,6 +506,23 @@ impl<'p> Machine<'p> {
         // The condition's temporaries were computed for the bits, which is what the code after
         // the loop sees too.
         Ok(Some(otherwise))
+    }
+
+    /// How an enclosing recorded branch decided `condition` (or its negation), if one did.
+    fn decided(&mut self, condition: &Condition) -> Option<bool> {
+        self.recording()
+            .decided
+            .iter()
+            .rev()
+            .find_map(|(c, value)| {
+                if c == condition {
+                    Some(*value)
+                } else if Condition::negate(c.clone()) == *condition {
+                    Some(!*value)
+                } else {
+                    None
+                }
+            })
     }
 
     /// Records the blocks from `start` up to `stop` into their own list of steps, returning

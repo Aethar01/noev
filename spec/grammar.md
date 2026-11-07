@@ -290,8 +290,10 @@ unsafe_block = "unsafe" block ;
 - `sample n { … }` runs its block `n` times, each run separate from the others and from the
   code around it, and counts the results (see [execution.md](execution.md) §3).
 - `match x { p => a, q => b }` runs the first arm whose pattern fits `x`, and its value is
-  that arm's. The arms must cover every value of `x`'s type: every variant of an enum,
-  `true` and `false`, or end with a catch-all (`_` or a name) for numbers and strings.
+  that arm's. The arms must cover every value of `x`'s type, looking inside tuples, arrays
+  and variants' data: every variant of an enum, `true` and `false`, `0` and `1`, every
+  combination of them in a tuple (`(0, 0)`, `(0, 1)`, `(1, _)`), or a catch-all (`_` or a
+  name) for numbers and strings. An error names a value no arm takes, such as `(1, 1)`.
   Patterns that only test (`_`, literals, variants without data) can be used in any
   `match`; patterns that bind take parts of the value, by the rules of
   [ownership.md](ownership.md) §13.

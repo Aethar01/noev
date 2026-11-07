@@ -20,8 +20,9 @@ before 1.0.
   used (`let x: Option<Int> = None`). `Option<Qubit>` is linear, so a `Some` qubit must be
   consumed.
 - `match`, with variant, literal (`0`, `-1`, `true`, `"text"`), tuple, array and catch-all
-  patterns. Every case must be covered; arms are branches for ownership (N009). A `match` on
-  a measurement result runs shot by shot for now.
+  patterns. Every case must be covered, looking inside tuples, arrays and variants' data
+  (`(0, 0)`, `(0, 1)`, `(1, _)` cover a pair of bits), and an error names a value no arm
+  takes, such as `(1, 1)` or `Some(1)`. Arms are branches for ownership (N009).
 - `measure_in(Basis::X)` measures a qubit, or every qubit of an array, in the X, Y or Z
   basis: 0 for the +1 eigenstate. `Basis` is the standard library's enum.
 

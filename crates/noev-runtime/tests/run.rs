@@ -884,3 +884,75 @@ fn main_is_a_one_shot_circuit_on_circuit_only_backends() {
         [100, 1]
     );
 }
+
+/// The circuits `main` asks for, as OpenQASM 3 bodies (after the declarations).
+fn exported(source: &str) -> Vec<String> {
+    let program = compile(source);
+    let exporter = noev_runtime::backend::Exporter::default();
+    let sink = Output {
+        stdout: Box::new(std::io::sink()),
+        stderr: Box::new(std::io::sink()),
+    };
+    run_main(&program, &exporter, 0, sink).unwrap();
+    let jobs = exporter.jobs.borrow();
+    jobs.iter()
+        .map(|(circuit, _)| {
+            let text = noev_runtime::qasm::to_qasm3(circuit, &[]);
+            text.lines().skip(6).collect::<Vec<_>>().join("\n")
+        })
+        .collect()
+}
+
+#[test]
+fn match_on_measurements_is_circuit_control() {
+    // Teleportation, corrected by a `match`: one `if` per test, none repeated.
+    let source = "fn teleport(q: Qubit) -> Qubit {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    ctrl q { a.x() }
+    q.h()
+    match (mv q.measure(), mv a.measure()) {
+        (0, 0) => {}
+        (0, 1) => b.x(),
+        (1, 0) => b.z(),
+        (1, 1) => {
+            b.x()
+            b.z()
+        }
+    }
+    mv b
+}
+
+fn main() {
+    print(sample 100 {
+        let t = teleport(|1>)
+        mv t.measure()
+    })
+}";
+    assert_eq!(
+        exported(source),
+        ["x q[0];
+h q[1];
+ctrl @ x q[1], q[2];
+ctrl @ x q[0], q[1];
+h q[0];
+c[0] = measure q[0];
+c[1] = measure q[1];
+if (c[0] == 0) {
+    if (c[1] == 0) {
+    } else {
+        x q[2];
+    }
+} else {
+    if (c[1] == 0) {
+        z q[2];
+    } else {
+        x q[2];
+        z q[2];
+    }
+}
+c[2] = measure q[2];"]
+    );
+    assert_eq!(output(source).0, "1  100  100.0%\n");
+}

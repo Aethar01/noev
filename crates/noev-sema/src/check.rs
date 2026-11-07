@@ -1804,50 +1804,21 @@ impl Checker<'_> {
         if self.t.types.is_wildcard(ty) || arms.iter().any(|a| !self.refutable(a.pat)) {
             return;
         }
-        let ast = self.ast;
-        let missing: Vec<String> = if let Some(variants) = self.t.types.variants(ty) {
-            let covered: Vec<u32> = arms
-                .iter()
-                .filter(|a| !self.data_refutable(a.pat))
-                .filter_map(|a| self.t.pat_variants[a.pat.index()])
-                .collect();
-            // `None`, not `Option<Int>::None`.
-            let bare = matches!(*self.t.types.kind(ty), TyKind::Struct(s) if self.t.types.structs[s.index()].bare);
-            let prefix = if bare {
-                String::new()
-            } else {
-                format!("{}::", self.t.types.display(ty, ast))
-            };
-            variants
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| !covered.contains(&(*i as u32)))
-                .map(|(_, v)| format!("`{prefix}{}`", ast.name(v.name)))
-                .collect()
-        } else if ty == Ty::BOOL || ty == Ty::BIT {
-            let literal = |a: &Arm| match ast.pat(a.pat).kind {
-                PatKind::Literal(PatLiteral::Bool(b)) => Some(b),
-                PatKind::Literal(PatLiteral::Int(v)) => Some(v == 1),
-                _ => None,
-            };
-            let covered: Vec<bool> = arms.iter().filter_map(literal).collect();
-            [false, true]
-                .into_iter()
-                .filter(|b| !covered.contains(b))
-                .map(|b| match (ty == Ty::BIT, b) {
-                    (true, b) => format!("`{}`", u8::from(b)),
-                    (false, b) => format!("`{b}`"),
-                })
-                .collect()
-        } else {
+        let pats: Vec<PatId> = arms.iter().map(|a| a.pat).collect();
+        let missing = self.uncovered(ty, &pats);
+        if let [coverage::Witness::Any] = missing.as_slice() {
             let message = format!("this `match` does not cover every {}", self.show(ty));
             self.error(span, message).help = Some("end it with a catch-all arm: `_ => …`".into());
             return;
-        };
+        }
         if missing.is_empty() {
             return;
         }
-        let message = format!("this `match` does not cover {}", missing.join(", "));
+        let shown: Vec<String> = missing
+            .iter()
+            .map(|w| format!("`{}`", self.show_witness(w, ty)))
+            .collect();
+        let message = format!("this `match` does not cover {}", shown.join(", "));
         self.error(span, message).help =
             Some("add an arm for each, or a catch-all arm: `_ => …`".into());
     }
@@ -2439,6 +2410,8 @@ impl DiagnosticExt for Diagnostic {
         self
     }
 }
+
+mod coverage;
 
 #[cfg(test)]
 mod tests;
