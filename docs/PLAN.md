@@ -381,7 +381,7 @@ Planned once milestones 1–7 are done, roughly in this order.
 | 1  | Enums and `match`             | `enum` with plain variants, `match` with tests and bindings, exhaustiveness | ☑ Done |
 | 2  | `Basis` and `measure_in`      | The standard library's measurement in any Pauli basis                | ☑ Done |
 | 3  | Variants with data            | Values and named fields; the ownership rules of `spec/ownership.md` §13 | ☑ Done |
-| 4  | `Option` and `Result`         | Built-in enums until generics                                         | ☐ Todo |
+| 4  | `Option` and `Result`         | Built-in enums until generics                                         | ☑ Done |
 | 5  | Tools                         | Tree-sitter grammar, hover and go to definition for enums             | ◐ Plain enums done |
 
 ### Compilation (`spec/runtime.md`)

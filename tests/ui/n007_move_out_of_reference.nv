@@ -20,3 +20,10 @@ fn move_out_of_a_lent_match(h: ref Held) -> Bit {
         Held::Nothing => 0,
     }
 }
+
+fn take_from_lent_option(o: ref Option<Qubit>) -> Bit {
+    match o {
+        Some(q) => mv q.measure(),          //~ N007
+        None => 0,
+    }
+}

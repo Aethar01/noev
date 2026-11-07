@@ -52,3 +52,14 @@ fn wildcard_drops_the_qubit(h: Held) -> Bit {
         Held::Nothing => 0,
     }
 }
+
+fn some_qubit_not_consumed() {
+    let s = Some(|0>)
+}                                   //~ N003
+
+fn option_arm_keeps_its_qubit(o: Option<Qubit>) {
+    match mv o {
+        Some(q) => {}               //~ N003
+        None => {}
+    }
+}

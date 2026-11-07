@@ -14,7 +14,8 @@
 
 ((type_identifier) @type.builtin
   (#any-of? @type.builtin
-    "Int" "Float" "Bool" "Bit" "String" "Qubit" "Observable" "Distribution" "Basis"))
+    "Int" "Float" "Bool" "Bit" "String" "Qubit" "Observable" "Distribution" "Basis"
+    "Option" "Result"))
 
 (self) @variable.builtin
 
@@ -213,3 +214,7 @@
 (wildcard) @character.special
 
 (rest_pattern) @character.special
+
+; The variants of `Option` and `Result`, named alone; last, so they win over calls.
+((identifier) @constant.builtin
+  (#any-of? @constant.builtin "Some" "None" "Ok" "Err"))

@@ -150,11 +150,13 @@ fn write_value(program: &Program, value: &Value, ty: Ty, out: &mut String) {
             let variant = program.variant_names[s.index()]
                 .get(i)
                 .map_or("?", String::as_str);
-            let _ = write!(out, "{}::{variant}", program.struct_names[s.index()]);
-            let def = types.structs[s.index()]
-                .variants
-                .as_ref()
-                .and_then(|v| v.get(i));
+            let owner = &types.structs[s.index()];
+            if owner.bare {
+                out.push_str(variant);
+            } else {
+                let _ = write!(out, "{}::{variant}", program.struct_names[s.index()]);
+            }
+            let def = owner.variants.as_ref().and_then(|v| v.get(i));
             let Some(def) = def.filter(|_| !data.is_empty()) else {
                 return;
             };

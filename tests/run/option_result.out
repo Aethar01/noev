@@ -1,0 +1,7 @@
+Some(4) None
+Ok(3) Err(division by zero)
+got 3
+true
+1
+true true true
+(Some(1.5), Ok(true))

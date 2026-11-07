@@ -196,6 +196,7 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         loops: 0,
         runs: 0,
         lent_bindings: None,
+        std_enums: FxHashMap::default(),
     };
     checker.collect();
     checker.check_bodies();
@@ -221,6 +222,8 @@ struct Checker<'a> {
     runs: u32,
     /// While binding a `match` arm's pattern on a lent value: whether the lend is `mut`.
     lent_bindings: Option<bool>,
+    /// The `Option` and `Result` types made so far, by name and type arguments.
+    std_enums: FxHashMap<(Symbol, Vec<Ty>), StructId>,
 }
 
 // Collecting items.
@@ -258,6 +261,8 @@ impl Checker<'_> {
             span: Span::default(),
             fields: Vec::new(),
             variants: Some(vec![variant("X"), variant("Y"), variant("Z")]),
+            args: Vec::new(),
+            bare: false,
         });
         self.struct_names.insert(std_name("Basis"), basis);
         let basis_ty = self.t.types.struct_ty(basis);
@@ -286,6 +291,8 @@ impl Checker<'_> {
                 span: name_span,
                 fields: Vec::new(),
                 variants: is_enum.then(Vec::new),
+                args: Vec::new(),
+                bare: false,
             });
         }
 
@@ -515,6 +522,18 @@ impl Checker<'_> {
                         self.error(node.span, "`Distribution` takes one type argument");
                         Ty::ERROR
                     }
+                    ("Option", &[value]) => self.std_enum(vec![value]),
+                    ("Result", &[value, error]) => self.std_enum(vec![value, error]),
+                    ("Option", _) => {
+                        self.error(node.span, "`Option` takes one type argument");
+                        Ty::ERROR
+                    }
+                    ("Result", _) => {
+                        self.error(node.span, "`Result` takes two type arguments")
+                            .help =
+                            Some("write `Result<T, E>`: the value's type, then the error's".into());
+                        Ty::ERROR
+                    }
                     _ => {
                         let message = format!("`{name}` takes no type arguments");
                         self.error(node.span, message);
@@ -537,6 +556,17 @@ impl Checker<'_> {
                     }
                     if let Some(&id) = self.struct_names.get(single) {
                         return self.t.types.struct_ty(id);
+                    }
+                    if name == "Option" || name == "Result" {
+                        let example = if name == "Option" {
+                            "Option<Int>"
+                        } else {
+                            "Result<Int, String>"
+                        };
+                        let message =
+                            format!("`{name}` needs its type arguments, as in `{example}`");
+                        self.error(node.span, message);
+                        return Ty::ERROR;
                     }
                 }
                 let text = self.path_text(segments);
@@ -846,13 +876,29 @@ impl Checker<'_> {
             [enum_name, name] => self.path_type(enum_name).map(|t| (t, name)),
             [name] => {
                 let text = self.name(name).to_string();
-                let message = format!(
-                    "`{text}` is a variant of `Option` or `Result`, which are not supported yet"
-                );
-                self.error(span, message).help = Some(
-                    "they come later in 0.2; write the enum's name before other variants".into(),
-                );
-                None
+                let bare = match *self.t.types.kind(ty) {
+                    TyKind::Struct(s) => self.t.types.structs[s.index()].bare,
+                    _ => false,
+                };
+                if bare && self.variant_index(ty, name).is_some() {
+                    Some((ty, name))
+                } else if BARE_VARIANTS.contains(&text.as_str()) {
+                    if !self.t.types.is_wildcard(ty) {
+                        let owner = self.bare_owner(name);
+                        let message = format!(
+                            "`{text}` is a variant of `{owner}`, but the value is {}",
+                            self.show(ty)
+                        );
+                        self.error(span, message);
+                    }
+                    None
+                } else {
+                    let message = format!("cannot find the variant `{text}`");
+                    self.error(span, message).help = Some(format!(
+                        "write its enum's name before it, as in `Outcome::{text}`"
+                    ));
+                    None
+                }
             }
             _ => None,
         };
@@ -1088,7 +1134,7 @@ impl Checker<'_> {
                 }
             }
             ExprKind::Name(name) => self.name_expr(id, name, expr.span),
-            ExprKind::Path(segments) => self.path_value(id, segments, expr.span),
+            ExprKind::Path(segments) => self.path_value(id, segments, expect, expr.span),
             ExprKind::Unit => Ty::UNIT,
             ExprKind::Tuple(elems) => {
                 let wanted: Option<Box<[Ty]>> =
@@ -1177,7 +1223,7 @@ impl Checker<'_> {
                 }
                 Ty::ERROR
             }
-            ExprKind::Call { callee, args } => self.call(id, callee, args, expr.span),
+            ExprKind::Call { callee, args } => self.call(id, callee, args, expect, expr.span),
             ExprKind::MethodCall {
                 receiver,
                 method,
@@ -1390,7 +1436,10 @@ impl Checker<'_> {
     }
 
     /// A path used as a value: a variant such as `Basis::X`, or a constant such as `Float::PI`.
-    fn path_value(&mut self, id: ExprId, segments: List<Symbol>, span: Span) -> Ty {
+    fn path_value(&mut self, id: ExprId, segments: List<Symbol>, expect: Expect, span: Span) -> Ty {
+        if let [name] = *self.ast.list(segments) {
+            return self.bare_value(id, name, expect, span);
+        }
         if let [ty_name, name] = *self.ast.list(segments)
             && let Some(ty) = self.path_type(ty_name)
             && let Some(index) = self.variant_index(ty, name)
@@ -1762,12 +1811,18 @@ impl Checker<'_> {
                 .filter(|a| !self.data_refutable(a.pat))
                 .filter_map(|a| self.t.pat_variants[a.pat.index()])
                 .collect();
-            let enum_name = self.t.types.display(ty, ast);
+            // `None`, not `Option<Int>::None`.
+            let bare = matches!(*self.t.types.kind(ty), TyKind::Struct(s) if self.t.types.structs[s.index()].bare);
+            let prefix = if bare {
+                String::new()
+            } else {
+                format!("{}::", self.t.types.display(ty, ast))
+            };
             variants
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| !covered.contains(&(*i as u32)))
-                .map(|(_, v)| format!("`{enum_name}::{}`", ast.name(v.name)))
+                .map(|(_, v)| format!("`{prefix}{}`", ast.name(v.name)))
                 .collect()
         } else if ty == Ty::BOOL || ty == Ty::BIT {
             let literal = |a: &Arm| match ast.pat(a.pat).kind {
@@ -1859,7 +1914,14 @@ impl Checker<'_> {
 
 // Calls.
 impl Checker<'_> {
-    fn call(&mut self, id: ExprId, callee: ExprId, args: List<ExprId>, span: Span) -> Ty {
+    fn call(
+        &mut self,
+        id: ExprId,
+        callee: ExprId,
+        args: List<ExprId>,
+        expect: Expect,
+        span: Span,
+    ) -> Ty {
         let ast = self.ast;
         let callee_expr = *ast.expr(callee);
         let args = ast.list(args);
@@ -1899,11 +1961,15 @@ impl Checker<'_> {
                 self.skip_args(args)
             }
             ExprKind::Path(segments) => {
+                if let [name] = *ast.list(segments) {
+                    return self.bare_call(id, name, args, expect, span);
+                }
                 if let [ty_name, name] = *ast.list(segments)
                     && let Some(ty) = self.path_type(ty_name)
                     && let Some(index) = self.variant_index(ty, name)
                 {
-                    return self.variant_call(id, ty, index, segments, args, span);
+                    let path = self.path_text(segments);
+                    return self.variant_call(id, ty, index, &path, args, span);
                 }
                 if let [ty_name, name] = *ast.list(segments)
                     && let Some(ty) = self.path_type(ty_name)
@@ -1941,7 +2007,7 @@ impl Checker<'_> {
         id: ExprId,
         enum_ty: Ty,
         index: u32,
-        segments: List<Symbol>,
+        path: &str,
         args: &[ExprId],
         span: Span,
     ) -> Ty {
@@ -1949,7 +2015,6 @@ impl Checker<'_> {
             unreachable!("only enums have variants")
         };
         let variant = self.t.types.variants(enum_ty).expect("an enum")[index as usize].clone();
-        let path = self.path_text(segments);
         if variant.named || variant.data.is_empty() {
             let message = if variant.named {
                 format!("`{path}` has named fields; write `{path} {{ … }}`")
@@ -1970,6 +2035,153 @@ impl Checker<'_> {
         };
         self.check_args(&sig, None, args, span);
         enum_ty
+    }
+
+    /// The standard library's `Option<T>` (one type argument) or `Result<T, E>` (two): an enum
+    /// made the first time each is used (`spec/types.md` §2).
+    fn std_enum(&mut self, args: Vec<Ty>) -> Ty {
+        let ast = self.ast;
+        let symbol = |text: &str| ast.symbols.get(text).expect("interned by the parser");
+        let variant = |text: &str, data: Vec<Ty>| VariantDef {
+            name: symbol(text),
+            span: Span::default(),
+            data,
+            names: Vec::new(),
+            named: false,
+        };
+        let (name, variants) = match *args.as_slice() {
+            [value] => (
+                "Option",
+                vec![variant("Some", vec![value]), variant("None", Vec::new())],
+            ),
+            [value, error] => (
+                "Result",
+                vec![variant("Ok", vec![value]), variant("Err", vec![error])],
+            ),
+            _ => unreachable!("`Option` takes one type argument, `Result` two"),
+        };
+        let name = symbol(name);
+        if let Some(&id) = self.std_enums.get(&(name, args.clone())) {
+            return self.t.types.struct_ty(id);
+        }
+        let id = StructId(self.t.types.structs.len() as u32);
+        self.t.types.structs.push(StructDef {
+            name,
+            span: Span::default(),
+            fields: Vec::new(),
+            variants: Some(variants),
+            args: args.clone(),
+            bare: true,
+        });
+        self.std_enums.insert((name, args), id);
+        self.t.types.struct_ty(id)
+    }
+
+    /// The `Option` or `Result` that `expect` asks for, if it has the variant `name`, and the
+    /// variant's index.
+    fn expected_variant(&self, name: Symbol, expect: Expect) -> Option<(Ty, u32)> {
+        let ty = self.t.types.deref(expect.ty()?);
+        let TyKind::Struct(s) = *self.t.types.kind(ty) else {
+            return None;
+        };
+        if !self.t.types.structs[s.index()].bare {
+            return None;
+        }
+        Some((ty, self.variant_index(ty, name)?))
+    }
+
+    /// The enum `Some`, `None`, `Ok` or `Err` belongs to.
+    fn bare_owner(&self, name: Symbol) -> &'static str {
+        if matches!(self.name(name), "Some" | "None") {
+            "Option"
+        } else {
+            "Result"
+        }
+    }
+
+    /// Reports a bare variant whose enum cannot be told from what is expected.
+    fn unknown_bare(&mut self, name: Symbol, expect: Expect, span: Span) -> Ty {
+        let text = self.name(name).to_string();
+        let owner = self.bare_owner(name);
+        match expect.ty() {
+            Some(want) if self.t.types.is_wildcard(want) => {}
+            Some(want) => {
+                let message = format!(
+                    "mismatched types: expected {}, found `{text}`, a variant of `{owner}`",
+                    self.show(want)
+                );
+                self.error(span, message);
+            }
+            None => {
+                let example = match text.as_str() {
+                    "None" => "let x: Option<Int> = None",
+                    "Ok" => "let r: Result<Int, String> = Ok(1)",
+                    _ => "let r: Result<Int, String> = Err(\"failed\")",
+                };
+                let message = format!("cannot tell which `{owner}` `{text}` is");
+                self.error(span, message).help = Some(format!("write its type, as in `{example}`"));
+            }
+        }
+        Ty::ERROR
+    }
+
+    /// `None`, of the `Option` expected.
+    fn bare_value(&mut self, id: ExprId, name: Symbol, expect: Expect, span: Span) -> Ty {
+        let text = self.name(name).to_string();
+        if text != "None" {
+            self.error(span, format!("`{text}` holds data; write `{text}(…)`"));
+            return Ty::ERROR;
+        }
+        let Some((ty, index)) = self.expected_variant(name, expect) else {
+            return self.unknown_bare(name, expect, span);
+        };
+        let TyKind::Struct(s) = *self.t.types.kind(ty) else {
+            unreachable!("only enums have variants")
+        };
+        self.t.res[id.index()] = Res::Variant(s, index);
+        ty
+    }
+
+    /// `Some(x)`, `Ok(x)` or `Err(e)`, of the enum expected; without one, `Some(x)` is the
+    /// `Option` of `x`'s type.
+    fn bare_call(
+        &mut self,
+        id: ExprId,
+        name: Symbol,
+        args: &[ExprId],
+        expect: Expect,
+        span: Span,
+    ) -> Ty {
+        let text = self.name(name).to_string();
+        if let Some((ty, index)) = self.expected_variant(name, expect) {
+            return self.variant_call(id, ty, index, &text, args, span);
+        }
+        if text != "Some" {
+            self.skip_args(args);
+            return self.unknown_bare(name, expect, span);
+        }
+        let [arg] = *args else {
+            self.error(span, "`Some(…)` holds one value");
+            return self.skip_args(args);
+        };
+        let found = self.expr(arg, Expect::None);
+        if self.t.types.is_wildcard(found) {
+            return Ty::ERROR;
+        }
+        // A reference to a copyable value holds a copy, as when it is passed by value.
+        let value = match *self.t.types.kind(found) {
+            TyKind::Ref { inner, .. } if self.t.types.linearity(inner) == Kind::Copyable => {
+                self.coerce(arg, found, inner);
+                inner
+            }
+            _ => found,
+        };
+        let ty = self.std_enum(vec![value]);
+        let TyKind::Struct(s) = *self.t.types.kind(ty) else {
+            unreachable!("`Option` is an enum")
+        };
+        self.t.callees[id.index()] = Some(Callee::Variant(s, 0));
+        ty
     }
 
     /// A method or associated function of `ty`, built-in or declared in a struct.

@@ -213,6 +213,10 @@ pub fn std_variant(name: &str, variant: &str) -> String {
             "The {v} basis, for `measure_in`: 0 for the +1 eigenstate of {v}, 1 for the −1 \
              eigenstate."
         ),
+        ("Option", "Some") => "A value that is there. `Option` is built in.".into(),
+        ("Option", "None") => "No value. `Option` is built in.".into(),
+        ("Result", "Ok") => "Success, with its value. `Result` is built in.".into(),
+        ("Result", "Err") => "Failure, with its error. `Result` is built in.".into(),
         _ => String::new(),
     }
 }

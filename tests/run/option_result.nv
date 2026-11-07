@@ -1,0 +1,42 @@
+/// The first even number, if there is one.
+fn first_even(xs: [Int; 4]) -> Option<Int> {
+    for i in 0..4 {
+        let x = xs[i]
+        if x % 2 == 0 { return Some(x) }
+    }
+    None
+}
+
+fn divide(a: Int, b: Int) -> Result<Int, String> {
+    if b == 0 { Err("division by zero") } else { Ok(a / b) }
+}
+
+fn use_spare(spare: Option<Qubit>) -> Bit {
+    match mv spare {
+        Some(q) => mv q.measure(),
+        None => 0,
+    }
+}
+
+fn spare_is_set(spare: ref Option<Qubit>) -> Bool {
+    match spare {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn main() {
+    print(first_even([1, 3, 4, 5]), first_even([1, 3, 5, 7]))
+    print(divide(7, 2), divide(1, 0))
+    match divide(9, 3) {
+        Ok(n) => print("got {n}"),
+        Err(e) => print("failed: {e}"),
+    }
+    let s = Some(|1>)
+    print(spare_is_set(s))
+    print(use_spare(mv s))
+    let n: Option<Bit> = None
+    print(n == None, Some(1) == Some(1), Some(2) != Some(3))
+    let pair: (Option<Float>, Result<Bool, Int>) = (Some(1.5), Ok(true))
+    print(pair)
+}

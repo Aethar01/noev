@@ -82,6 +82,11 @@ pub struct StructDef {
     pub fields: Vec<(Symbol, Ty)>,
     /// An enum's variants, in declaration order; `None` for a struct.
     pub variants: Option<Vec<VariantDef>>,
+    /// The type arguments of `Option<T>` or `Result<T, E>`, one such type per use; empty
+    /// for other types.
+    pub args: Vec<Ty>,
+    /// Whether its variants are named alone (`Some(1)`, not `Option::Some(1)`).
+    pub bare: bool,
 }
 
 /// One variant of an enum.
@@ -160,6 +165,11 @@ impl Types {
         self.kinds.push(kind.clone());
         self.map.insert(kind, ty);
         ty
+    }
+
+    /// The type for `kind`, if one exists.
+    pub fn find(&self, kind: &TyKind) -> Option<Ty> {
+        self.map.get(kind).copied()
     }
 
     /// What `ty` is.
@@ -333,7 +343,15 @@ impl Types {
             }
             TyKind::Array(elem, len) => format!("[{}; {len}]", self.display(*elem, ast)),
             TyKind::Distribution(elem) => format!("Distribution<{}>", self.display(*elem, ast)),
-            TyKind::Struct(id) => ast.name(self.structs[id.index()].name).into(),
+            TyKind::Struct(id) => {
+                let def = &self.structs[id.index()];
+                let name = ast.name(def.name);
+                if def.args.is_empty() {
+                    return name.into();
+                }
+                let args: Vec<String> = def.args.iter().map(|&t| self.display(t, ast)).collect();
+                format!("{name}<{}>", args.join(", "))
+            }
             TyKind::Ref { mutable, inner } => {
                 let word = if *mutable { "mut" } else { "ref" };
                 format!("{word} {}", self.display(*inner, ast))

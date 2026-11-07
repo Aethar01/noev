@@ -681,6 +681,24 @@ impl Document {
         let def = &self.typed.types.structs[s.index()];
         let variant = def.variants.as_ref()?.get(index as usize)?;
         // The standard library's enums have no place in the file.
+        if def.bare {
+            let data: Vec<String> = variant
+                .data
+                .iter()
+                .map(|&t| self.typed.types.display(t, ast))
+                .collect();
+            let name = ast.name(variant.name);
+            let enum_ty = self
+                .typed
+                .types
+                .display(self.typed.types.find(&TyKind::Struct(s))?, ast);
+            let code = if data.is_empty() {
+                format!("{name}: {enum_ty}")
+            } else {
+                format!("{name}({}): {enum_ty}", data.join(", "))
+            };
+            return Some((code, docs::std_variant(ast.name(def.name), name)));
+        }
         if variant.span == Span::default() {
             let code = format!("{}::{}", ast.name(def.name), ast.name(variant.name));
             return Some((

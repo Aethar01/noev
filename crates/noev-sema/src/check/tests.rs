@@ -239,6 +239,38 @@ fn records_implicit_lends() {
 }
 
 #[test]
+fn option_and_result() {
+    ok("fn f(c: Bool) -> Option<Int> { if c { Some(1) } else { None } }");
+    ok("fn f(b: Int) -> Result<Int, String> { if b == 0 { Err(\"zero\") } else { Ok(6 / b) } }");
+    ok("fn f(o: Option<Int>) -> Int { match o { Some(n) => n, None => 0 } }");
+    ok("fn f() -> Bool { let n: Option<Bit> = None\n n == Some(1) }");
+    assert_eq!(
+        one_error("fn f() { let x = None }"),
+        "cannot tell which `Option` `None` is"
+    );
+    assert_eq!(
+        one_error("fn f() -> Int { None }"),
+        "mismatched types: expected `Int`, found `None`, a variant of `Option`"
+    );
+    assert_eq!(
+        one_error("fn f(o: Option<Int>) -> Int { match o { Some(n) => n } }"),
+        "this `match` does not cover `None`"
+    );
+    assert_eq!(
+        one_error("fn f(o: Option<Int>) -> Int { match o { Ok(n) => n, _ => 0 } }"),
+        "`Ok` is a variant of `Result`, but the value is `Option<Int>`"
+    );
+    assert_eq!(
+        one_error("fn f(o: Option) {}"),
+        "`Option` needs its type arguments, as in `Option<Int>`"
+    );
+    assert_eq!(
+        one_error("fn f(r: Result<Int>) {}"),
+        "`Result` takes two type arguments"
+    );
+}
+
+#[test]
 fn ui_tests_type_check_cleanly() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/ui");
     let mut stack = vec![std::path::PathBuf::from(dir)];

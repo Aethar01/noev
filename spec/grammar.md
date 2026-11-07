@@ -296,8 +296,9 @@ unsafe_block = "unsafe" block ;
   `match`; patterns that bind take parts of the value, by the rules of
   [ownership.md](ownership.md) §13.
 - A plain name in a pattern binds a variable, except `None`, `Some`, `Ok` and `Err`, which
-  are the variants of `Option` and `Result`. Other variants are always written with their
-  enum's name (`Basis::X`), so a pattern never looks like a variable by accident.
+  are the variants of `Option` and `Result`, in patterns and expressions alike: no variable
+  or function can take those names. Other variants are always written with their enum's
+  name (`Basis::X`), so a pattern never looks like a variable by accident.
 - `unsafe { … }` allows operations whose claims the compiler cannot check (see
   [ownership.md](ownership.md) §11).
 

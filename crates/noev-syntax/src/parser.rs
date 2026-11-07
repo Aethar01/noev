@@ -865,11 +865,11 @@ impl Parser<'_> {
                 self.bump();
                 PatKind::Wildcard
             }
-            // A variant: a path, `Some(…)`, or `None`.
+            // A variant: a path, `Name(…)`, or one of `Some`, `None`, `Ok` and `Err`.
             Ident | SelfType
                 if self.nth(1).kind == ColonColon
                     || self.nth(1).kind == LParen
-                    || matches!(self.text(start), "None") =>
+                    || crate::ast::BARE_VARIANTS.contains(&self.text(start)) =>
             {
                 let path = self.path_segments();
                 let data = self.pat_data();
@@ -1461,7 +1461,9 @@ impl Parser<'_> {
         let start = self.span();
         let segments = self.path_segments();
         let kind = match self.ast.list(segments) {
-            [single] => ExprKind::Name(*single),
+            [single] if !crate::ast::BARE_VARIANTS.contains(&self.ast.name(*single)) => {
+                ExprKind::Name(*single)
+            }
             _ => ExprKind::Path(segments),
         };
         self.push(kind, start)

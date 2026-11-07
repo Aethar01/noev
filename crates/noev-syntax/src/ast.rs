@@ -190,9 +190,15 @@ pools! {
     field_pats: FieldPat,
 }
 
+/// The variants of `Option` and `Result`, named without their enum: alone, each is a path
+/// (`ExprKind::Path`), never a variable (`spec/grammar.md` §2).
+pub const BARE_VARIANTS: [&str; 4] = ["Some", "None", "Ok", "Err"];
+
 /// Names the standard library declares, interned in every file: the enum `Basis` and its
-/// variants (`spec/std.md` §2).
-pub const STD_NAMES: [&str; 4] = ["Basis", "X", "Y", "Z"];
+/// variants (`spec/std.md` §2), and `Option` and `Result` and theirs (`spec/types.md` §2).
+pub const STD_NAMES: [&str; 10] = [
+    "Basis", "X", "Y", "Z", "Option", "Result", "Some", "None", "Ok", "Err",
+];
 
 /// A parsed file.
 #[derive(Debug, Default)]

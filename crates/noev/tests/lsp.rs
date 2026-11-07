@@ -327,3 +327,30 @@ fn enums_hover_definition_and_symbols() {
     assert_eq!(children, ["X", "Y", "flip"]);
     client.stop();
 }
+
+const OPTIONS: &str = "fn first(c: Bool) -> Option<Int> {
+    if c { Some(1) } else { None }
+}
+
+fn main() {
+    print(first(true))
+}
+";
+
+#[test]
+fn option_variants_hover() {
+    let mut client = Client::start();
+    let uri = "file:///tmp/options.nv";
+    client.open(uri, OPTIONS);
+    assert!(client.diagnostics().is_empty());
+
+    // `Some` and `None`, with the `Option` they make.
+    let text = hover_text(&mut client, uri, 1, 12);
+    assert!(text.contains("Some(Int): Option<Int>"), "{text}");
+    let text = hover_text(&mut client, uri, 1, 29);
+    assert!(
+        text.contains("None: Option<Int>") && text.contains("No value"),
+        "{text}"
+    );
+    client.stop();
+}

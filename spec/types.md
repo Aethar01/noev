@@ -85,7 +85,10 @@ enum Outcome {
 | `Option<T>`    | `Some(T)`, `None`     | A value that may be absent                |
 | `Result<T, E>` | `Ok(T)`, `Err(E)`     | The result of something that can fail      |
 
-Their variants are in scope without the enum's name: `Some(q)`, `None`, `Ok(x)`, `Err(e)`.
+Their variants are in scope without the enum's name: `Some(q)`, `None`, `Ok(x)`, `Err(e)`,
+and print that way. `Some(x)` is an `Option` of `x`'s type; `None`, `Ok` and `Err` take their
+types from where they are used (a declared type, a parameter, a return type, an earlier
+branch), so `let x = None` alone is an error: write `let x: Option<Int> = None`.
 `T` and `E` may be any type, so `Option<Qubit>` is "a qubit, or none", and the compiler
 makes sure a `Some` qubit is consumed.
 

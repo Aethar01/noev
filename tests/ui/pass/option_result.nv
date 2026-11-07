@@ -1,0 +1,34 @@
+// `Option` and `Result` (spec/types.md §2), with ownership by moving or lending
+// (spec/ownership.md §13).
+
+fn use_spare(spare: Option<Qubit>) -> Bit {
+    match mv spare {
+        Some(q) => mv q.measure(),          // q is this arm's; measuring consumes it
+        None => 0,
+    }
+}
+
+fn spare_is_set(spare: ref Option<Qubit>) -> Bool {
+    match spare {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn flip_spare(spare: mut Option<Qubit>) {
+    match spare {
+        Some(q) => q.x(),                   // q is `mut Qubit`, lent for the arm
+        None => {}
+    }
+}
+
+fn checked(m: Bit) -> Result<Bit, String> {
+    if m == 1 { Ok(m) } else { Err("measured 0") }
+}
+
+fn main() {
+    let mut spare = Some(|0>)
+    flip_spare(mut spare)
+    print(spare_is_set(spare))
+    print(checked(use_spare(mv spare)))
+}

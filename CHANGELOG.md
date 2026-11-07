@@ -15,6 +15,10 @@ before 1.0.
   (`Outcome::Retry { attempts: Int }`), matched with `Name(a, b)`, `Name { field, .. }` and
   nested patterns. `match mv x` takes the parts; matching a place or a reference lends them
   (`ref` or `mut`), and an enum holding qubits must be consumed like any other (N003).
+- `Option<T>` and `Result<T, E>`, built in until generics, with `Some`, `None`, `Ok` and
+  `Err` written alone. `Some(x)` takes its type from `x`; the others from where they are
+  used (`let x: Option<Int> = None`). `Option<Qubit>` is linear, so a `Some` qubit must be
+  consumed.
 - `match`, with variant, literal (`0`, `-1`, `true`, `"text"`), tuple, array and catch-all
   patterns. Every case must be covered; arms are branches for ownership (N009). A `match` on
   a measurement result runs shot by shot for now.
