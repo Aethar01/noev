@@ -34,6 +34,18 @@ pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &str) -> 
                 .collect()
         })
         .collect();
+    let variant_names = typed
+        .types
+        .structs
+        .iter()
+        .map(|s| {
+            s.variants
+                .iter()
+                .flatten()
+                .map(|v| syntax.name(v.name).to_string())
+                .collect()
+        })
+        .collect();
     // Lowering creates reference types for implicit lends, so it works on its own copy.
     let mut types = typed.types.clone();
     let mut functions = Vec::with_capacity(syntax.all_fns().len());
@@ -71,6 +83,7 @@ pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &str) -> 
         types,
         struct_names,
         struct_fields,
+        variant_names,
     }
 }
 
@@ -479,6 +492,106 @@ impl Builder<'_> {
         }
     }
 
+    /// `match`: the scrutinee once, then each arm's test in turn, branching to the first arm
+    /// that fits. The checker made sure one always does.
+    fn match_into(&mut self, scrutinee: ExprId, arms: ast::List<ast::Arm>, dest: Option<Place>) {
+        let ty = self.ty(scrutinee);
+        let held = self.temp(ty);
+        let op = self.operand(scrutinee);
+        self.assign(held.clone(), Rvalue::Use(op));
+        // Through a reference, the patterns look at what it refers to.
+        let value = if self.is_ref(ty) {
+            held.with(Proj::Deref)
+        } else {
+            held
+        };
+        let join = self.new_block();
+        for arm in self.ast.list(arms).to_vec() {
+            let test = self.pattern_test(arm.pat, &value);
+            let (body, next) = (self.new_block(), self.new_block());
+            match test {
+                Some(cond) => self.terminate_into(
+                    Terminator::Branch {
+                        cond,
+                        then: body,
+                        otherwise: next,
+                        control: None,
+                    },
+                    body,
+                ),
+                None => self.terminate_into(Terminator::Goto(body), body),
+            }
+            self.bind(arm.pat, value.clone());
+            self.expr_into(arm.body, dest.clone());
+            self.terminate_into(Terminator::Goto(join), next);
+        }
+        self.terminate_into(Terminator::Unreachable, join);
+    }
+
+    /// A `Bool` saying whether the value at `place` fits `pat`, or `None` when it always does.
+    fn pattern_test(&mut self, pat: ast::PatId, place: &Place) -> Option<Operand> {
+        let ast = self.ast;
+        let ty = self.typed.pat_types[pat.index()];
+        match ast.pat(pat).kind {
+            ast::PatKind::Name(_) | ast::PatKind::Wildcard => None,
+            ast::PatKind::Literal(literal) => {
+                let constant = match literal {
+                    ast::PatLiteral::Int(v) if self.types.deref(ty) == Ty::BIT => {
+                        Operand::Const(Const::Bit(v == 1))
+                    }
+                    ast::PatLiteral::Int(v) => Operand::Const(Const::Int(v)),
+                    ast::PatLiteral::Bool(b) => Operand::Const(Const::Bool(b)),
+                    ast::PatLiteral::Str(text) => {
+                        let temp = self.temp(Ty::STRING);
+                        let text = ast.name(text).to_string();
+                        self.assign(temp.clone(), Rvalue::Format(vec![FormatPart::Text(text)]));
+                        Operand::Copy(temp)
+                    }
+                };
+                Some(self.compare(Operand::Copy(place.clone()), constant))
+            }
+            ast::PatKind::Variant { .. } => {
+                let index = self.typed.pat_variants[pat.index()]?;
+                let tag = self.temp(Ty::INT);
+                self.assign(tag.clone(), Rvalue::Tag(Operand::Copy(place.clone())));
+                Some(self.compare(Operand::Copy(tag), Operand::Const(Const::Int(index as i64))))
+            }
+            ast::PatKind::Tuple(pats) | ast::PatKind::Array(pats) => {
+                let is_tuple = matches!(ast.pat(pat).kind, ast::PatKind::Tuple(_));
+                let mut all: Option<Operand> = None;
+                for (i, &p) in ast.list(pats).iter().enumerate() {
+                    let part = if is_tuple {
+                        place.with(Proj::Field(i as u32))
+                    } else {
+                        place.with(Proj::Index(Operand::Const(Const::Int(i as i64))))
+                    };
+                    let Some(test) = self.pattern_test(p, &part) else {
+                        continue;
+                    };
+                    all = Some(match all {
+                        None => test,
+                        Some(earlier) => {
+                            let both = self.temp(Ty::BOOL);
+                            self.assign(
+                                both.clone(),
+                                Rvalue::Binary(ast::BinaryOp::And, earlier, test),
+                            );
+                            Operand::Copy(both)
+                        }
+                    });
+                }
+                all
+            }
+        }
+    }
+
+    /// `a == b`, as a `Bool` operand.
+    fn compare(&mut self, a: Operand, b: Operand) -> Operand {
+        let result = self.temp(Ty::BOOL);
+        self.assign(result.clone(), Rvalue::Binary(ast::BinaryOp::Eq, a, b));
+        Operand::Copy(result)
+    }
+
     /// Binds a destructuring pattern to the parts of `value`.
     fn bind(&mut self, pat: ast::PatId, value: Place) {
         match self.ast.pat(pat).kind {
@@ -501,6 +614,8 @@ impl Builder<'_> {
                     self.bind(p, value.with(Proj::Index(index)));
                 }
             }
+            // Tests only, until variants hold data.
+            ast::PatKind::Literal(_) | ast::PatKind::Variant { .. } => {}
         }
     }
 
@@ -787,11 +902,12 @@ impl Builder<'_> {
                 let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
                 self.ket(state, &dest, state.len() > 1);
             }
-            ExprKind::Path(_) => {
-                if let Res::Builtin(Builtin::Const(c)) = self.typed.res[id.index()] {
-                    self.set(&dest, Rvalue::FloatConst(c));
-                }
-            }
+            ExprKind::Path(_) => match self.typed.res[id.index()] {
+                Res::Builtin(Builtin::Const(c)) => self.set(&dest, Rvalue::FloatConst(c)),
+                Res::Variant(_, index) => self.set(&dest, Rvalue::Variant(index, Vec::new())),
+                _ => {}
+            },
+            ExprKind::Match { scrutinee, arms } => self.match_into(scrutinee, arms, dest),
             ExprKind::Name(_)
             | ExprKind::Field { .. }
             | ExprKind::TupleIndex { .. }

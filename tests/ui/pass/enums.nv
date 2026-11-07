@@ -1,0 +1,61 @@
+// Enums with plain variants, and `match` on enums, numbers, bits and booleans.
+
+/// A measurement basis.
+enum Basis {
+    X
+    Y
+    Z
+
+    fn next(ref self) -> Self {
+        match self {
+            Basis::X => Basis::Y,
+            Basis::Y => Basis::Z,
+            Basis::Z => Basis::X,
+        }
+    }
+
+    fn origin() -> Basis {
+        Basis::Z
+    }
+}
+
+enum Answer { Yes, No, Unsure }
+
+fn decide(confident: Bool, yes: Bool) -> Answer {
+    match confident {
+        false => Answer::Unsure,
+        true => if yes { Answer::Yes } else { Answer::No },
+    }
+}
+
+fn count(n: Int) -> String {
+    match n {
+        0 => "none",
+        1 => "one",
+        _ => "many",
+    }
+}
+
+fn reading() -> Bit {
+    let q = |1>
+    let m = mv q.measure()
+    match m {
+        0 => 1,
+        1 => 0,
+    }
+}
+
+fn main() {
+    let b = Basis::origin().next()
+    let same = b == Basis::X
+    print(b, same, decide(true, false), count(2), reading())
+    // Every arm moves the qubit, so it is consumed either way.
+    let q = |0>
+    match b {
+        Basis::X => mv q.discard(),
+        _ => {
+            let m = mv q.measure()
+            print(m)
+        }
+    }
+}

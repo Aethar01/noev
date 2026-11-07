@@ -1,12 +1,14 @@
-// The one token the grammar cannot describe on its own: a `<` that starts a line, which
-// starts a new statement (an expectation value) rather than continuing the previous line as
-// a comparison (spec/grammar.md §1, Line breaks). A bra at the start of a line (`<1| mv q`)
-// is left to the ordinary lexer.
+// The tokens the grammar cannot describe on its own: a `<` or `-` that starts a line, which
+// starts something new (an expectation value, a negative number, a `match` arm's `-1`)
+// rather than continuing the previous line as a comparison or a subtraction
+// (spec/grammar.md §1, Line breaks). A bra at the start of a line (`<1| mv q`), `->`, `-=`
+// and `<<` are left to the ordinary lexer.
 
 #include "tree_sitter/parser.h"
 
 enum TokenType {
     LINE_START_ANGLE,
+    LINE_START_MINUS,
 };
 
 void *tree_sitter_noev_external_scanner_create(void) { return NULL; }
@@ -22,7 +24,7 @@ static bool is_ket_char(int32_t c) { return c == '0' || c == '1' || c == '+' || 
 
 bool tree_sitter_noev_external_scanner_scan(void *payload, TSLexer *lexer,
                                             const bool *valid_symbols) {
-    if (!valid_symbols[LINE_START_ANGLE]) {
+    if (!valid_symbols[LINE_START_ANGLE] && !valid_symbols[LINE_START_MINUS]) {
         return false;
     }
     bool line_break = false;
@@ -33,7 +35,19 @@ bool tree_sitter_noev_external_scanner_scan(void *payload, TSLexer *lexer,
         }
         lexer->advance(lexer, true);
     }
-    if (!line_break || lexer->lookahead != '<') {
+    if (!line_break) {
+        return false;
+    }
+    if (lexer->lookahead == '-' && valid_symbols[LINE_START_MINUS]) {
+        lexer->advance(lexer, false);
+        lexer->mark_end(lexer);
+        if (lexer->lookahead == '>' || lexer->lookahead == '=') {
+            return false;
+        }
+        lexer->result_symbol = LINE_START_MINUS;
+        return true;
+    }
+    if (lexer->lookahead != '<' || !valid_symbols[LINE_START_ANGLE]) {
         return false;
     }
     lexer->advance(lexer, false);

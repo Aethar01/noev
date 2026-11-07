@@ -396,6 +396,10 @@ fn walk_expr(ast: &Ast, id: ExprId, visit: &mut dyn FnMut(Node)) {
             blocks.push(then);
             children.extend(otherwise);
         }
+        ExprKind::Match { scrutinee, arms } => {
+            children.push(scrutinee);
+            children.extend(ast.list(arms).iter().map(|a| a.body));
+        }
         ExprKind::While { cond, body } => {
             children.push(cond);
             blocks.push(body);
@@ -671,6 +675,20 @@ impl Owner<'_> {
                     self.bind(p, elem, poisoned, bound);
                 }
             }
+            PatKind::Literal(_) => {}
+            PatKind::Variant { data, .. } => {
+                let pats: Vec<PatId> = match data {
+                    PatData::None => Vec::new(),
+                    PatData::Tuple(pats) => self.ast.list(pats).to_vec(),
+                    PatData::Fields { fields, .. } => {
+                        self.ast.list(fields).iter().filter_map(|f| f.pat).collect()
+                    }
+                };
+                for p in pats {
+                    let ty = self.typed.pat_types[p.index()];
+                    self.bind(p, ty, poisoned, bound);
+                }
+            }
         }
     }
 
@@ -906,6 +924,10 @@ impl Owner<'_> {
                 self.if_expr(cond, then, otherwise, use_, expr.span);
                 Vec::new()
             }
+            ExprKind::Match { scrutinee, arms } => {
+                self.match_expr(scrutinee, arms, use_, expr.span);
+                Vec::new()
+            }
             ExprKind::While { cond, body } => {
                 self.expr(cond, Use::Read);
                 self.loop_body(body, Vec::new(), None);
@@ -1017,12 +1039,52 @@ impl Owner<'_> {
         self.moved = match (then_diverged, else_diverged) {
             (true, _) => else_moved,
             (_, true) => then_moved,
-            _ => self.merge_branches(then_moved, else_moved, span),
+            _ => self.merge_branches(then_moved, else_moved, span, false),
         };
     }
 
+    /// The arms of a `match` are branches: each starts from what was moved before it, and
+    /// anything with qubits must be moved in all of them or none (N009).
+    fn match_expr(&mut self, scrutinee: ExprId, arms: List<Arm>, use_: Use, span: Span) {
+        self.expr(scrutinee, Use::Read);
+        let before = self.moved.clone();
+        let mut merged: Option<Vec<Moved>> = None;
+        let mut all_diverged = true;
+        for arm in self.ast.list(arms).to_vec() {
+            self.moved = before.clone();
+            self.diverged = false;
+            let scope_mark = self.scope.len();
+            let mut bound = Vec::new();
+            let ty = self.typed.pat_types[arm.pat.index()];
+            self.bind(arm.pat, ty, false, &mut bound);
+            let carried = self.expr(arm.body, use_);
+            self.release(&carried);
+            if !self.diverged {
+                let end = Span::new(arm.span.end, arm.span.end);
+                self.check_consumed(scope_mark, end);
+            }
+            self.leave_scope(scope_mark);
+            let moved = std::mem::take(&mut self.moved);
+            if !self.diverged {
+                merged = Some(match merged {
+                    None => moved,
+                    Some(earlier) => self.merge_branches(earlier, moved, span, true),
+                });
+            }
+            all_diverged &= self.diverged;
+        }
+        self.diverged = all_diverged;
+        self.moved = merged.unwrap_or(before);
+    }
+
     /// N009 for anything with qubits moved in one branch but not the other.
-    fn merge_branches(&mut self, a: Vec<Moved>, b: Vec<Moved>, span: Span) -> Vec<Moved> {
+    fn merge_branches(
+        &mut self,
+        a: Vec<Moved>,
+        b: Vec<Moved>,
+        span: Span,
+        arms: bool,
+    ) -> Vec<Moved> {
         let mut merged = a.clone();
         let mut reported: Vec<LocalId> = Vec::new();
         for (side, other, is_then) in [(&a, &b, true), (&b, &a, false)] {
@@ -1041,18 +1103,21 @@ impl Owner<'_> {
                 }
                 reported.push(m.place.root);
                 let name = self.name(m.place.root).to_string();
-                let branch = if is_then {
-                    "when the condition is true"
+                let message = if arms {
+                    format!("`{name}` is moved in some arms of this `match` but not others")
+                } else if is_then {
+                    format!("`{name}` is moved when the condition is true but not otherwise")
                 } else {
-                    "when the condition is false"
+                    format!("`{name}` is moved when the condition is false but not otherwise")
                 };
-                self.error(
-                    "N009",
-                    span,
-                    format!("`{name}` is moved {branch} but not otherwise"),
-                )
-                .with_label_mut(m.span, "moved here")
-                .help = Some("move it in both branches, or in neither".into());
+                let help = if arms {
+                    "move it in every arm, or in none"
+                } else {
+                    "move it in both branches, or in neither"
+                };
+                self.error("N009", span, message)
+                    .with_label_mut(m.span, "moved here")
+                    .help = Some(help.into());
             }
         }
         merged

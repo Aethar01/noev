@@ -7,7 +7,18 @@ before 1.0.
 
 ## [Unreleased]
 
+### Language
+
+- Enums with plain variants (`enum Basis { X, Y, Z }`), with methods inside, compared with
+  `==`, and printed as `Basis::X`. Variants with data come next.
+- `match`, with variant, literal (`0`, `-1`, `true`, `"text"`), tuple, array and catch-all
+  patterns. Every case must be covered; arms are branches for ownership (N009). A `match` on
+  a measurement result runs shot by shot for now.
+
 ### Editors
+
+- Enums and `match` in the tree-sitter grammar and the language server (hover, go to
+  definition, symbols); hover on type names, `Self` included.
 
 - Hover explains more: doc comments (`///`, now in `spec/grammar.md`), whether a function
   runs as a circuit and whether it is reversible, struct fields and methods, built-ins,

@@ -1,0 +1,88 @@
+================================================================================
+Enum declarations
+================================================================================
+
+enum Outcome {
+    Success(Bit),
+    Retry { attempts: Int },
+    Failed
+
+    fn ok(ref self) -> Bool { true }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (enum_item
+    (type_identifier)
+    (enum_variant
+      (constant)
+      (type_path
+        (type_identifier)))
+    (enum_variant
+      (constant)
+      (field_declaration
+        (field_identifier)
+        (type_path
+          (type_identifier))))
+    (enum_variant
+      (constant))
+    (function_item
+      (identifier)
+      (parameters
+        (self_parameter
+          (ownership)
+          (self)))
+      (type_path
+        (type_identifier))
+      (block
+        (boolean)))))
+
+================================================================================
+Match arms and patterns
+================================================================================
+
+fn f() {
+    match o {
+        Some(q) => q,
+        None => 0,
+        Outcome::Retry { attempts, .. } => attempts
+        -1 => 2
+        _ => 3,
+    }
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_item
+    (identifier)
+    (parameters)
+    (block
+      (match_expression
+        (identifier)
+        (match_arm
+          (variant_pattern
+            (constant)
+            (identifier))
+          (identifier))
+        (match_arm
+          (variant_pattern
+            (constant))
+          (integer))
+        (match_arm
+          (variant_pattern
+            (path
+              (identifier)
+              (identifier))
+            (field_pattern
+              (field_identifier))
+            (rest_pattern))
+          (identifier))
+        (match_arm
+          (literal_pattern
+            (integer))
+          (integer))
+        (match_arm
+          (wildcard)
+          (integer))))))

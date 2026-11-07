@@ -542,6 +542,9 @@ impl<'p> Machine<'p> {
             &TyKind::Array(elem, len) => {
                 Value::Aggregate((0..len).map(|_| self.default(elem)).collect())
             }
+            &TyKind::Struct(s) if types.structs[s.index()].variants.is_some() => {
+                Value::Variant(0, Vec::new())
+            }
             &TyKind::Struct(s) => Value::Aggregate(
                 types.structs[s.index()]
                     .fields
@@ -1051,6 +1054,18 @@ impl Machine<'_> {
                 Value::Observable(Observable::pauli(pauli, index))
             }
             Rvalue::Identity => Value::Observable(Observable::identity()),
+            Rvalue::Variant(index, ops) => Value::Variant(
+                *index,
+                ops.iter().map(|o| self.operand(o)).collect::<Result<_>>()?,
+            ),
+            Rvalue::Tag(op) => match self.value(op)? {
+                Value::Variant(index, _) => Value::Int(index as i64),
+                other => {
+                    return Err(RuntimeError::new(format!(
+                        "expected an enum value, found {other:?}"
+                    )));
+                }
+            },
             Rvalue::Dist(method, ops, elem) => {
                 let Value::Distribution(dist) = self.operand(&ops[0])? else {
                     return Err(RuntimeError::new("expected a distribution"));
@@ -1177,6 +1192,11 @@ fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
             Eq => Value::Bool(a == b),
             NotEq => Value::Bool(a != b),
             _ => return Err(RuntimeError::new(format!("{} on Bool", op.as_str()))),
+        },
+        (a @ Value::Variant(..), b @ Value::Variant(..)) => match op {
+            Eq => Value::Bool(a == b),
+            NotEq => Value::Bool(a != b),
+            _ => return Err(RuntimeError::new(format!("{} on an enum", op.as_str()))),
         },
         (Value::Str(a), Value::Str(b)) => match op {
             Eq => Value::Bool(a == b),

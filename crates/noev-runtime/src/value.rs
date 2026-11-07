@@ -35,6 +35,8 @@ pub enum Value {
     /// While a circuit is being recorded: logic on measurement results, not yet known; a
     /// `Bit` if the flag is set, else a `Bool`.
     Cond(Rc<Condition>, bool),
+    /// An enum value: the variant's number and its data.
+    Variant(u32, Vec<Value>),
 }
 
 /// How often each result occurred in repeated runs.
@@ -143,7 +145,9 @@ impl Value {
     pub fn has_clbits(&self) -> bool {
         match self {
             Value::Clbit(_) | Value::Cond(..) => true,
-            Value::Aggregate(items) => items.iter().any(Value::has_clbits),
+            Value::Aggregate(items) | Value::Variant(_, items) => {
+                items.iter().any(Value::has_clbits)
+            }
             _ => false,
         }
     }
@@ -157,6 +161,9 @@ impl Value {
             Value::Cond(c, false) => Value::Bool(c.eval(bits)),
             Value::Aggregate(items) => {
                 Value::Aggregate(items.iter().map(|v| v.with_clbits(bits)).collect())
+            }
+            Value::Variant(index, data) => {
+                Value::Variant(*index, data.iter().map(|v| v.with_clbits(bits)).collect())
             }
             other => other.clone(),
         }
@@ -241,6 +248,7 @@ impl fmt::Display for Value {
             Value::Distribution(d) => write!(f, "{d}"),
             Value::Clbit(k) => write!(f, "<measurement {k}>"),
             Value::Cond(..) => write!(f, "<measurement logic>"),
+            Value::Variant(index, _) => write!(f, "<variant {index}>"),
             Value::Aggregate(items)
                 if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Bit(_))) =>
             {

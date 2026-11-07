@@ -266,3 +266,64 @@ fn hover_explains_functions_builtins_and_keywords() {
     assert!(hover_text(&mut client, uri, 7, 8).contains("must be consumed exactly once"));
     client.stop();
 }
+
+const ENUMS: &str = "/// A measurement basis.
+enum Basis {
+    X
+    Y
+
+    fn flip(ref self) -> Self {
+        match self {
+            Basis::X => Basis::Y,
+            Basis::Y => Basis::X,
+        }
+    }
+}
+
+fn main() {
+    print(Basis::X.flip())
+}
+";
+
+#[test]
+fn enums_hover_definition_and_symbols() {
+    let mut client = Client::start();
+    let uri = "file:///tmp/enums.nv";
+    client.open(uri, ENUMS);
+    assert!(client.diagnostics().is_empty());
+
+    // The enum, from a type annotation: its variants and methods, and its doc comment.
+    let text = hover_text(&mut client, uri, 5, 26);
+    assert!(
+        text.contains("enum Basis {") && text.contains("fn Basis::flip(ref self) -> Basis"),
+        "{text}"
+    );
+    assert!(text.contains("A measurement basis."), "{text}");
+    // A variant in a pattern, and as a value.
+    assert!(hover_text(&mut client, uri, 7, 18).contains("Basis::X"));
+    assert!(hover_text(&mut client, uri, 7, 31).contains("Basis::Y"));
+    assert!(hover_text(&mut client, uri, 6, 9).contains("Runs the first arm"));
+
+    // Go to the variant `Y` from the value `Basis::Y`.
+    let def = client.at("textDocument/definition", uri, 7, 31);
+    assert_eq!(
+        def["range"]["start"],
+        json!({ "line": 3, "character": 4 }),
+        "{def}"
+    );
+
+    let symbols = client.request(
+        "textDocument/documentSymbol",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    let basis = &symbols[0];
+    assert_eq!(basis["name"], "Basis");
+    let children: Vec<&str> = basis["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(children, ["X", "Y", "flip"]);
+    client.stop();
+}

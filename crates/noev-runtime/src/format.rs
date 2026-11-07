@@ -145,6 +145,15 @@ fn write_value(program: &Program, value: &Value, ty: Ty, out: &mut String) {
         (Value::Distribution(d), _) => {
             let _ = write!(out, "{d}");
         }
+        (Value::Variant(index, _), &TyKind::Struct(s)) => {
+            let variant = program.variant_names[s.index()]
+                .get(*index as usize)
+                .map_or("?", String::as_str);
+            let _ = write!(out, "{}::{variant}", program.struct_names[s.index()]);
+        }
+        (Value::Variant(index, _), _) => {
+            let _ = write!(out, "<variant {index}>");
+        }
         (Value::Qubit(_), _) => out.push_str("<qubit>"),
         (Value::Clbit(_) | Value::Cond(..), _) => out.push('0'),
         (Value::Ref(_), _) => out.push_str("<reference>"),

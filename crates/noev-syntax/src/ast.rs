@@ -185,6 +185,9 @@ pools! {
     field_inits: FieldInit,
     type_aliases: TypeAlias,
     str_parts: StrPart,
+    variants: VariantDecl,
+    arms: Arm,
+    field_pats: FieldPat,
 }
 
 /// A parsed file.
@@ -419,6 +422,13 @@ pub enum ExprKind {
         shots: ExprId,
         /// The run.
         body: BlockId,
+    },
+    /// `match scrutinee { pattern => body, … }`.
+    Match {
+        /// The value matched.
+        scrutinee: ExprId,
+        /// The arms, in order.
+        arms: List<Arm>,
     },
     /// `for var in start..end { … }`.
     For {
@@ -693,6 +703,86 @@ pub enum PatKind {
     Tuple(List<PatId>),
     /// `[a, b]`: one pattern per element of an array.
     Array(List<PatId>),
+    /// An enum variant: `Basis::X`, `Some(q)`, `Outcome::Retry { attempts }`.
+    Variant {
+        /// The variant's path: `[Basis, X]`, or one name for `Some`, `None`, `Ok`, `Err`.
+        path: List<Symbol>,
+        /// The variant's data, if the pattern takes it apart.
+        data: PatData,
+    },
+    /// A literal the value must equal: `0`, `-1`, `true`, `"yes"`.
+    Literal(PatLiteral),
+}
+
+/// The data part of a variant pattern.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PatData {
+    /// No data: `Basis::X`.
+    None,
+    /// Values: `Some(q)`.
+    Tuple(List<PatId>),
+    /// Named fields: `Outcome::Retry { attempts }`, with `..` for the rest.
+    Fields {
+        /// The fields named; a field alone binds a variable of its name.
+        fields: List<FieldPat>,
+        /// Whether `..` ends the list.
+        rest: bool,
+    },
+}
+
+/// `field: pattern`, or `field` alone, in a variant pattern.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldPat {
+    /// The field.
+    pub name: Symbol,
+    /// Its pattern; `None` binds a variable named like the field.
+    pub pat: Option<PatId>,
+    /// Where it is.
+    pub span: Span,
+}
+
+/// A literal in a pattern.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PatLiteral {
+    /// An integer (also a `Bit` where one is expected).
+    Int(i64),
+    /// `true` or `false`.
+    Bool(bool),
+    /// A string, interned.
+    Str(Symbol),
+}
+
+/// One arm of a `match`: `pattern => body`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Arm {
+    /// What the value must fit.
+    pub pat: PatId,
+    /// The arm's value.
+    pub body: ExprId,
+    /// The whole arm.
+    pub span: Span,
+}
+
+/// An enum variant declaration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VariantDecl {
+    /// The variant's name.
+    pub name: Symbol,
+    /// Its data.
+    pub data: VariantData,
+    /// Where it is.
+    pub span: Span,
+}
+
+/// What an enum variant holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VariantData {
+    /// Nothing.
+    Unit,
+    /// Values, by position: `Success(Bit)`.
+    Tuple(List<TypeId>),
+    /// Named fields: `Retry { attempts: Int }`.
+    Fields(List<FieldDecl>),
 }
 
 /// A type annotation and where it is.
@@ -762,6 +852,17 @@ pub enum ItemKind {
         name_span: Span,
         /// The fields, in declaration order.
         fields: List<FieldDecl>,
+        /// Methods and associated functions.
+        methods: List<FnId>,
+    },
+    /// An enum with its variants and methods.
+    Enum {
+        /// The enum's name.
+        name: Symbol,
+        /// Where the name is.
+        name_span: Span,
+        /// The variants, in declaration order.
+        variants: List<VariantDecl>,
         /// Methods and associated functions.
         methods: List<FnId>,
     },

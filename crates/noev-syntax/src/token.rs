@@ -33,6 +33,7 @@ pub enum TokenKind {
     Break,
     Continue,
     Else,
+    Enum,
     Extern,
     False,
     Fn,
@@ -41,6 +42,7 @@ pub enum TokenKind {
     Impl,
     In,
     Let,
+    Match,
     Mut,
     Not,
     Or,
@@ -98,6 +100,8 @@ pub enum TokenKind {
     Colon,
     ColonColon,
     Arrow,
+    /// `=>`
+    FatArrow,
     LParen,
     RParen,
     LBracket,
@@ -131,6 +135,7 @@ impl TokenKind {
             b"break" => Break,
             b"continue" => Continue,
             b"else" => Else,
+            b"enum" => Enum,
             b"extern" => Extern,
             b"false" => False,
             b"fn" => Fn,
@@ -139,6 +144,7 @@ impl TokenKind {
             b"impl" => Impl,
             b"in" => In,
             b"let" => Let,
+            b"match" => Match,
             b"mut" => Mut,
             b"not" => Not,
             b"or" => Or,
@@ -195,6 +201,7 @@ impl TokenKind {
                 | Colon
                 | Comma
                 | Arrow
+                | FatArrow
                 | Else
                 | And
                 | Or

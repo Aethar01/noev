@@ -253,6 +253,17 @@ pub fn keyword(word: &str) -> Option<(&'static str, &'static str)> {
             "unsafe { … } / unsafe fn",
             "Allows operations whose claims the compiler can't check, such as `release`.",
         ),
+        "match" => (
+            "match x { pattern => value, … }",
+            "Runs the first arm whose pattern fits `x`. The arms must cover every case: every \
+             variant of an enum, `true` and `false`, or a catch-all `_`. A value holding qubits \
+             is taken apart with `match mv x`, and each arm must consume what it takes.",
+        ),
+        "enum" => (
+            "enum Name { A, B(T), C { field: T } }",
+            "A value that is one of several variants, taken apart with `match`. Written \
+             `Name::A`; methods go inside, after the variants.",
+        ),
         "assert" => (
             "assert cond",
             "Stops the program if `cond` is false, and lets the compiler use it as a fact (for \

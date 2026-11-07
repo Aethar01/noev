@@ -31,9 +31,12 @@
   (identifier) @type
   (#match? @type "^[A-Z]"))
 
+; The last part of a path, when capitalised, is a variant or a constant: `Basis::X`.
 (path
   (identifier) @constant .
-  (#match? @constant "^[A-Z][A-Z0-9_]*$"))
+  (#match? @constant "^[A-Z]"))
+
+(constant) @constant
 
 ; Functions
 
@@ -96,6 +99,7 @@
 
 [
   "let"
+  "enum"
   "struct"
   "trait"
   "impl"
@@ -109,6 +113,7 @@
 [
   "if"
   "else"
+  "match"
 ] @keyword.conditional
 
 [
@@ -184,6 +189,7 @@
   "<<="
   ">>="
   "->"
+  "=>"
   ".."
 ] @operator
 
@@ -205,3 +211,5 @@
 ] @punctuation.delimiter
 
 (wildcard) @character.special
+
+(rest_pattern) @character.special

@@ -70,15 +70,33 @@ pub enum Kind {
     Linear,
 }
 
-/// A struct's fields.
+/// A named type: a struct's fields, or an enum's variants. Both share one table, so methods,
+/// `Self` and type names work the same for either.
 #[derive(Clone, Debug)]
 pub struct StructDef {
-    /// The struct's name.
+    /// The type's name.
     pub name: Symbol,
     /// Where the name is declared.
     pub span: Span,
-    /// The fields, in declaration order.
+    /// A struct's fields, in declaration order; empty for an enum.
     pub fields: Vec<(Symbol, Ty)>,
+    /// An enum's variants, in declaration order; `None` for a struct.
+    pub variants: Option<Vec<VariantDef>>,
+}
+
+/// One variant of an enum.
+#[derive(Clone, Debug)]
+pub struct VariantDef {
+    /// The variant's name.
+    pub name: Symbol,
+    /// Where it is declared.
+    pub span: Span,
+    /// The types of its data, in order.
+    pub data: Vec<Ty>,
+    /// The names of its fields, for a variant with named fields; empty otherwise.
+    pub names: Vec<Symbol>,
+    /// Whether its data is written in braces (`Retry { attempts: Int }`).
+    pub named: bool,
 }
 
 /// Every type used by a program.
@@ -196,7 +214,9 @@ impl Types {
             TyKind::Tuple(elems) => combine(&mut elems.iter().copied()),
             TyKind::Array(elem, _) => self.linearity_at(*elem, depth + 1),
             TyKind::Struct(id) => {
-                combine(&mut self.structs[id.index()].fields.iter().map(|(_, t)| *t))
+                let def = &self.structs[id.index()];
+                let variants = def.variants.iter().flatten().flat_map(|v| v.data.iter());
+                combine(&mut def.fields.iter().map(|(_, t)| *t).chain(variants.copied()))
             }
             _ => Kind::Copyable,
         }
@@ -233,6 +253,36 @@ impl Types {
     pub fn is_printable(&self, ty: Ty) -> bool {
         let ty = self.deref(ty);
         self.linearity(ty) == Kind::Copyable && !matches!(self.kind(ty), TyKind::Ref { .. })
+    }
+
+    /// Whether `==` and `!=` work on values of `ty`: numbers, logic, strings, and enums whose
+    /// data all work.
+    pub fn is_comparable(&self, ty: Ty) -> bool {
+        self.comparable_at(ty, 0)
+    }
+
+    fn comparable_at(&self, ty: Ty, depth: usize) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        match *self.kind(ty) {
+            TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Bit | TyKind::String => true,
+            TyKind::Struct(id) => match &self.structs[id.index()].variants {
+                Some(variants) => variants
+                    .iter()
+                    .all(|v| v.data.iter().all(|&t| self.comparable_at(t, depth + 1))),
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// The variants of `ty`, if it is an enum.
+    pub fn variants(&self, ty: Ty) -> Option<&[VariantDef]> {
+        match *self.kind(ty) {
+            TyKind::Struct(id) => self.structs[id.index()].variants.as_deref(),
+            _ => None,
+        }
     }
 
     /// How many qubits a pure quantum value of type `ty` holds, if it is pure quantum.

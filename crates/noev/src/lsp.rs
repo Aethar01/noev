@@ -452,6 +452,14 @@ impl Document {
         if let Some(local) = self.local_declared_at(offset) {
             return Some(self.describe_local(local));
         }
+        if let Some((s, index)) = self.variant_pattern_at(offset) {
+            return self.describe_variant(s, index);
+        }
+        if let Some(name) = self.type_named_at(offset)
+            && let Some(found) = self.describe_struct(name)
+        {
+            return Some(found);
+        }
         let expr = self.expr_at(offset)?;
         let kind = ast.expr(expr).kind;
         let names_callee = matches!(
@@ -477,6 +485,7 @@ impl Document {
                 return Some(self.describe_local(local));
             }
             (_, Some(Res::Builtin(b))) => return Some(docs::builtin(b)),
+            (_, Some(Res::Variant(s, index))) => return self.describe_variant(s, index),
             (ExprKind::Name(name), _) => {
                 if let Some(found) = self.describe_struct(name) {
                     return Some(found);
@@ -509,6 +518,8 @@ impl Document {
             | TokenKind::Ref
             | TokenKind::Sample
             | TokenKind::Unsafe
+            | TokenKind::Match
+            | TokenKind::Enum
             | TokenKind::Assert => {
                 // A contextual keyword used as a name is a name.
                 let is_name = self
@@ -622,8 +633,36 @@ impl Document {
                 code.push('}');
                 Some((code, self.doc_comment(item.span).unwrap_or_default()))
             }
+            ItemKind::Enum {
+                name: n,
+                variants,
+                methods,
+                ..
+            } if n == name => {
+                let mut code = format!("enum {} {{\n", ast.name(name));
+                for variant in ast.list(variants) {
+                    let text = &self.text[variant.span.start as usize..variant.span.end as usize];
+                    code.push_str(&format!("    {text}\n"));
+                }
+                for &m in ast.list(methods) {
+                    code.push_str(&format!("    {}\n", self.signature(m)));
+                }
+                code.push('}');
+                Some((code, self.doc_comment(item.span).unwrap_or_default()))
+            }
             _ => None,
         })
+    }
+
+    /// A variant of the enum `s`: its declaration and the enum's doc comment.
+    fn describe_variant(&self, s: noev_sema::ty::StructId, index: u32) -> Option<(String, String)> {
+        let ast = self.ast();
+        let def = &self.typed.types.structs[s.index()];
+        let variant = def.variants.as_ref()?.get(index as usize)?;
+        let text = &self.text[variant.span.start as usize..variant.span.end as usize];
+        let code = format!("{}::{text}", ast.name(def.name));
+        let doc = self.doc_comment(variant.span).unwrap_or_default();
+        Some((code, doc))
     }
 
     /// A struct or field where it is declared.
@@ -743,12 +782,19 @@ impl Document {
                 return Some(span);
             }
         }
+        if let Some((s, index)) = self.variant_pattern_at(offset) {
+            return self.variant_span(s, index);
+        }
         let expr = self.expr_at(offset)?;
         if let Some(f) = self.called(expr) {
             return Some(ast.function(f).name_span);
         }
         match ast.expr(expr).kind {
             // A variable, or the name of a struct in a struct literal.
+            ExprKind::Path(_) => match self.typed.res.get(expr.index())? {
+                Res::Variant(s, index) => self.variant_span(*s, *index),
+                _ => None,
+            },
             ExprKind::Name(name) => match self.typed.res.get(expr.index())? {
                 Res::Local(local) => Some(self.typed.local(*local).span),
                 _ => self.struct_named(name),
@@ -768,13 +814,66 @@ impl Document {
         }
     }
 
-    /// Where the struct called `name` is declared.
+    /// The struct or enum a type annotation at `offset` names, with `Self` meaning the type
+    /// whose method it is in.
+    fn type_named_at(&self, offset: u32) -> Option<noev_syntax::Symbol> {
+        let ast = self.ast();
+        let ty = ast
+            .all_types()
+            .iter()
+            .filter(|t| t.span.start <= offset && offset < t.span.end)
+            .min_by_key(|t| t.span.end - t.span.start)?;
+        let TypeKind::Path(path) = ty.kind else {
+            return None;
+        };
+        let &[name] = ast.list(path) else { return None };
+        if ast.name(name) != "Self" {
+            return Some(name);
+        }
+        let (index, _) = ast
+            .all_fns()
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.span.start <= offset && offset < f.span.end)?;
+        let owner = self.typed.fns.get(index)?.owner?;
+        Some(self.typed.types.structs[owner.index()].name)
+    }
+
+    /// Where variant `index` of the enum `s` is declared.
+    fn variant_span(&self, s: noev_sema::ty::StructId, index: u32) -> Option<Span> {
+        let def = &self.typed.types.structs[s.index()];
+        Some(def.variants.as_ref()?.get(index as usize)?.span)
+    }
+
+    /// The enum and variant a variant pattern at `offset` names.
+    fn variant_pattern_at(&self, offset: u32) -> Option<(noev_sema::ty::StructId, u32)> {
+        let ast = self.ast();
+        ast.all_pats()
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.span.start <= offset && offset < p.span.end)
+            .filter_map(|(i, p)| {
+                let index = (*self.typed.pat_variants.get(i)?)?;
+                let ty = self.typed.types.deref(self.typed.pat_types[i]);
+                match *self.typed.types.kind(ty) {
+                    TyKind::Struct(s) => Some((p.span.end - p.span.start, s, index)),
+                    _ => None,
+                }
+            })
+            .min_by_key(|&(len, ..)| len)
+            .map(|(_, s, index)| (s, index))
+    }
+
+    /// Where the struct or enum called `name` is declared.
     fn struct_named(&self, name: noev_syntax::Symbol) -> Option<Span> {
         self.ast()
             .all_items()
             .iter()
             .find_map(|item| match item.kind {
                 ItemKind::Struct {
+                    name: n, name_span, ..
+                }
+                | ItemKind::Enum {
                     name: n, name_span, ..
                 } if n == name => Some(name_span),
                 _ => None,
@@ -829,6 +928,40 @@ impl Document {
                 let item = ast.item(item);
                 match item.kind {
                     ItemKind::Fn(f) => Some(function(f, SymbolKind::FUNCTION)),
+                    ItemKind::Enum {
+                        name,
+                        name_span,
+                        variants,
+                        methods,
+                    } => {
+                        let mut children: Vec<DocumentSymbol> = ast
+                            .list(variants)
+                            .iter()
+                            .map(|v| {
+                                symbol(
+                                    ast.name(v.name).to_string(),
+                                    None,
+                                    SymbolKind::ENUM_MEMBER,
+                                    v.span,
+                                    v.span,
+                                    None,
+                                )
+                            })
+                            .collect();
+                        children.extend(
+                            ast.list(methods)
+                                .iter()
+                                .map(|&m| function(m, SymbolKind::METHOD)),
+                        );
+                        Some(symbol(
+                            ast.name(name).to_string(),
+                            None,
+                            SymbolKind::ENUM,
+                            item.span,
+                            name_span,
+                            Some(children),
+                        ))
+                    }
                     ItemKind::Struct {
                         name,
                         name_span,

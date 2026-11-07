@@ -22,3 +22,13 @@ fn if_else_mismatch(flag: Bool) -> Bit {
     }
     mv b.measure()
 }
+
+enum Basis { X, Y, Z }
+
+fn moved_in_some_arms(b: Basis) {
+    let q = |0>
+    match b {                       //~ N009
+        Basis::X => mv q.discard(),
+        _ => {}
+    }
+}

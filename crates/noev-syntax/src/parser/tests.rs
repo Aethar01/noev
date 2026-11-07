@@ -1,6 +1,46 @@
 use crate::ast::*;
 use crate::parser::parse;
 
+/// Renders a pattern.
+fn pat(ast: &Ast, id: PatId) -> String {
+    let list = |l: List<PatId>| {
+        ast.list(l)
+            .iter()
+            .map(|&p| pat(ast, p))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    match ast.pat(id).kind {
+        PatKind::Name(n) => ast.name(n).into(),
+        PatKind::Wildcard => "_".into(),
+        PatKind::Tuple(l) => format!("(tuple {})", list(l)),
+        PatKind::Array(l) => format!("(array {})", list(l)),
+        PatKind::Literal(PatLiteral::Int(v)) => v.to_string(),
+        PatKind::Literal(PatLiteral::Bool(v)) => v.to_string(),
+        PatKind::Literal(PatLiteral::Str(v)) => format!("{:?}", ast.name(v)),
+        PatKind::Variant { path, data } => {
+            let path: Vec<&str> = ast.list(path).iter().map(|&s| ast.name(s)).collect();
+            let path = path.join("::");
+            match data {
+                PatData::None => path,
+                PatData::Tuple(l) => format!("({path} {})", list(l)),
+                PatData::Fields { fields, rest } => {
+                    let fields: Vec<String> = ast
+                        .list(fields)
+                        .iter()
+                        .map(|f| match f.pat {
+                            Some(p) => format!("{}:{}", ast.name(f.name), pat(ast, p)),
+                            None => ast.name(f.name).into(),
+                        })
+                        .collect();
+                    let rest = if rest { " .." } else { "" };
+                    format!("({path} {{{}{rest}}})", fields.join(" "))
+                }
+            }
+        }
+    }
+}
+
 /// Renders an expression as an S-expression, for checking structure and precedence.
 fn sexp(ast: &Ast, source: &str, id: ExprId) -> String {
     let e = |id| sexp(ast, source, id);
@@ -95,6 +135,14 @@ fn sexp(ast: &Ast, source: &str, id: ExprId) -> String {
         },
         ExprKind::While { cond, .. } => format!("(while {})", e(cond)),
         ExprKind::Sample { shots, .. } => format!("(sample {})", e(shots)),
+        ExprKind::Match { scrutinee, arms } => {
+            let arms: Vec<String> = ast
+                .list(arms)
+                .iter()
+                .map(|arm| format!("({} {})", pat(ast, arm.pat), e(arm.body)))
+                .collect();
+            format!("(match {} {})", e(scrutinee), arms.join(" "))
+        }
         ExprKind::For {
             var, start, end, ..
         } => {
@@ -413,4 +461,58 @@ fn string_errors() {
     assert_eq!(errors(r#"fn f() { "\q" }"#), ["unknown escape"]);
     assert_eq!(errors(r#"fn f() { "\u{zz}" }"#), ["invalid Unicode escape"]);
     assert_eq!(errors(r#"fn f() { "{x y}" }"#).len(), 1);
+}
+
+#[test]
+fn match_and_patterns() {
+    assert_eq!(
+        expr("match b { Basis::X => 1, Basis::Y => 2, _ => 3 }"),
+        "(match b (Basis::X 1) (Basis::Y 2) (_ 3))"
+    );
+    assert_eq!(
+        expr("match o {\n    Some(q) => q\n    None => 0\n}"),
+        "(match o ((Some q) q) (None 0))"
+    );
+    assert_eq!(
+        expr("match r { Outcome::Retry { attempts, by: (a, _), .. } => attempts, n => n }"),
+        "(match r ((Outcome::Retry {attempts by:(tuple a _) ..}) attempts) (n n))"
+    );
+    assert_eq!(
+        expr("match n { 0 => \"none\", -1 => \"minus\", _ => \"some\" }"),
+        "(match n (0 (str \"none\")) (-1 (str \"minus\")) (_ (str \"some\")))"
+    );
+    // A struct literal is allowed in an arm, not in the scrutinee.
+    assert_eq!(
+        expr("match t { true => P { x: 1 }, false => p }"),
+        "(match t (true (struct P x: 1)) (false p))"
+    );
+}
+
+#[test]
+fn enums() {
+    let source = "enum Outcome {\n    Success(Bit),\n    Retry { attempts: Int },\n    Failed\n\n    fn ok(ref self) -> Bool { true }\n}\n";
+    let parsed = parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ast = &parsed.ast;
+    let ItemKind::Enum {
+        name,
+        variants,
+        methods,
+        ..
+    } = ast.item(ast.list(ast.root)[0]).kind
+    else {
+        panic!("an enum");
+    };
+    assert_eq!(ast.name(name), "Outcome");
+    let kinds: Vec<String> = ast
+        .list(variants)
+        .iter()
+        .map(|v| match v.data {
+            VariantData::Unit => ast.name(v.name).to_string(),
+            VariantData::Tuple(t) => format!("{}({})", ast.name(v.name), t.len()),
+            VariantData::Fields(f) => format!("{}{{{}}}", ast.name(v.name), f.len()),
+        })
+        .collect();
+    assert_eq!(kinds, ["Success(1)", "Retry{1}", "Failed"]);
+    assert_eq!(methods.len(), 1);
 }

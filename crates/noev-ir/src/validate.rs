@@ -42,12 +42,14 @@ pub fn validate(program: &Program) -> Vec<String> {
                             | Rvalue::Unary(_, op)
                             | Rvalue::Repeat(op, _)
                             | Rvalue::Convert(_, op)
+                            | Rvalue::Tag(op)
                             | Rvalue::Pauli(_, op) => check_operand(op, &mut report),
                             Rvalue::Binary(_, a, b) => {
                                 check_operand(a, &mut report);
                                 check_operand(b, &mut report);
                             }
                             Rvalue::Aggregate(ops)
+                            | Rvalue::Variant(_, ops)
                             | Rvalue::Math(_, ops)
                             | Rvalue::Dist(_, ops, _) => {
                                 ops.iter().for_each(|op| check_operand(op, &mut report))

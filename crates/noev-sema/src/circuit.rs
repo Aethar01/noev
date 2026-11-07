@@ -623,6 +623,10 @@ fn children(ast: &Ast, node: Node, out: &mut Vec<Node>) {
                     out.push(Node::Expr(cond));
                     out.push(Node::Block(body));
                 }
+                ExprKind::Match { scrutinee, arms } => {
+                    out.push(Node::Expr(scrutinee));
+                    out.extend(ast.list(arms).iter().map(|a| Node::Expr(a.body)));
+                }
                 ExprKind::For {
                     start, end, body, ..
                 } => {
@@ -972,6 +976,20 @@ impl<'a> Walker<'a> {
                     self.taint_pattern(p, tainted);
                 }
             }
+            PatKind::Literal(_) => {}
+            PatKind::Variant { data, .. } => {
+                let ast = self.cx.ast;
+                let pats: Vec<PatId> = match data {
+                    PatData::None => Vec::new(),
+                    PatData::Tuple(pats) => ast.list(pats).to_vec(),
+                    PatData::Fields { fields, .. } => {
+                        ast.list(fields).iter().filter_map(|f| f.pat).collect()
+                    }
+                };
+                for p in pats {
+                    self.taint_pattern(p, tainted);
+                }
+            }
         }
     }
 
@@ -1130,6 +1148,22 @@ impl<'a> Walker<'a> {
                 }
                 self.control -= u32::from(condition);
                 tainted || condition
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                let condition = self.expr(scrutinee, before);
+                if condition && before {
+                    self.info.feedback = true;
+                    let why = "a `match` on a measurement result";
+                    self.unsupported(ast.expr(scrutinee).span, why.into());
+                }
+                self.control += u32::from(condition);
+                let mut tainted = condition;
+                for arm in ast.list(arms) {
+                    self.taint_pattern(arm.pat, condition);
+                    tainted |= self.expr(arm.body, before);
+                }
+                self.control -= u32::from(condition);
+                tainted
             }
             ExprKind::While { cond, body } => {
                 // Twice, so values that become measurement-dependent in one iteration are

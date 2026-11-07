@@ -324,6 +324,7 @@ impl Parser<'_> {
         let kind = match self.kind() {
             _ if self.at_fn_start() => ItemKind::Fn(self.fn_decl(true)),
             TokenKind::Struct => self.struct_def(),
+            TokenKind::Enum => self.enum_def(),
             TokenKind::Trait => self.trait_def(),
             TokenKind::Impl => self.impl_def(),
             TokenKind::Extern => {
@@ -517,6 +518,92 @@ impl Parser<'_> {
         }
     }
 
+    fn enum_def(&mut self) -> ItemKind {
+        self.bump();
+        let (name, name_span) = self.name("an enum name");
+        let variant_mark = self.ast.mark::<VariantDecl>();
+        let method_mark = self.ast.mark::<FnId>();
+        self.skip_newlines();
+        if self.expect(TokenKind::LBrace, "`{`") {
+            loop {
+                while matches!(
+                    self.kind(),
+                    TokenKind::Newline | TokenKind::Semi | TokenKind::Comma
+                ) {
+                    self.bump();
+                }
+                if matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
+                    break;
+                }
+                self.skip_pub();
+                if self.at_fn_start() {
+                    let method = self.fn_decl(true);
+                    self.ast.push_to(method);
+                } else if self.at(TokenKind::Ident) {
+                    let variant = self.variant();
+                    self.ast.push_to(variant);
+                } else {
+                    self.expected("a variant or `fn`");
+                    self.recover_member();
+                }
+            }
+            self.expect(TokenKind::RBrace, "`}`");
+        }
+        ItemKind::Enum {
+            name,
+            name_span,
+            variants: self.ast.finish(variant_mark),
+            methods: self.ast.finish(method_mark),
+        }
+    }
+
+    /// `Name`, `Name(T, …)` or `Name { field: T, … }`.
+    fn variant(&mut self) -> VariantDecl {
+        let start = self.span();
+        let (name, _) = self.name("a variant name");
+        let data = if self.eat(TokenKind::LParen) {
+            let mark = self.ast.mark::<TypeId>();
+            while !matches!(self.kind(), TokenKind::RParen | TokenKind::Eof) {
+                let ty = self.ty();
+                self.ast.push_to(ty);
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RParen, "`)` or `,`");
+            VariantData::Tuple(self.ast.finish(mark))
+        } else if self.at(TokenKind::LBrace) {
+            self.bump();
+            let mark = self.ast.mark::<FieldDecl>();
+            loop {
+                while matches!(
+                    self.kind(),
+                    TokenKind::Newline | TokenKind::Semi | TokenKind::Comma
+                ) {
+                    self.bump();
+                }
+                if matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
+                    break;
+                }
+                let field_start = self.span();
+                let (name, _) = self.name("a field name");
+                self.expect(TokenKind::Colon, "`:` and the field's type");
+                let ty = self.ty();
+                let span = field_start.to(self.prev_span());
+                self.ast.push_to(FieldDecl { name, ty, span });
+            }
+            self.expect(TokenKind::RBrace, "`}`");
+            VariantData::Fields(self.ast.finish(mark))
+        } else {
+            VariantData::Unit
+        };
+        VariantDecl {
+            name,
+            data,
+            span: start.to(self.prev_span()),
+        }
+    }
+
     fn trait_def(&mut self) -> ItemKind {
         self.bump();
         let (name, _) = self.name("a trait name");
@@ -703,6 +790,55 @@ impl Parser<'_> {
         }
     }
 
+    /// The data part of a variant pattern: `(p, …)`, `{ field: p, …, .. }`, or nothing.
+    fn pat_data(&mut self) -> PatData {
+        use TokenKind::*;
+        if self.eat(LParen) {
+            let mark = self.ast.mark::<PatId>();
+            while !matches!(self.kind(), RParen | Eof) {
+                let pat = self.pat();
+                self.ast.push_to(pat);
+                if !self.eat(Comma) {
+                    break;
+                }
+            }
+            self.expect(RParen, "`)` or `,`");
+            return PatData::Tuple(self.ast.finish(mark));
+        }
+        if !self.at(LBrace) {
+            return PatData::None;
+        }
+        self.bump();
+        let mark = self.ast.mark::<FieldPat>();
+        let mut rest = false;
+        loop {
+            self.skip_newlines();
+            if matches!(self.kind(), RBrace | Eof) {
+                break;
+            }
+            if self.eat(DotDot) {
+                rest = true;
+                self.skip_newlines();
+                break;
+            }
+            let start = self.span();
+            let (name, _) = self.name("a field name");
+            let pat = self.eat(Colon).then(|| self.pat());
+            let span = start.to(self.prev_span());
+            self.ast.push_to(FieldPat { name, pat, span });
+            self.skip_newlines();
+            if !self.eat(Comma) {
+                break;
+            }
+        }
+        self.skip_newlines();
+        self.expect(RBrace, "`}` or `,`");
+        PatData::Fields {
+            fields: self.ast.finish(mark),
+            rest,
+        }
+    }
+
     fn pat(&mut self) -> PatId {
         use TokenKind::*;
         let start = self.span();
@@ -711,9 +847,53 @@ impl Parser<'_> {
                 self.bump();
                 PatKind::Wildcard
             }
+            // A variant: a path, `Some(…)`, or `None`.
+            Ident | SelfType
+                if self.nth(1).kind == ColonColon
+                    || self.nth(1).kind == LParen
+                    || matches!(self.text(start), "None") =>
+            {
+                let path = self.path_segments();
+                let data = self.pat_data();
+                PatKind::Variant { path, data }
+            }
             Ident => {
                 self.bump();
                 PatKind::Name(self.intern(start))
+            }
+            Int => {
+                self.bump();
+                PatKind::Literal(PatLiteral::Int(self.int_value(start).unwrap_or(0) as i64))
+            }
+            Minus if self.nth(1).kind == Int => {
+                self.bump();
+                let digits = self.span();
+                self.bump();
+                let value = self.int_value(digits).unwrap_or(0) as i64;
+                PatKind::Literal(PatLiteral::Int(value.wrapping_neg()))
+            }
+            True | False => PatKind::Literal(PatLiteral::Bool(self.bump().kind == True)),
+            Str => {
+                self.bump();
+                let parts = self.string_parts(start);
+                let text: String = self
+                    .ast
+                    .list(parts)
+                    .iter()
+                    .map(|part| match part {
+                        StrPart::Text(t) => self.ast.name(*t).to_string(),
+                        StrPart::Value { .. } => String::new(),
+                    })
+                    .collect();
+                if self
+                    .ast
+                    .list(parts)
+                    .iter()
+                    .any(|p| matches!(p, StrPart::Value { .. }))
+                {
+                    self.error(start, "a string in a pattern cannot interpolate values");
+                }
+                PatKind::Literal(PatLiteral::Str(self.ast.symbols.intern(&text)))
             }
             LParen | LBracket => {
                 let close = if self.bump().kind == LParen {
@@ -739,7 +919,9 @@ impl Parser<'_> {
             }
             _ => {
                 if !self.reserved_word() {
-                    self.expected("a variable name, `(` or `[`");
+                    self.expected(
+                        "a pattern: a variable name, `_`, a variant, a literal, `(` or `[`",
+                    );
                 }
                 PatKind::Wildcard
             }
@@ -1215,6 +1397,7 @@ impl Parser<'_> {
                 ExprKind::While { cond, body }
             }
             For => return self.for_expr(),
+            Match => return self.match_expr(),
             Sample => {
                 self.bump();
                 let shots = self.expr_no_struct();
@@ -1383,6 +1566,43 @@ impl Parser<'_> {
             },
             start,
         )
+    }
+
+    fn match_expr(&mut self) -> ExprId {
+        let start = self.span();
+        self.bump();
+        let scrutinee = self.expr_no_struct();
+        self.skip_newlines();
+        let mark = self.ast.mark::<Arm>();
+        let saved = std::mem::replace(&mut self.no_struct, false);
+        if self.expect(TokenKind::LBrace, "`{` and the arms") {
+            loop {
+                while matches!(self.kind(), TokenKind::Newline | TokenKind::Comma) {
+                    self.bump();
+                }
+                if matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
+                    break;
+                }
+                let arm_start = self.span();
+                let pat = self.pat();
+                self.expect(TokenKind::FatArrow, "`=>` and the arm's value");
+                self.skip_newlines();
+                let body = self.expr();
+                let span = arm_start.to(self.prev_span());
+                self.ast.push_to(Arm { pat, body, span });
+                if !matches!(
+                    self.kind(),
+                    TokenKind::Newline | TokenKind::Comma | TokenKind::RBrace
+                ) {
+                    self.expected("`,`, a line break or `}` after the arm");
+                    self.recover_member();
+                }
+            }
+            self.expect(TokenKind::RBrace, "`}`");
+        }
+        self.no_struct = saved;
+        let arms = self.ast.finish(mark);
+        self.push(ExprKind::Match { scrutinee, arms }, start)
     }
 
     fn for_expr(&mut self) -> ExprId {

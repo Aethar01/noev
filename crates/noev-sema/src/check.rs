@@ -9,7 +9,7 @@ use noev_syntax::ast::*;
 use noev_syntax::{Diagnostic, FxHashMap, Span, Symbol};
 
 use crate::prelude::{self, Builtin, Reversible, Sig};
-use crate::ty::{StructDef, StructId, Ty, TyKind, Types};
+use crate::ty::{Kind, StructDef, StructId, Ty, TyKind, Types, VariantDef};
 
 /// A local variable: a `let` binding, parameter, `self`, or loop variable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -50,6 +50,8 @@ pub enum Res {
     Local(LocalId),
     /// A built-in constant.
     Builtin(Builtin),
+    /// A variant of an enum, as a value: `Basis::X`.
+    Variant(StructId, u32),
 }
 
 /// What a call calls.
@@ -110,6 +112,10 @@ pub struct Typed {
     pub receivers: Vec<Option<OwnKind>>,
     /// The variable each name pattern binds, indexed by [`PatId::index`].
     pub pat_locals: Vec<Option<LocalId>>,
+    /// The type of the value each pattern matches, indexed by [`PatId::index`].
+    pub pat_types: Vec<Ty>,
+    /// The variant each variant pattern names, indexed by [`PatId::index`].
+    pub pat_variants: Vec<Option<u32>>,
     /// Every local variable.
     pub locals: Vec<Local>,
     /// Every function, indexed by [`FnId::index`].
@@ -174,6 +180,8 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
             adjust: vec![Adjust::None; exprs],
             receivers: vec![None; exprs],
             pat_locals: vec![None; ast.all_pats().len()],
+            pat_types: vec![Ty::ERROR; ast.all_pats().len()],
+            pat_variants: vec![None; ast.all_pats().len()],
             ..Typed::default()
         },
         diagnostics: Vec::new(),
@@ -229,23 +237,28 @@ impl Checker<'_> {
         let ast = self.ast;
         let items = ast.list(ast.root);
 
-        // Struct names first, so field and parameter types can refer to any struct.
+        // Struct and enum names first, so field and parameter types can refer to any of them.
         for &item in items {
-            if let ItemKind::Struct {
-                name, name_span, ..
-            } = ast.item(item).kind
-            {
-                let id = StructId(self.t.types.structs.len() as u32);
-                if self.struct_names.insert(name, id).is_some() {
-                    let message = format!("the struct `{}` is defined twice", self.name(name));
-                    self.error(name_span, message);
-                }
-                self.t.types.structs.push(StructDef {
-                    name,
-                    span: name_span,
-                    fields: Vec::new(),
-                });
+            let (name, name_span, is_enum) = match ast.item(item).kind {
+                ItemKind::Struct {
+                    name, name_span, ..
+                } => (name, name_span, false),
+                ItemKind::Enum {
+                    name, name_span, ..
+                } => (name, name_span, true),
+                _ => continue,
+            };
+            let id = StructId(self.t.types.structs.len() as u32);
+            if self.struct_names.insert(name, id).is_some() {
+                let message = format!("the type `{}` is defined twice", self.name(name));
+                self.error(name_span, message);
             }
+            self.t.types.structs.push(StructDef {
+                name,
+                span: name_span,
+                fields: Vec::new(),
+                variants: is_enum.then(Vec::new),
+            });
         }
 
         self.t.fns = ast
@@ -311,6 +324,75 @@ impl Checker<'_> {
                     }
                     self.self_ty = None;
                 }
+                ItemKind::Enum {
+                    variants, methods, ..
+                } => {
+                    let id = StructId(next_struct);
+                    next_struct += 1;
+                    let self_ty = self.t.types.struct_ty(id);
+                    self.self_ty = Some(self_ty);
+                    let mut resolved: Vec<VariantDef> = Vec::new();
+                    for variant in ast.list(variants) {
+                        if resolved.iter().any(|v| v.name == variant.name) {
+                            let message = format!(
+                                "the variant `{}` is declared twice",
+                                self.name(variant.name)
+                            );
+                            self.error(variant.span, message);
+                            continue;
+                        }
+                        let (data, names, named) = match variant.data {
+                            VariantData::Unit => (Vec::new(), Vec::new(), false),
+                            VariantData::Tuple(types) => {
+                                let data = ast
+                                    .list(types)
+                                    .iter()
+                                    .map(|&t| self.resolve_type(t))
+                                    .collect();
+                                (data, Vec::new(), false)
+                            }
+                            VariantData::Fields(fields) => {
+                                let fields = ast.list(fields);
+                                let data = fields.iter().map(|f| self.resolve_type(f.ty)).collect();
+                                (data, fields.iter().map(|f| f.name).collect(), true)
+                            }
+                        };
+                        if !data.is_empty() {
+                            self.error(variant.span, "variants with data are not supported yet")
+                                .help = Some(
+                                "they come next in 0.2; until then, an enum's variants hold nothing"
+                                    .into(),
+                            );
+                        }
+                        resolved.push(VariantDef {
+                            name: variant.name,
+                            span: variant.span,
+                            data,
+                            names,
+                            named,
+                        });
+                    }
+                    if resolved.is_empty() {
+                        self.error(item.span, "an enum needs at least one variant");
+                    }
+                    self.t.types.structs[id.index()].variants = Some(resolved);
+                    for &method in ast.list(methods) {
+                        let name = ast.function(method).name;
+                        let clash = self.methods.insert((id, name), method).is_some()
+                            || self.t.types.structs[id.index()]
+                                .variants
+                                .iter()
+                                .flatten()
+                                .any(|v| v.name == name);
+                        if clash {
+                            let message = format!("`{}` is defined twice", self.name(name));
+                            let span = ast.function(method).name_span;
+                            self.error(span, message);
+                        }
+                        self.collect_fn(method, Some(id));
+                    }
+                    self.self_ty = None;
+                }
                 ItemKind::Trait { .. } => {
                     self.error(item.span, "traits are not supported yet").help =
                         Some("they come after v0.1; see spec/types.md §6".into());
@@ -348,7 +430,10 @@ impl Checker<'_> {
         let ret = decl.ret.map_or(Ty::UNIT, |ty| self.resolve_type(ty));
         if decl.receiver.is_some() && owner.is_none() {
             let span = decl.receiver.map_or(decl.name_span, |r| r.span);
-            self.error(span, "`self` is only allowed in methods inside a struct");
+            self.error(
+                span,
+                "`self` is only allowed in methods inside a struct or enum",
+            );
         }
         let info = &mut self.t.fns[f.index()];
         info.owner = owner;
@@ -576,6 +661,14 @@ impl Checker<'_> {
                 let expect = annotated.map_or(Expect::None, Expect::Ty);
                 let init_ty = self.expr(init, expect);
                 self.bind(pat, annotated.unwrap_or(init_ty), mutable);
+                if self.refutable(pat) {
+                    let span = ast.pat(pat).span;
+                    self.error(
+                        span,
+                        "this pattern might not match, so it cannot be used in `let`",
+                    )
+                    .help = Some("use `match` to handle every case".into());
+                }
                 false
             }
             StmtKind::Assign { op, place, value } => {
@@ -645,7 +738,21 @@ impl Checker<'_> {
     fn bind(&mut self, pat: PatId, ty: Ty, mutable: bool) {
         let ast = self.ast;
         let node = *ast.pat(pat);
+        self.t.pat_types[pat.index()] = ty;
         match node.kind {
+            PatKind::Variant { path, data } => self.bind_variant(pat, path, data, ty, mutable),
+            PatKind::Literal(literal) => {
+                let fits = match literal {
+                    _ if self.t.types.is_wildcard(ty) => true,
+                    PatLiteral::Int(v) => ty == Ty::INT || (ty == Ty::BIT && (v == 0 || v == 1)),
+                    PatLiteral::Bool(_) => ty == Ty::BOOL,
+                    PatLiteral::Str(_) => ty == Ty::STRING,
+                };
+                if !fits {
+                    let message = format!("this pattern cannot match {}", self.show(ty));
+                    self.error(node.span, message);
+                }
+            }
             PatKind::Name(name) => {
                 let local = self.declare(name, ty, mutable, node.span);
                 self.t.pat_locals[pat.index()] = Some(local);
@@ -688,6 +795,109 @@ impl Checker<'_> {
                 for &pat in pats {
                     self.bind(pat, elem, mutable);
                 }
+            }
+        }
+    }
+
+    /// `Enum::Variant`, and the patterns for its data.
+    fn bind_variant(
+        &mut self,
+        pat: PatId,
+        path: List<Symbol>,
+        data: PatData,
+        ty: Ty,
+        mutable: bool,
+    ) {
+        let ast = self.ast;
+        let span = ast.pat(pat).span;
+        let segments = ast.list(path);
+        let found = match *segments {
+            [enum_name, name] => self.path_type(enum_name).map(|t| (t, name)),
+            [name] => {
+                let text = self.name(name).to_string();
+                let message = format!(
+                    "`{text}` is a variant of `Option` or `Result`, which are not supported yet"
+                );
+                self.error(span, message).help = Some(
+                    "they come later in 0.2; write the enum's name before other variants".into(),
+                );
+                None
+            }
+            _ => None,
+        };
+        let Some((enum_ty, name)) = found else {
+            self.bind_data_wildcard(data, mutable);
+            return;
+        };
+        if !self.t.types.is_wildcard(ty) && enum_ty != ty {
+            let message = format!(
+                "this pattern is {}, but the value is {}",
+                self.show(enum_ty),
+                self.show(ty)
+            );
+            self.error(span, message);
+            self.bind_data_wildcard(data, mutable);
+            return;
+        }
+        let Some(index) = self.variant_index(enum_ty, name) else {
+            let message = format!(
+                "{} has no variant `{}`",
+                self.show(enum_ty),
+                self.name(name)
+            );
+            self.error(span, message);
+            self.bind_data_wildcard(data, mutable);
+            return;
+        };
+        self.t.pat_variants[pat.index()] = Some(index);
+        let has_data = !matches!(data, PatData::None);
+        let variant_data = self
+            .t
+            .types
+            .variants(enum_ty)
+            .map_or(0, |v| v[index as usize].data.len());
+        if has_data && variant_data == 0 {
+            let message = format!("`{}` holds nothing to match", self.path_text(path));
+            self.error(span, message);
+        }
+        self.bind_data_wildcard(data, mutable);
+    }
+
+    /// Checks the sub-patterns of a variant's data against unknown types, so names in them
+    /// are still declared.
+    fn bind_data_wildcard(&mut self, data: PatData, mutable: bool) {
+        match data {
+            PatData::None => {}
+            PatData::Tuple(pats) => {
+                for &p in self.ast.list(pats) {
+                    self.bind(p, Ty::ERROR, mutable);
+                }
+            }
+            PatData::Fields { fields, .. } => {
+                for field in self.ast.list(fields) {
+                    match field.pat {
+                        Some(p) => self.bind(p, Ty::ERROR, mutable),
+                        None => {
+                            self.declare(field.name, Ty::ERROR, mutable, field.span);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether `pat` can fail to match a value of its type.
+    fn refutable(&self, pat: PatId) -> bool {
+        let ast = self.ast;
+        match ast.pat(pat).kind {
+            PatKind::Name(_) | PatKind::Wildcard => false,
+            PatKind::Tuple(pats) | PatKind::Array(pats) => {
+                ast.list(pats).iter().any(|&p| self.refutable(p))
+            }
+            PatKind::Literal(_) => true,
+            PatKind::Variant { .. } => {
+                let ty = self.t.pat_types[pat.index()];
+                self.t.types.variants(ty).is_none_or(|v| v.len() > 1)
             }
         }
     }
@@ -966,6 +1176,9 @@ impl Checker<'_> {
                 otherwise,
             } => self.if_expr(cond, then, otherwise, expect, expr.span),
             ExprKind::Sample { shots, body } => self.sample(id, shots, body),
+            ExprKind::Match { scrutinee, arms } => {
+                self.match_expr(scrutinee, arms, expect, expr.span)
+            }
             ExprKind::While { cond, body } => {
                 self.condition(cond);
                 self.loops += 1;
@@ -1069,8 +1282,18 @@ impl Checker<'_> {
         Some(self.t.types.struct_ty(id))
     }
 
-    /// A path used as a value: only constants such as `Float::PI`.
+    /// A path used as a value: a variant such as `Basis::X`, or a constant such as `Float::PI`.
     fn path_value(&mut self, id: ExprId, segments: List<Symbol>, span: Span) -> Ty {
+        if let [ty_name, name] = *self.ast.list(segments)
+            && let Some(ty) = self.path_type(ty_name)
+            && let Some(index) = self.variant_index(ty, name)
+        {
+            let TyKind::Struct(s) = *self.t.types.kind(ty) else {
+                unreachable!("only enums have variants")
+            };
+            self.t.res[id.index()] = Res::Variant(s, index);
+            return ty;
+        }
         if let [ty_name, name] = *self.ast.list(segments)
             && let Some(ty) = self.path_type(ty_name)
             && let Some(constant) = prelude::constant(ty, self.name(name))
@@ -1082,6 +1305,15 @@ impl Checker<'_> {
         let message = format!("cannot find the value `{text}`");
         self.error(span, message);
         Ty::ERROR
+    }
+
+    /// The index of the variant `name` of `ty`, if `ty` is an enum with one.
+    fn variant_index(&self, ty: Ty, name: Symbol) -> Option<u32> {
+        let variants = self.t.types.variants(ty)?;
+        variants
+            .iter()
+            .position(|v| v.name == name)
+            .map(|i| i as u32)
     }
 
     fn path_text(&self, segments: List<Symbol>) -> String {
@@ -1270,6 +1502,100 @@ impl Checker<'_> {
         }
     }
 
+    /// `match x { p => a, … }`: each arm's pattern against `x`'s type, the arms' values
+    /// combined as an `if`'s branches are, and every value covered.
+    fn match_expr(&mut self, scrutinee: ExprId, arms: List<Arm>, expect: Expect, span: Span) -> Ty {
+        let ast = self.ast;
+        let scrutinee_ty = self.expr(scrutinee, Expect::None);
+        let ty = self.t.types.deref(scrutinee_ty);
+        if !self.t.types.is_wildcard(ty) && self.t.types.linearity(ty) != Kind::Copyable {
+            let span = ast.expr(scrutinee).span;
+            let message = format!("matching {} is not supported yet", self.show(ty));
+            self.error(span, message).help = Some(
+                "matching values that hold qubits comes with variants with data, in 0.2".into(),
+            );
+        }
+        let arms = ast.list(arms);
+        if arms.is_empty() {
+            self.error(span, "a `match` needs at least one arm");
+            return Ty::ERROR;
+        }
+        let mut result: Option<Ty> = None;
+        let mut all_never = true;
+        for arm in arms {
+            let mark = self.scope.len();
+            self.bind(arm.pat, ty, false);
+            let arm_expect = match expect {
+                Expect::Discard | Expect::Ty(_) => expect,
+                Expect::None | Expect::Hint(_) => match result {
+                    Some(t) if !self.t.types.is_wildcard(t) => Expect::Ty(t),
+                    _ => expect,
+                },
+            };
+            let arm_ty = self.expr(arm.body, arm_expect);
+            self.scope.truncate(mark);
+            if arm_ty != Ty::NEVER {
+                all_never = false;
+                if result.is_none_or(|t| self.t.types.is_wildcard(t)) {
+                    result = Some(arm_ty);
+                }
+            }
+        }
+        self.check_exhaustive(ty, arms, span);
+        match expect {
+            _ if all_never => Ty::NEVER,
+            Expect::Discard => Ty::UNIT,
+            Expect::Ty(want) => want,
+            Expect::None | Expect::Hint(_) => result.unwrap_or(Ty::UNIT),
+        }
+    }
+
+    /// Reports the values of `ty` no arm covers.
+    fn check_exhaustive(&mut self, ty: Ty, arms: &[Arm], span: Span) {
+        if self.t.types.is_wildcard(ty) || arms.iter().any(|a| !self.refutable(a.pat)) {
+            return;
+        }
+        let ast = self.ast;
+        let missing: Vec<String> = if let Some(variants) = self.t.types.variants(ty) {
+            let covered: Vec<u32> = arms
+                .iter()
+                .filter_map(|a| self.t.pat_variants[a.pat.index()])
+                .collect();
+            let enum_name = self.t.types.display(ty, ast);
+            variants
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !covered.contains(&(*i as u32)))
+                .map(|(_, v)| format!("`{enum_name}::{}`", ast.name(v.name)))
+                .collect()
+        } else if ty == Ty::BOOL || ty == Ty::BIT {
+            let literal = |a: &Arm| match ast.pat(a.pat).kind {
+                PatKind::Literal(PatLiteral::Bool(b)) => Some(b),
+                PatKind::Literal(PatLiteral::Int(v)) => Some(v == 1),
+                _ => None,
+            };
+            let covered: Vec<bool> = arms.iter().filter_map(literal).collect();
+            [false, true]
+                .into_iter()
+                .filter(|b| !covered.contains(b))
+                .map(|b| match (ty == Ty::BIT, b) {
+                    (true, b) => format!("`{}`", u8::from(b)),
+                    (false, b) => format!("`{b}`"),
+                })
+                .collect()
+        } else {
+            let message = format!("this `match` does not cover every {}", self.show(ty));
+            self.error(span, message).help = Some("end it with a catch-all arm: `_ => …`".into());
+            return;
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let message = format!("this `match` does not cover {}", missing.join(", "));
+        self.error(span, message).help =
+            Some("add an arm for each, or a catch-all arm: `_ => …`".into());
+    }
+
     fn binary_type(&mut self, op: BinaryOp, lhs: Ty, rhs: Ty, span: Span) -> Ty {
         use BinaryOp::*;
         if self.t.types.is_wildcard(lhs) || self.t.types.is_wildcard(rhs) {
@@ -1280,9 +1606,7 @@ impl Checker<'_> {
         }
         let result = match op {
             Or | And => (lhs == Ty::BOOL && rhs == Ty::BOOL).then_some(Ty::BOOL),
-            Eq | NotEq => (lhs == rhs
-                && matches!(lhs, Ty::INT | Ty::FLOAT | Ty::BOOL | Ty::BIT | Ty::STRING))
-            .then_some(Ty::BOOL),
+            Eq | NotEq => (lhs == rhs && self.t.types.is_comparable(lhs)).then_some(Ty::BOOL),
             Lt | Le | Gt | Ge => {
                 (lhs == rhs && matches!(lhs, Ty::INT | Ty::FLOAT)).then_some(Ty::BOOL)
             }

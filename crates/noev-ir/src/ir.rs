@@ -49,6 +49,8 @@ pub struct Program {
     pub struct_names: Vec<String>,
     /// Each struct's field names, in declaration order.
     pub struct_fields: Vec<Vec<String>>,
+    /// Each enum's variant names, in declaration order; empty for a struct.
+    pub variant_names: Vec<Vec<String>>,
 }
 
 /// A function's control-flow graph.
@@ -211,6 +213,10 @@ pub enum Rvalue {
         /// The basis state.
         bit: Operand,
     },
+    /// An enum value: variant number `.0` with the data in `.1`.
+    Variant(u32, Vec<Operand>),
+    /// The variant number of an enum value, as an `Int`.
+    Tag(Operand),
 }
 
 /// A piece of a string being built.
@@ -556,6 +562,8 @@ impl Program {
             ),
             Rvalue::Pauli(p, i) => format!("{p:?}({})", operand_text(i)),
             Rvalue::Identity => "I()".into(),
+            Rvalue::Variant(index, ops) => format!("variant {index}({})", list(ops)),
+            Rvalue::Tag(op) => format!("tag {}", operand_text(op)),
             Rvalue::Dist(method, ops, _) => format!("{method:?}({})", list(ops)).to_lowercase(),
             Rvalue::Format(parts) => {
                 let text: String = parts

@@ -29,8 +29,8 @@ module.exports = grammar({
 
   extras: ($) => [/\s/, $.line_comment, $.block_comment],
 
-  // A `<` starting a line (src/scanner.c).
-  externals: ($) => [$._line_start_angle],
+  // A `<` or `-` starting a line (src/scanner.c).
+  externals: ($) => [$._line_start_angle, $._line_start_minus],
 
   word: ($) => $.identifier,
 
@@ -48,7 +48,8 @@ module.exports = grammar({
   rules: {
     source_file: ($) => repeat($._item),
 
-    _item: ($) => choice($.struct_item, $.function_item, $.trait_item, $.impl_item, $.extern_item),
+    _item: ($) =>
+      choice($.struct_item, $.enum_item, $.function_item, $.trait_item, $.impl_item, $.extern_item),
 
     // Items
 
@@ -59,6 +60,26 @@ module.exports = grammar({
         '{',
         repeat(choice($.field_declaration, $.function_item, ',')),
         '}',
+      ),
+
+    enum_item: ($) =>
+      seq(
+        'enum',
+        field('name', alias($.identifier, $.type_identifier)),
+        '{',
+        repeat(choice($.enum_variant, $.function_item, ',')),
+        '}',
+      ),
+
+    enum_variant: ($) =>
+      seq(
+        field('name', alias($.identifier, $.constant)),
+        optional(
+          choice(
+            seq('(', sepBy(',', $._type), ')'),
+            seq('{', repeat(choice($.field_declaration, ',')), '}'),
+          ),
+        ),
       ),
 
     field_declaration: ($) =>
@@ -180,7 +201,40 @@ module.exports = grammar({
     assert_statement: ($) => seq('assert', $._expression),
 
     _pattern: ($) =>
-      choice($.identifier, $._contextual_name, $.wildcard, $.tuple_pattern, $.array_pattern),
+      choice(
+        $.identifier,
+        $._contextual_name,
+        $.wildcard,
+        $.tuple_pattern,
+        $.array_pattern,
+        $.variant_pattern,
+        $.literal_pattern,
+      ),
+
+    // `Basis::X`, `Some(q)`, `None`, `Outcome::Retry { attempts, .. }`. A plain name is a
+    // variable, except `None`.
+    variant_pattern: ($) =>
+      choice(
+        seq($.path, optional(choice($._tuple_data_pattern, $._fields_data_pattern))),
+        seq(alias($.identifier, $.constant), $._tuple_data_pattern),
+        alias('None', $.constant),
+      ),
+
+    _tuple_data_pattern: ($) => seq('(', sepBy(',', $._pattern), ')'),
+
+    _fields_data_pattern: ($) =>
+      seq('{', sepBy(',', choice($.field_pattern, alias('..', $.rest_pattern))), '}'),
+
+    field_pattern: ($) =>
+      seq(field('field', alias($.identifier, $.field_identifier)), optional(seq(':', $._pattern))),
+
+    literal_pattern: ($) =>
+      choice(
+        $.integer,
+        seq(choice('-', alias($._line_start_minus, '-')), $.integer),
+        $.boolean,
+        $.string,
+      ),
 
     // Contextual keywords are ordinary names everywhere else (`let adj = …`).
     _contextual_name: ($) =>
@@ -234,7 +288,8 @@ module.exports = grammar({
 
     not_expression: ($) => prec(PREC.not, seq('not', $._expression)),
 
-    unary_expression: ($) => prec(PREC.unary, seq(choice('-', '~'), $._expression)),
+    unary_expression: ($) =>
+      prec(PREC.unary, seq(choice('-', alias($._line_start_minus, '-'), '~'), $._expression)),
 
     ownership: (_) => choice('mv', 'ref', 'mut'),
 
@@ -306,6 +361,7 @@ module.exports = grammar({
         $.while_expression,
         $.for_expression,
         $.sample_expression,
+        $.match_expression,
         $.ctrl_expression,
         $.with_expression,
         $.unsafe_block,
@@ -408,6 +464,18 @@ module.exports = grammar({
       ),
 
     sample_expression: ($) => seq('sample', field('shots', $._expression), field('body', $.block)),
+
+    match_expression: ($) =>
+      seq(
+        'match',
+        field('value', $._expression),
+        '{',
+        repeat(choice($.match_arm, ',')),
+        '}',
+      ),
+
+    match_arm: ($) =>
+      prec.right(seq(field('pattern', $._pattern), '=>', field('value', $._expression))),
 
     // Contextual keywords are preferred to the same word as a name when both parse.
     ctrl_expression: ($) =>

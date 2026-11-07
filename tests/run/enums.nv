@@ -1,0 +1,36 @@
+// Enums and `match`: variants, methods, equality and printing.
+
+enum Basis {
+    X
+    Y
+    Z
+
+    fn next(ref self) -> Self {
+        match self {
+            Basis::X => Basis::Y,
+            Basis::Y => Basis::Z,
+            Basis::Z => Basis::X,
+        }
+    }
+}
+
+fn describe(n: Int) -> String {
+    match n {
+        0 => "none",
+        1 => "one",
+        -1 => "minus one",
+        _ => "many",
+    }
+}
+
+fn main() {
+    let b = Basis::Y
+    print(b, b.next(), b.next().next(), b == Basis::Y, b != Basis::Y)
+    print(describe(0), describe(1), describe(-1), describe(7))
+    let q = |1>
+    let word = match mv q.measure() {
+        0 => "zero",
+        1 => "one",
+    }
+    print("measured {word}, then {b.next()}")
+}

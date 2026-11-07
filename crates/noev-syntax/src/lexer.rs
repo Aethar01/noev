@@ -293,6 +293,7 @@ impl Lexer<'_> {
             (b'&', b'&', _) => (AndAnd, 2),
             (b'|', b'|', _) => (OrOr, 2),
             (b'-', b'>', _) => (Arrow, 2),
+            (b'=', b'>', _) => (FatArrow, 2),
             (b':', b':', _) => (ColonColon, 2),
             (b'.', b'.', _) => (DotDot, 2),
             (b'+', ..) => (Plus, 1),
