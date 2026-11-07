@@ -23,7 +23,7 @@ use noev_sema::check::{Callee, Res};
 use noev_sema::{Circuits, Ty, TyKind, Typed};
 
 mod docs;
-use noev_syntax::ast::{ExprId, ExprKind, FnId, ItemKind, TypeKind};
+use noev_syntax::ast::{ExprId, ExprKind, FnId, ItemKind, PatData, PatKind, TypeKind, VariantData};
 use noev_syntax::{Ast, Severity, Span};
 
 /// Runs the server until the editor shuts it down.
@@ -446,11 +446,14 @@ impl Document {
         if let Some(f) = self.function_named_at(offset) {
             return Some(self.describe_fn(f));
         }
-        if let Some(found) = self.describe_declared_struct_or_field(offset) {
-            return Some(found);
-        }
         if let Some(local) = self.local_declared_at(offset) {
             return Some(self.describe_local(local));
+        }
+        if let Some((s, variant, name)) = self.field_named_at(offset) {
+            return self.describe_field(s, variant, name);
+        }
+        if let Some(found) = self.describe_declared_struct_or_field(offset) {
+            return Some(found);
         }
         if let Some((s, index)) = self.variant_pattern_at(offset) {
             return self.describe_variant(s, index);
@@ -712,31 +715,175 @@ impl Document {
         Some((code, doc))
     }
 
-    /// A struct or field where it is declared.
+    /// A struct, an enum or a variant where it is declared (fields are `field_named_at`).
     fn describe_declared_struct_or_field(&self, offset: u32) -> Option<(String, String)> {
         let ast = self.ast();
+        let within = |span: Span| span.start <= offset && offset < span.end;
         for item in ast.all_items() {
-            let ItemKind::Struct {
-                name,
-                name_span,
-                fields,
-                ..
-            } = item.kind
-            else {
-                continue;
+            let (name, name_span) = match item.kind {
+                ItemKind::Struct {
+                    name, name_span, ..
+                }
+                | ItemKind::Enum {
+                    name, name_span, ..
+                } => (name, name_span),
+                _ => continue,
             };
-            if name_span.start <= offset && offset < name_span.end {
+            if within(name_span) {
                 return self.describe_struct(name);
             }
-            for field in ast.list(fields) {
-                if field.span.start <= offset && offset < field.span.end {
-                    let ty = self.field_type(name, field.name).unwrap_or_default();
-                    let doc = self.doc_comment(field.span).unwrap_or_default();
-                    return Some((format!("{}: {ty}", ast.name(field.name)), doc));
-                }
+            if let ItemKind::Enum { variants, .. } = item.kind
+                && let Some(index) = ast.list(variants).iter().position(|v| within(v.span))
+            {
+                return self.describe_variant(self.declared_type(name_span)?, index as u32);
             }
         }
         None
+    }
+
+    /// The struct or enum declared with the name at `name_span`.
+    fn declared_type(&self, name_span: Span) -> Option<noev_sema::ty::StructId> {
+        let index = self
+            .typed
+            .types
+            .structs
+            .iter()
+            .position(|d| d.span == name_span)?;
+        Some(noev_sema::ty::StructId::from_index(index))
+    }
+
+    /// The field whose name is at `offset`: in a struct's or a variant's declaration, a
+    /// struct literal, or a pattern. Gives the type, the variant (for an enum) and the name.
+    fn field_named_at(
+        &self,
+        offset: u32,
+    ) -> Option<(noev_sema::ty::StructId, Option<u32>, noev_syntax::Symbol)> {
+        let ast = self.ast();
+        let on_name = |span: Span, name: noev_syntax::Symbol| {
+            span.start <= offset && offset < span.start + ast.name(name).len() as u32
+        };
+        for item in ast.all_items() {
+            match item.kind {
+                ItemKind::Struct {
+                    name_span, fields, ..
+                } => {
+                    if let Some(f) = ast.list(fields).iter().find(|f| on_name(f.span, f.name)) {
+                        return Some((self.declared_type(name_span)?, None, f.name));
+                    }
+                }
+                ItemKind::Enum {
+                    name_span,
+                    variants,
+                    ..
+                } => {
+                    for (index, variant) in ast.list(variants).iter().enumerate() {
+                        let VariantData::Fields(fields) = variant.data else {
+                            continue;
+                        };
+                        if let Some(f) = ast.list(fields).iter().find(|f| on_name(f.span, f.name)) {
+                            let s = self.declared_type(name_span)?;
+                            return Some((s, Some(index as u32), f.name));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // `Name { field: value }` and `Enum::Variant { field: value }`.
+        for (i, expr) in ast.all_exprs().iter().enumerate() {
+            let ExprKind::StructLit { path, fields } = expr.kind else {
+                continue;
+            };
+            let Some(init) = ast.list(fields).iter().find(|f| on_name(f.span, f.name)) else {
+                continue;
+            };
+            let ty = *self.typed.expr_types.get(i)?;
+            let TyKind::Struct(s) = *self.typed.types.kind(ty) else {
+                return None;
+            };
+            let variant = match self.typed.res.get(path.index()) {
+                Some(Res::Variant(_, index)) => Some(*index),
+                _ => None,
+            };
+            return Some((s, variant, init.name));
+        }
+        // `Enum::Variant { field: pattern }`.
+        for (i, pat) in ast.all_pats().iter().enumerate() {
+            let PatKind::Variant {
+                data: PatData::Fields { fields, .. },
+                ..
+            } = pat.kind
+            else {
+                continue;
+            };
+            let Some(field) = ast.list(fields).iter().find(|f| on_name(f.span, f.name)) else {
+                continue;
+            };
+            let ty = self.typed.types.deref(*self.typed.pat_types.get(i)?);
+            let TyKind::Struct(s) = *self.typed.types.kind(ty) else {
+                return None;
+            };
+            let variant = (*self.typed.pat_variants.get(i)?)?;
+            return Some((s, Some(variant), field.name));
+        }
+        None
+    }
+
+    /// The field `name` of the struct `s`, or of its variant `variant`: its type and where
+    /// it is declared.
+    fn field_decl(
+        &self,
+        s: noev_sema::ty::StructId,
+        variant: Option<u32>,
+        name: noev_syntax::Symbol,
+    ) -> Option<(Ty, Option<Span>)> {
+        let ast = self.ast();
+        let def = &self.typed.types.structs[s.index()];
+        let Some(index) = variant else {
+            let &(_, ty) = def.fields.iter().find(|(n, _)| *n == name)?;
+            return Some((ty, self.field_of(def.span, name)));
+        };
+        let variant = def.variants.as_ref()?.get(index as usize)?;
+        let position = variant.names.iter().position(|&n| n == name)?;
+        let span = ast.all_items().iter().find_map(|item| match item.kind {
+            ItemKind::Enum {
+                name_span,
+                variants,
+                ..
+            } if name_span == def.span => {
+                let VariantData::Fields(fields) = ast.list(variants).get(index as usize)?.data
+                else {
+                    return None;
+                };
+                ast.list(fields)
+                    .iter()
+                    .find(|f| f.name == name)
+                    .map(|f| f.span)
+            }
+            _ => None,
+        });
+        Some((variant.data[position], span))
+    }
+
+    /// A field: its type and doc comment.
+    fn describe_field(
+        &self,
+        s: noev_sema::ty::StructId,
+        variant: Option<u32>,
+        name: noev_syntax::Symbol,
+    ) -> Option<(String, String)> {
+        let (ty, span) = self.field_decl(s, variant, name)?;
+        // Only a field on a line of its own has a doc comment of its own; above
+        // `Retry { attempts: Int }` is the variant's.
+        let own_line = |span: Span| {
+            let line_start = self.lines[self.position(span.start).line as usize] as usize;
+            self.text[line_start..span.start as usize].trim().is_empty()
+        };
+        let doc = span
+            .filter(|&s| own_line(s))
+            .and_then(|s| self.doc_comment(s))
+            .unwrap_or_default();
+        Some((format!("{}: {}", self.ast().name(name), self.show(ty)), doc))
     }
 
     /// The field `name` of `base`'s struct.
@@ -829,12 +976,21 @@ impl Document {
                 return Some(span);
             }
         }
+        if let Some((s, variant, name)) = self.field_named_at(offset) {
+            return self.field_decl(s, variant, name)?.1;
+        }
+        if let Some(local) = self.local_declared_at(offset) {
+            return Some(self.typed.local(local).span);
+        }
         if let Some((s, index)) = self.variant_pattern_at(offset) {
             return self.variant_span(s, index);
         }
         let expr = self.expr_at(offset)?;
         if let Some(f) = self.called(expr) {
             return Some(ast.function(f).name_span);
+        }
+        if let Some(Callee::Variant(s, index)) = self.callee(expr) {
+            return self.variant_span(s, index);
         }
         match ast.expr(expr).kind {
             // A variable, or the name of a struct in a struct literal.

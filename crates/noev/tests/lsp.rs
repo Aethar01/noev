@@ -354,3 +354,67 @@ fn option_variants_hover() {
     );
     client.stop();
 }
+
+const OUTCOMES: &str = "/// What happened.
+enum Outcome {
+    /// It worked.
+    Success(Bit)
+    /// Try again.
+    Retry { attempts: Int, last: Bit }
+    Failed
+}
+
+fn show(o: ref Outcome) -> Int {
+    match o {
+        Outcome::Success(m) => Int(m),
+        Outcome::Retry { attempts, last: l } => attempts + Int(l),
+        Outcome::Failed => 0,
+    }
+}
+
+fn main() {
+    let a = Outcome::Success(1)
+    let b = Outcome::Retry { attempts: 2, last: 0 }
+    print(show(a), show(b))
+}
+";
+
+#[test]
+fn data_variants_hover_and_definition() {
+    let mut client = Client::start();
+    let uri = "file:///tmp/outcomes.nv";
+    client.open(uri, OUTCOMES);
+    assert!(client.diagnostics().is_empty());
+
+    // Declarations: a variant, with its doc comment, and a field of one.
+    let text = hover_text(&mut client, uri, 3, 4);
+    assert!(
+        text.contains("Outcome::Success(Bit)") && text.contains("It worked."),
+        "{text}"
+    );
+    let text = hover_text(&mut client, uri, 5, 12);
+    assert!(
+        text.contains("attempts: Int") && !text.contains("Try again"),
+        "{text}"
+    );
+
+    // A field in a pattern, and the name it binds.
+    assert!(hover_text(&mut client, uri, 12, 35).contains("last: Bit"));
+    assert!(hover_text(&mut client, uri, 12, 41).contains("let l: Bit"));
+    let def = client.at("textDocument/definition", uri, 12, 35);
+    assert_eq!(
+        def["range"]["start"],
+        json!({ "line": 5, "character": 27 }),
+        "{def}"
+    );
+
+    // A field in a struct literal, and a variant called with its data.
+    assert!(hover_text(&mut client, uri, 19, 42).contains("last: Bit"));
+    let def = client.at("textDocument/definition", uri, 18, 21);
+    assert_eq!(
+        def["range"]["start"],
+        json!({ "line": 3, "character": 4 }),
+        "{def}"
+    );
+    client.stop();
+}

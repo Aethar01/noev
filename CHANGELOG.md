@@ -29,6 +29,9 @@ before 1.0.
 
 - Enums and `match` in the tree-sitter grammar and the language server (hover, go to
   definition, symbols); hover on type names, `Self` included.
+- Hover and go to definition on fields everywhere: where they are declared, in struct
+  literals (`Retry { attempts: 2 }`) and in patterns; on variants where they are declared
+  and where they are called with their data.
 
 - Hover explains more: doc comments (`///`, now in `spec/grammar.md`), whether a function
   runs as a circuit and whether it is reversible, struct fields and methods, built-ins,

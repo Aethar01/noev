@@ -15,6 +15,11 @@ impl StructId {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// The struct at `index` in [`Types::structs`].
+    pub fn from_index(index: usize) -> Self {
+        Self(u32::try_from(index).expect("fewer than 2³² types"))
+    }
 }
 
 /// What a type is.
