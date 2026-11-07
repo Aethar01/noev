@@ -145,3 +145,30 @@ fn f() {
         (binary_expression
           (identifier)
           (integer))))))
+
+================================================================================
+Y-basis labels
+================================================================================
+
+fn main() {
+    let r = |0(+i)>
+    let hit = <(-i)| mv q
+}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_item
+    (identifier)
+    (parameters)
+    (block
+      (let_declaration
+        (identifier)
+        (ket))
+      (let_declaration
+        (identifier)
+        (measurement_test
+          (bra)
+          (ownership_expression
+            (ownership)
+            (identifier)))))))

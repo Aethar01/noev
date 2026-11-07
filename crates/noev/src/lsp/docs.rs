@@ -3,6 +3,7 @@
 
 use noev_sema::Ty;
 use noev_sema::prelude::{Builtin, DistMethod, FloatConst, Gate, Math, Pauli};
+use noev_syntax::state::{self, Label, labels};
 
 /// A built-in's signature and what it does.
 pub fn builtin(b: Builtin) -> (String, String) {
@@ -301,32 +302,25 @@ pub fn keyword(word: &str) -> Option<(&'static str, &'static str)> {
 /// What a ket literal such as `|0+1>` prepares.
 pub fn ket(text: &str) -> (String, String) {
     let body = text.trim_start_matches('|').trim_end_matches('>');
-    let states: Vec<String> = body
-        .chars()
+    let labels: Vec<Label> = labels(body).collect();
+    let states: Vec<String> = labels
+        .iter()
         .enumerate()
-        .map(|(i, c)| {
-            let state = match c {
-                '0' => "|0⟩",
-                '1' => "|1⟩",
-                '+' => "|+⟩",
-                _ => "|−⟩",
-            };
-            if body.len() == 1 {
-                state.to_string()
+        .map(|(i, label)| {
+            if labels.len() == 1 {
+                label.ket().to_string()
             } else {
-                format!("`[{i}]` {state}")
+                format!("`[{i}]` {}", label.ket())
             }
         })
         .collect();
-    let ty = if body.len() == 1 {
-        "Qubit".to_string()
+    let (ty, what) = if labels.len() == 1 {
+        ("Qubit".to_string(), "A fresh qubit".to_string())
     } else {
-        format!("[Qubit; {}]", body.len())
-    };
-    let what = if body.len() == 1 {
-        "A fresh qubit".to_string()
-    } else {
-        format!("{} fresh qubits", body.len())
+        (
+            format!("[Qubit; {}]", labels.len()),
+            format!("{} fresh qubits", labels.len()),
+        )
     };
     (
         format!("{text}: {ty}"),
@@ -340,9 +334,16 @@ pub fn ket(text: &str) -> (String, String) {
 /// What a bra such as `<1|` does.
 pub fn bra(text: &str) -> (String, String) {
     let body = text.trim_start_matches('<').trim_end_matches('|');
-    let bases: Vec<&str> = body
-        .chars()
-        .map(|c| if c == '+' || c == '-' { "X" } else { "Z" })
+    let bases: Vec<&str> = labels(body)
+        .map(|label| match label.basis() {
+            state::Pauli::X => "X",
+            state::Pauli::Y => "Y",
+            state::Pauli::Z => "Z",
+        })
+        .collect();
+    // `|0+i⟩`, as physics writes it.
+    let physics: String = labels(body)
+        .map(|l| l.ket().trim_start_matches('|').trim_end_matches('⟩'))
         .collect();
     let basis = if bases.iter().all(|&b| b == bases[0]) {
         format!("the {} basis", bases[0])
@@ -353,7 +354,7 @@ pub fn bra(text: &str) -> (String, String) {
         format!("{text} q"),
         format!(
             "A measurement test: measures `q`, consuming it, in {basis}, and is `true` if the \
-             outcome is |{body}⟩. Followed by an observable and a ket, it starts an expectation \
+             outcome is |{physics}⟩. Followed by an observable and a ket, it starts an expectation \
              value instead: `{text} H |{body}>`."
         ),
     )

@@ -10,6 +10,7 @@ use noev_sema::check::{Adjust, Callee, LocalId, Res};
 use noev_sema::prelude::{Builtin, Gate};
 use noev_sema::{Circuits, Ty, TyKind, Typed, Types};
 use noev_syntax::ast::{self as ast, ExprId, ExprKind, OwnKind, StmtKind};
+use noev_syntax::state::{Label, Pauli, labels};
 use noev_syntax::{Ast, Span};
 
 use crate::ir::*;
@@ -984,10 +985,10 @@ impl Builder<'_> {
                 }
                 self.set(&dest, Rvalue::Format(out));
             }
-            ExprKind::Ket => {
+            ExprKind::Ket { .. } => {
                 let state = &self.text(expr.span)[1..expr.span.len() as usize - 1];
                 let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
-                self.ket(state, &dest, state.len() > 1);
+                self.ket(state, &dest);
             }
             ExprKind::Path(_) => match self.typed.res[id.index()] {
                 Res::Builtin(Builtin::Const(c)) => self.set(&dest, Rvalue::FloatConst(c)),
@@ -1011,13 +1012,13 @@ impl Builder<'_> {
                 let ExprKind::Int(count) = ast.expr(count).kind else {
                     return;
                 };
-                if ast.expr(value).kind == ExprKind::Ket {
+                if matches!(ast.expr(value).kind, ExprKind::Ket { .. }) {
                     let span = ast.expr(value).span;
                     let state = &self.text(span)[1..span.len() as usize - 1];
                     let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
                     for k in 0..count {
                         let element = dest.with(Proj::Index(Operand::Const(Const::Int(k as i64))));
-                        self.ket(state, &element, state.len() > 1);
+                        self.ket(state, &element);
                     }
                 } else {
                     let op = self.operand(value);
@@ -1048,7 +1049,7 @@ impl Builder<'_> {
                 let b = self.operand(rhs);
                 self.set(&dest, Rvalue::Binary(op, a, b));
             }
-            ExprKind::BraTest { state, operand } => {
+            ExprKind::BraTest { state, operand, .. } => {
                 let state = &self.text(state)[1..state.len() as usize - 1];
                 self.bra_test(state, operand, dest);
             }
@@ -1059,7 +1060,7 @@ impl Builder<'_> {
             } => {
                 let precision = precision.map(|p| self.operand(p));
                 let prep = match ast.expr(prep).kind {
-                    ExprKind::Ket => {
+                    ExprKind::Ket { .. } => {
                         let span = ast.expr(prep).span;
                         Prep::Ket(self.text(span)[1..span.len() as usize - 1].to_string())
                     }
@@ -1172,20 +1173,23 @@ impl Builder<'_> {
         }
     }
 
-    /// Allocates qubits for a ket's state at `dest`: one qubit, or an array when `array`.
-    fn ket(&mut self, state: &str, dest: &Place, array: bool) {
-        for (k, c) in state.chars().enumerate() {
+    /// Allocates qubits for a ket's state at `dest`: one qubit, or an array for several.
+    fn ket(&mut self, state: &str, dest: &Place) {
+        let array = labels(state).count() > 1;
+        for (k, label) in labels(state).enumerate() {
             let qubit = if array {
                 dest.with(Proj::Index(Operand::Const(Const::Int(k as i64))))
             } else {
                 dest.clone()
             };
             self.push(Stmt::Alloc(qubit.clone()));
-            let gates: &[Gate] = match c {
-                '1' => &[Gate::X],
-                '+' => &[Gate::H],
-                '-' => &[Gate::X, Gate::H],
-                _ => &[],
+            let gates: &[Gate] = match label {
+                Label::Zero => &[],
+                Label::One => &[Gate::X],
+                Label::Plus => &[Gate::H],
+                Label::Minus => &[Gate::X, Gate::H],
+                Label::PlusI => &[Gate::H, Gate::S],
+                Label::MinusI => &[Gate::X, Gate::H, Gate::S],
             };
             for &gate in gates {
                 self.push(Stmt::Gate {
@@ -1198,20 +1202,27 @@ impl Builder<'_> {
         }
     }
 
-    /// `<s| x`: measure each qubit in its character's basis and compare.
+    /// `<s| x`: measure each qubit in its label's basis and compare.
     fn bra_test(&mut self, state: &str, operand: ExprId, dest: Option<Place>) {
         let base = self.qubit_place(operand);
+        let array = labels(state).count() > 1;
         let mut result: Option<Operand> = None;
-        for (k, c) in state.chars().enumerate() {
-            let qubit = if state.len() > 1 {
+        for (k, label) in labels(state).enumerate() {
+            let qubit = if array {
                 base.with(Proj::Index(Operand::Const(Const::Int(k as i64))))
             } else {
                 base.clone()
             };
-            if matches!(c, '+' | '-') {
+            // Into the Z basis, as `measure_in` does: `h` for X, `adj s` then `h` for Y.
+            let gates: &[(Gate, bool)] = match label.basis() {
+                Pauli::Z => &[],
+                Pauli::X => &[(Gate::H, false)],
+                Pauli::Y => &[(Gate::S, true), (Gate::H, false)],
+            };
+            for &(gate, adjoint) in gates {
                 self.push(Stmt::Gate {
-                    gate: Gate::H,
-                    adjoint: false,
+                    gate,
+                    adjoint,
                     qubits: vec![qubit.clone()],
                     params: Vec::new(),
                 });
@@ -1222,7 +1233,7 @@ impl Builder<'_> {
                 qubit,
             });
             let matches = self.temp(Ty::BOOL);
-            let expected = matches!(c, '1' | '-');
+            let expected = label.outcome();
             self.assign(
                 matches.clone(),
                 Rvalue::Binary(

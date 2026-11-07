@@ -56,10 +56,23 @@ bool tree_sitter_noev_external_scanner_scan(void *payload, TSLexer *lexer,
     if (lexer->lookahead == '<') {
         return false;
     }
+    // Labels: `0 1 + -`, or `(+i)` and `(-i)`.
     bool body = false;
-    while (is_ket_char(lexer->lookahead)) {
+    for (;;) {
+        if (is_ket_char(lexer->lookahead)) {
+            lexer->advance(lexer, false);
+        } else if (lexer->lookahead == '(') {
+            lexer->advance(lexer, false);
+            if (lexer->lookahead != '+' && lexer->lookahead != '-') break;
+            lexer->advance(lexer, false);
+            if (lexer->lookahead != 'i') break;
+            lexer->advance(lexer, false);
+            if (lexer->lookahead != ')') break;
+            lexer->advance(lexer, false);
+        } else {
+            break;
+        }
         body = true;
-        lexer->advance(lexer, false);
     }
     if (body && lexer->lookahead == '|') {
         return false;

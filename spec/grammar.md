@@ -71,8 +71,8 @@ the context requires it (see [types.md](types.md)).
 
 ### Ket literals
 
-A ket literal is `|`, then one or more of the characters `0 1 + -`, then `>`, with no
-whitespace inside. It creates freshly prepared qubits (see [types.md](types.md)).
+A ket literal is `|`, then one or more labels, then `>`, with no whitespace inside. A label is
+one of the characters `0 1 + -`, or `(+i)` or `(-i)`; each is one qubit. It creates freshly prepared qubits (see [types.md](types.md)).
 
 `|` is also the bitwise-or operator. The two never conflict, because a ket is only
 recognised **where an operand can start**. The lexer treats `|` as the start of a ket unless
@@ -85,12 +85,13 @@ let m = a | 0       // after an identifier: bitwise or
 let n = (a) |0> b   // after `)`: `|`, `0`, `>`, so bitwise or then comparison
 ```
 
-Inside a ket, `+-` does not lex as `+` and `-` (or `->`); the ket is one token.
+Inside a ket, `+-` does not lex as `+` and `-` (or `->`), nor `(+i)` as a parenthesised
+expression; the ket is one token.
 
 ### Bra literals
 
-A bra literal is `<`, then one or more of the characters `0 1 + -`, then `|`, with no
-whitespace inside. Like a ket, it is only recognised where an operand can start, so
+A bra literal is `<`, then one or more labels (as in a ket), then `|`, with no whitespace
+inside. Like a ket, it is only recognised where an operand can start, so
 `a < 0|b` is still a comparison followed by bitwise or. Bras are used for measurement tests
 and expectation values (§2, Bras and expectation values).
 

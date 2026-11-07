@@ -57,7 +57,7 @@ fn sexp(ast: &Ast, source: &str, id: ExprId) -> String {
         ExprKind::Int(v) => v.to_string(),
         ExprKind::Float(v) => format!("{v:?}"),
         ExprKind::Bool(v) => v.to_string(),
-        ExprKind::Ket => expr.span.text(source).into(),
+        ExprKind::Ket { .. } => expr.span.text(source).into(),
         ExprKind::Str(parts) => {
             let parts: Vec<String> = ast
                 .list(parts)
@@ -113,7 +113,7 @@ fn sexp(ast: &Ast, source: &str, id: ExprId) -> String {
         ExprKind::Binary { op, lhs, rhs } => format!("({} {} {})", op.as_str(), e(lhs), e(rhs)),
         ExprKind::Own { kind, place } => format!("({} {})", kind.as_str(), e(place)),
         ExprKind::Adj(call) => format!("(adj {})", e(call)),
-        ExprKind::BraTest { state, operand } => {
+        ExprKind::BraTest { state, operand, .. } => {
             format!("(test {} {})", state.text(source), e(operand))
         }
         ExprKind::Expectation {

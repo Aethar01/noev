@@ -284,7 +284,7 @@ fn irreversible_op(
         Node::Expr(id) => {
             let expr = ast.expr(id);
             match expr.kind {
-                ExprKind::Ket => (expr.span, "it creates qubits".into()),
+                ExprKind::Ket { .. } => (expr.span, "it creates qubits".into()),
                 ExprKind::BraTest { .. } => (expr.span, "it measures qubits".into()),
                 ExprKind::Expectation { .. } => {
                     (expr.span, "it computes an expectation value".into())
@@ -796,7 +796,7 @@ impl Owner<'_> {
                 }
                 Vec::new()
             }
-            ExprKind::Ket => {
+            ExprKind::Ket { .. } => {
                 self.not_reversible(expr.span, "creating qubits");
                 self.discarded(id, use_);
                 Vec::new()

@@ -253,15 +253,12 @@ impl Lexer<'_> {
         !self.last_kind().is_some_and(TokenKind::ends_operand)
     }
 
-    /// Lexes a ket `|…>` or bra `<…|` (between `open` and `close`, one or more of `0 1 + -`)
-    /// if it is there, returning whether it was.
+    /// Lexes a ket `|…>` or bra `<…|` (between `open` and `close`, one or more labels such as
+    /// `0` or `(+i)`) if it is there, returning whether it was.
     fn state_literal(&mut self, open: u8, close: u8, kind: TokenKind) -> bool {
         debug_assert_eq!(self.peek(0), open);
         let start = self.pos;
-        let mut end = start + 1;
-        while matches!(self.bytes.get(end), Some(b'0' | b'1' | b'+' | b'-')) {
-            end += 1;
-        }
+        let end = start + 1 + crate::state::scan(&self.bytes[start + 1..]);
         if end == start + 1 || self.bytes.get(end) != Some(&close) {
             return false;
         }
@@ -520,6 +517,10 @@ mod tests {
             [Ident, LParen, Ident, RParen, Gt, Newline, Ident]
         );
         assert_eq!(kinds("|+->\ny"), [Ket, Newline, Ident]);
+        // A label in parentheses is part of the ket or bra; anything else in them is not.
+        assert_eq!(kinds("|0(+i)>"), [Ket]);
+        assert_eq!(kinds("<(-i)| q"), [Bra, Ident]);
+        assert_eq!(kinds("|(+j)>"), [Pipe, LParen, Plus, Ident, RParen, Gt]);
     }
 
     #[test]

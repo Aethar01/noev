@@ -156,6 +156,25 @@ fn bras_measure_in_their_basis() {
 }
 
 #[test]
+fn y_basis_labels() {
+    // `(+i)` and `(-i)` are one qubit each, prepared and tested in the Y basis.
+    assert_eq!(
+        always("fn test() -> Bool {\n let r = |0(+i)1(-i)>\n <0(+i)1(-i)| mv r\n}"),
+        "true"
+    );
+    assert_eq!(
+        always("fn test() -> Bool {\n let q = |(+i)>\n <(-i)| mv q\n}"),
+        "false"
+    );
+    // `s` turns |+i⟩ into |−⟩.
+    assert_eq!(
+        always("fn test() -> Bool {\n let q = |(+i)>\n q.s()\n <-| mv q\n}"),
+        "true"
+    );
+    assert!((float("fn test() -> Float { <(-i)| Y(0) |(-i)> }") + 1.0).abs() < 1e-12);
+}
+
+#[test]
 fn adj_undoes_gates_and_functions() {
     assert_eq!(
         always("fn test() -> Bit {\n let q = |+>\n q.t()\n adj q.t()\n q.h()\n mv q.measure()\n}"),

@@ -23,6 +23,8 @@ before 1.0.
   patterns. Every case must be covered, looking inside tuples, arrays and variants' data
   (`(0, 0)`, `(0, 1)`, `(1, _)` cover a pair of bits), and an error names a value no arm
   takes, such as `(1, 1)` or `Some(1)`. Arms are branches for ownership (N009).
+- Kets and bras for the Y basis: `(+i)` and `(-i)`, a label in parentheses being one qubit
+  (`|0(+i)>` is two qubits, `<(-i)| mv q` tests for \|−i⟩).
 - `measure_in(Basis::X)` measures a qubit, or every qubit of an array, in the X, Y or Z
   basis: 0 for the +1 eigenstate. `Basis` is the standard library's enum.
 

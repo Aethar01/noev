@@ -508,7 +508,7 @@ fn infer_quantum(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<bool> {
 /// expectation values start runs of their own, so they are not.
 fn is_quantum_op(ast: &Ast, typed: &Typed, quantum: &[bool], e: ExprId) -> bool {
     match ast.expr(e).kind {
-        ExprKind::Ket | ExprKind::BraTest { .. } | ExprKind::Ctrl { .. } => true,
+        ExprKind::Ket { .. } | ExprKind::BraTest { .. } | ExprKind::Ctrl { .. } => true,
         ExprKind::Call { .. } | ExprKind::MethodCall { .. } => match typed.callees[e.index()] {
             Some(Callee::Builtin(
                 Builtin::Gate(_)
@@ -1213,7 +1213,7 @@ impl<'a> Walker<'a> {
             | ExprKind::Int(_)
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
-            | ExprKind::Ket
+            | ExprKind::Ket { .. }
             | ExprKind::Path(_)
             | ExprKind::Unit
             | ExprKind::With { .. } => false,

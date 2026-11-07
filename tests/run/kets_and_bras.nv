@@ -8,4 +8,10 @@ fn main() {
     print(<+| mv plus, <+| mv minus)
     let pair = |1+>
     print(<1+| mv pair)
+    // A label in parentheses is one qubit: the Y basis's |+i⟩ and |−i⟩.
+    let y = |(+i)(-i)>
+    print(<(+i)(-i)| mv y)
+    let turned = |(+i)>
+    turned.s()
+    print(<-| mv turned)
 }

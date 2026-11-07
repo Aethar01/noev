@@ -1384,7 +1384,9 @@ impl Parser<'_> {
             True | False => ExprKind::Bool(self.bump().kind == True),
             Ket => {
                 self.bump();
-                ExprKind::Ket
+                ExprKind::Ket {
+                    qubits: self.qubits(start),
+                }
             }
             Str => {
                 self.bump();
@@ -1695,6 +1697,7 @@ impl Parser<'_> {
             return self.push(
                 ExprKind::BraTest {
                     state: bra,
+                    qubits: self.qubits(bra),
                     operand,
                 },
                 bra,
@@ -1716,7 +1719,9 @@ impl Parser<'_> {
         }
         let prep_span = ket.unwrap_or(bra);
         let prep = self.ast.push_expr(Expr {
-            kind: ExprKind::Ket,
+            kind: ExprKind::Ket {
+                qubits: self.qubits(prep_span),
+            },
             span: prep_span,
         });
         let precision = self.within();
@@ -1739,16 +1744,19 @@ impl Parser<'_> {
         Some(self.unary())
     }
 
+    /// How many qubits the ket or bra literal at `span` has labels for.
+    fn qubits(&self, span: Span) -> u32 {
+        let text = self.text(span);
+        crate::state::labels(&text[1..text.len() - 1]).count() as u32
+    }
+
     /// The ket closing an expectation value, starting at `|`. After the observable, the
     /// lexer has split it into `|` and separate tokens (it follows an operand), so it is read
     /// from the source text and the tokens it covers are skipped.
     fn closing_ket(&mut self) -> Option<Span> {
         let pipe = self.bump().span;
         let bytes = self.source.as_bytes();
-        let mut end = pipe.end as usize;
-        while matches!(bytes.get(end), Some(b'0' | b'1' | b'+' | b'-')) {
-            end += 1;
-        }
+        let end = pipe.end as usize + crate::state::scan(&bytes[pipe.end as usize..]);
         if end == pipe.end as usize || bytes.get(end) != Some(&b'>') {
             self.error(
                 pipe,

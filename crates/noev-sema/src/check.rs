@@ -1125,8 +1125,8 @@ impl Checker<'_> {
             ExprKind::Float(_) => Ty::FLOAT,
             ExprKind::Str(parts) => self.string(parts),
             ExprKind::Bool(_) => Ty::BOOL,
-            ExprKind::Ket => {
-                let qubits = u64::from(expr.span.len() - 2);
+            ExprKind::Ket { qubits } => {
+                let qubits = u64::from(qubits);
                 if qubits == 1 {
                     Ty::QUBIT
                 } else {
@@ -1167,7 +1167,7 @@ impl Checker<'_> {
                     }
                 };
                 if self.t.types.linearity(elem) != crate::ty::Kind::Copyable
-                    && ast.expr(value).kind != ExprKind::Ket
+                    && !matches!(ast.expr(value).kind, ExprKind::Ket { .. })
                 {
                     let span = ast.expr(value).span;
                     self.error(
@@ -1281,9 +1281,11 @@ impl Checker<'_> {
                 }
             }
             ExprKind::Adj(call) => self.expr(call, Expect::None),
-            ExprKind::BraTest { state, operand } => {
+            ExprKind::BraTest {
+                qubits, operand, ..
+            } => {
                 let ty = self.expr(operand, Expect::None);
-                let qubits = u64::from(state.len() - 2);
+                let qubits = u64::from(qubits);
                 let want = if qubits == 1 {
                     Ty::QUBIT
                 } else {

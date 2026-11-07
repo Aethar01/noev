@@ -1579,13 +1579,16 @@ impl Machine<'_> {
         let value = match prep {
             Prep::Ket(state) => {
                 let mut qubits = Vec::new();
-                for c in state.chars() {
+                for label in noev_syntax::state::labels(state) {
+                    use noev_syntax::state::Label;
                     let qubit = self.allocate()?;
-                    let gates: &[Gate] = match c {
-                        '1' => &[Gate::X],
-                        '+' => &[Gate::H],
-                        '-' => &[Gate::X, Gate::H],
-                        _ => &[],
+                    let gates: &[Gate] = match label {
+                        Label::Zero => &[],
+                        Label::One => &[Gate::X],
+                        Label::Plus => &[Gate::H],
+                        Label::Minus => &[Gate::X, Gate::H],
+                        Label::PlusI => &[Gate::H, Gate::S],
+                        Label::MinusI => &[Gate::X, Gate::H, Gate::S],
                     };
                     for &gate in gates {
                         self.execute(Op {

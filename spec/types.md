@@ -99,7 +99,7 @@ makes sure a `Some` qubit is consumed.
 | `42`, `0xff`        | `Int`; `0` and `1` are `Bit` where a `Bit` is expected       |
 | `1.0`, `1e-3`       | `Float`                                                      |
 | `true`, `false`     | `Bool`                                                       |
-| `\|0>`, `\|+>`, …   | `Qubit` for one character, `[Qubit; N]` for N characters      |
+| `\|0>`, `\|+>`, …   | `Qubit` for one label, `[Qubit; N]` for N labels             |
 | `"text {x}"`        | `String`                                                     |
 
 `let b: Bit = 1` and `if m == 1 { … }` with `m: Bit` both work through the literal rule.
@@ -109,16 +109,22 @@ value (below).
 
 ### Ket literals
 
-Each character prepares one fresh qubit:
+Each label prepares one fresh qubit. A label is one character, or a longer one in
+parentheses:
 
-| Char | State | Prepared as |
-| ---- | ----- | ----------- |
-| `0`  | \|0⟩  | allocation  |
-| `1`  | \|1⟩  | `x`         |
-| `+`  | \|+⟩  | `h`         |
-| `-`  | \|−⟩  | `x`, `h`    |
+| Label  | State  | Basis | Prepared as   |
+| ------ | ------ | ----- | ------------- |
+| `0`    | \|0⟩   | Z     | allocation    |
+| `1`    | \|1⟩   | Z     | `x`           |
+| `+`    | \|+⟩   | X     | `h`           |
+| `-`    | \|−⟩   | X     | `x`, `h`      |
+| `(+i)` | \|+i⟩  | Y     | `h`, `s`      |
+| `(-i)` | \|−i⟩  | Y     | `x`, `h`, `s` |
 
-**Ordering:** characters map to array indices left to right. `|01>` gives `r` with `r[0]`
+So `|(+i)>` is one qubit and `|0(-i)+>` three. The parentheses keep "one label, one qubit"
+readable: `|-i>` would be two qubits, \|−⟩ and an unknown `i`.
+
+**Ordering:** labels map to array indices left to right. `|01>` gives `r` with `r[0]`
 in \|0⟩ and `r[1]` in \|1⟩, the same order as the array literal `[|0>, |1>]`. This is
 reading order, not Qiskit's little-endian bit-string order; the backends translate.
 
@@ -131,10 +137,11 @@ qubits. For any other linear value, `[x; N]` is an error, since it would copy `x
 
 ### Measurement tests
 
-`<s| x` measures `x` and has type `Bool`. `x` must be a `Qubit` when `s` has one character,
-or `[Qubit; N]` when `s` has `N` characters. Each character picks the basis for its qubit:
-`0` and `1` measure in the Z basis, `+` and `-` in the X basis. The result is `true` when
-every qubit's outcome matches its character. `x` is consumed, as with `measure`.
+`<s| x` measures `x` and has type `Bool`. `x` must be a `Qubit` when `s` has one label, or
+`[Qubit; N]` when `s` has `N` labels. Each label picks the basis for its qubit, as in the
+table above: `0` and `1` measure in the Z basis, `+` and `-` in the X basis, `(+i)` and
+`(-i)` in the Y basis. The result is `true` when every qubit's outcome matches its label.
+`x` is consumed, as with `measure`.
 
 The probability of `true` is |⟨s|ψ⟩|², so the notation means what it does in physics. When
 the compiler can prove `x` is exactly in \|s⟩, the result is certainly `true`, and the
@@ -301,4 +308,3 @@ A spec that does not apply to the value's type is a compile error.
 - **String operations**: length, concatenation, slicing, and how indexing relates to Unicode.
 - **Generic parameter syntax**: see [grammar.md](grammar.md) §4.
 - **Angles.** Whether rotation angles get their own type (with units) or stay `Float`.
-- **Other bases for kets**, such as `|i>` and `|-i>` for the Y basis.

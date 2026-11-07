@@ -7,6 +7,7 @@ pub mod diagnostic;
 pub mod lexer;
 pub mod parser;
 pub mod span;
+pub mod state;
 pub mod symbol;
 pub mod token;
 

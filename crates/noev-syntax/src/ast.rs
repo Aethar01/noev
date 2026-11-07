@@ -301,7 +301,10 @@ pub enum ExprKind {
     /// `true` or `false`.
     Bool(bool),
     /// A ket literal such as `|+0>`; the state is the text of the span.
-    Ket,
+    Ket {
+        /// How many labels it has: one qubit each.
+        qubits: u32,
+    },
     /// A string literal, as text and interpolated values in order.
     Str(List<StrPart>),
     /// A single name: a variable, function, type, `self` or `Self`.
@@ -394,6 +397,8 @@ pub enum ExprKind {
     BraTest {
         /// The bra literal, including `<` and `|`.
         state: Span,
+        /// How many labels it has: one qubit each.
+        qubits: u32,
         /// The value measured.
         operand: ExprId,
     },
