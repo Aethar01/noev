@@ -7,6 +7,46 @@ before 1.0.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-07
+
+### Language
+
+- Kets and bras for the Y basis: `(+i)` and `(-i)`, a label in parentheses being one qubit
+  (`|0(+i)>` is two qubits, `<(-i)| mv q` tests for \|−i⟩).
+- Type aliases: `type Byte = [Bit; 8]` is another name for the same type, including its
+  variants, associated functions and literals for a struct or enum.
+- `Int` has any size and never overflows (`1 << 100`, `factorial(30)`, literals of any
+  length); values that fit in 64 bits stay machine integers. `/` truncates and `%` takes the
+  dividend's sign; bitwise operators act as on endless two's complement. Converting a
+  `Float` to an `Int` is exact (it used to saturate), and NaN or an infinity is an error.
+- Sized numbers: `i8`…`i64`, `u8`…`u64` and `f32`, each its own type; `f64` is another name
+  for `Float`, which stays a 64-bit float like Python's `float`. Literals take the type
+  expected (`let x: u8 = 200`, `x + 1`), and one that does not fit is an error. Overflow is
+  a runtime error; shifts drop the bits shifted out. `i64(x)` converts when every value
+  fits, `u8::try_from(n)` gives a `Result` otherwise, and `u8(bits)` and `x.bits()` read a
+  `[Bit; 8]` as a number and back, most significant bit first.
+- A bra can hold a preparation: `<bell()| mv pair` is `true` when `pair` was in the state
+  `bell()` makes, undoing `bell()` on it and testing for \|0⟩. The preparation must be
+  reversible apart from creating its qubits (N023).
+- Computed labels in kets and bras: `|0{b}>`, `|{bits}>`, `<{bits}| mv r`, where `{…}` is a
+  `Bit`, a `State` (the standard library's six basis states) or an array of them. A label
+  computed from a measurement result prepares its qubit conditionally, inside the circuit.
+
+### Compiler
+
+- `adj` of a function that itself calls `adj` inverts in the right order; the inner inverse
+  used to be applied at once.
+- Runtime errors in compound assignments (`d /= 0`) point at the statement.
+- Type checking is about 10% faster: the built-in types skip the type table's hash map.
+
+### Editors
+
+- Hover on built-in types (`Int`, `u8`, …) and on `try_from`.
+- Hover on a type in a parameter's annotation shows the type, not the parameter; aliases
+  have hover, go to definition and symbols.
+
+## [0.2.0] - 2026-11-07
+
 ### Language
 
 - Enums with plain variants (`enum Basis { X, Y, Z }`), with methods inside, compared with
@@ -23,35 +63,11 @@ before 1.0.
   patterns. Every case must be covered, looking inside tuples, arrays and variants' data
   (`(0, 0)`, `(0, 1)`, `(1, _)` cover a pair of bits), and an error names a value no arm
   takes, such as `(1, 1)` or `Some(1)`. Arms are branches for ownership (N009).
-- Sized numbers: `i8`…`i64`, `u8`…`u64` and `f32`, each its own type; `f64` is another name
-  for `Float`, which stays a 64-bit float like Python's `float`. Literals take
-  the type expected (`let x: u8 = 200`, `x + 1`), and one that does not fit is an error.
-  Overflow is a runtime error; shifts drop the bits shifted out. `i64(x)` converts when every
-  value fits, `u8::try_from(n)` gives a `Result` otherwise, and `u8(bits)` and `x.bits()` read
-  a `[Bit; 8]` as a number and back, most significant bit first.
-- Hover on built-in types (`Int`, `u8`, …) and on `try_from`.
-- `Int` has any size and never overflows (`1 << 100`, `factorial(30)`, literals of any
-  length); values that fit in 64 bits stay machine integers. `/` truncates and `%` takes the
-  dividend's sign; bitwise operators act as on endless two's complement. Converting a
-  `Float` to an `Int` is exact (it used to saturate), and NaN or an infinity is an error.
-- Computed labels in kets and bras: `|0{b}>`, `|{bits}>`, `<{bits}| mv r`, where `{…}` is a
-  `Bit`, a `State` (the standard library's six basis states) or an array of them. A label
-  computed from a measurement result prepares its qubit conditionally, inside the circuit.
-- A bra can hold a preparation: `<bell()| mv pair` is `true` when `pair` was in the state
-  `bell()` makes, undoing `bell()` on it and testing for \|0⟩. The preparation must be
-  reversible apart from creating its qubits (N023).
-- Type aliases: `type Byte = [Bit; 8]` is another name for the same type, including its
-  variants, associated functions and literals for a struct or enum.
-- Kets and bras for the Y basis: `(+i)` and `(-i)`, a label in parentheses being one qubit
-  (`|0(+i)>` is two qubits, `<(-i)| mv q` tests for \|−i⟩).
 - `measure_in(Basis::X)` measures a qubit, or every qubit of an array, in the X, Y or Z
   basis: 0 for the +1 eigenstate. `Basis` is the standard library's enum.
 
 ### Compiler
 
-- `adj` of a function that itself calls `adj` inverts in the right order; the inner inverse
-  used to be applied at once.
-- Runtime errors in compound assignments (`d /= 0`) point at the statement.
 - A `match` on measurement results is classical control in the circuit, as an `if` is: one
   `if` per test its patterns make, and none for a test an enclosing one already decided.
   Teleportation corrected by a `match` is one circuit with four branches.
@@ -60,12 +76,9 @@ before 1.0.
 
 - Enums and `match` in the tree-sitter grammar and the language server (hover, go to
   definition, symbols); hover on type names, `Self` included.
-- Hover on a type in a parameter's annotation shows the type, not the parameter; aliases
-  have hover, go to definition and symbols.
 - Hover and go to definition on fields everywhere: where they are declared, in struct
   literals (`Retry { attempts: 2 }`) and in patterns; on variants where they are declared
   and where they are called with their data.
-
 - Hover explains more: doc comments (`///`, now in `spec/grammar.md`), whether a function
   runs as a circuit and whether it is reversible, struct fields and methods, built-ins,
   keywords, and kets and bras.
@@ -114,4 +127,6 @@ compiler that checks, runs and exports it.
 - A tree-sitter grammar (`editors/tree-sitter-noev`) with highlight, indent and fold queries,
   and Neovim runtime files (`editors/nvim`).
 
+[0.3.0]: https://github.com/Aethar01/noev/releases/tag/v0.3.0
+[0.2.0]: https://github.com/Aethar01/noev/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Aethar01/noev/releases/tag/v0.1.0

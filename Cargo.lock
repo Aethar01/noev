@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "noev"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "noev-ir"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "noev-sema",
  "noev-syntax",
@@ -787,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "noev-runtime"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "ketrs",
  "noev-ir",
@@ -800,14 +800,14 @@ dependencies = [
 
 [[package]]
 name = "noev-sema"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "noev-syntax",
 ]
 
 [[package]]
 name = "noev-syntax"
-version = "0.1.0"
+version = "0.3.0"
 
 [[package]]
 name = "npyz"
