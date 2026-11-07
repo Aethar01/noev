@@ -366,6 +366,14 @@ fn irreversible_op(
     Some(Irreversible { span, why })
 }
 
+/// The expressions of a ket's or bra's computed labels.
+pub(crate) fn label_values(ast: &Ast, parts: List<KetPart>) -> impl Iterator<Item = ExprId> + '_ {
+    ast.list(parts).iter().filter_map(|p| match *p {
+        KetPart::Value(value) => Some(value),
+        KetPart::Label(_) => None,
+    })
+}
+
 /// The local at the root of a place expression.
 fn root_local(ast: &Ast, typed: &Typed, mut id: ExprId) -> Option<LocalId> {
     loop {
@@ -427,7 +435,11 @@ fn walk_expr(ast: &Ast, id: ExprId, visit: &mut dyn FnMut(Node)) {
         ExprKind::Binary { lhs, rhs, .. } => children.extend([lhs, rhs]),
         ExprKind::Own { place, .. } => children.push(place),
         ExprKind::Adj(call) => children.push(call),
-        ExprKind::BraTest { operand, .. } => children.push(operand),
+        ExprKind::BraTest { operand, parts, .. } => {
+            children.extend(label_values(ast, parts));
+            children.push(operand);
+        }
+        ExprKind::Ket { parts, .. } => children.extend(label_values(ast, parts)),
         // The preparation is undone, not run, so only its arguments are evaluated here.
         ExprKind::PrepTest { prep, operand } => {
             if let ExprKind::Call { args, .. } = ast.expr(prep).kind {
@@ -850,8 +862,9 @@ impl Owner<'_> {
                 }
                 Vec::new()
             }
-            ExprKind::Ket { .. } => {
+            ExprKind::Ket { parts, .. } => {
                 self.not_reversible(expr.span, "creating qubits");
+                self.computed_labels(parts);
                 self.discarded(id, use_);
                 Vec::new()
             }
@@ -932,8 +945,9 @@ impl Owner<'_> {
                 self.check_adj(call);
                 self.expr(call, use_)
             }
-            ExprKind::BraTest { operand, .. } => {
+            ExprKind::BraTest { operand, parts, .. } => {
                 self.not_reversible(expr.span, "measuring");
+                self.computed_labels(parts);
                 let carried = self.expr(operand, Use::Value);
                 self.release(&carried);
                 Vec::new()
@@ -1425,6 +1439,15 @@ impl Owner<'_> {
                 "a run can only read classical values from outside it; create qubits inside the run"
                     .into(),
             );
+        }
+    }
+
+    /// A ket's or bra's computed labels, which are read.
+    fn computed_labels(&mut self, parts: List<KetPart>) {
+        for part in self.ast.list(parts) {
+            if let KetPart::Value(value) = *part {
+                self.expr(value, Use::Read);
+            }
         }
     }
 

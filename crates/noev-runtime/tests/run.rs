@@ -987,3 +987,26 @@ c[2] = measure q[2];"]
     );
     assert_eq!(output(source).0, "1  100  100.0%\n");
 }
+
+#[test]
+fn a_label_from_a_measurement_is_circuit_control() {
+    let source = "fn copied() -> (Bit, Bit) {
+    let a = |+>
+    let m = mv a.measure()
+    let b = |{m}>
+    (m, mv b.measure())
+}
+
+fn main() {
+    print(sample 100 { copied() })
+}";
+    assert_eq!(
+        exported(source),
+        ["h q[0];
+c[0] = measure q[0];
+if (c[0] == 1) {
+    x q[1];
+}
+c[1] = measure q[1];"]
+    );
+}

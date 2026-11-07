@@ -1,0 +1,30 @@
+// Computed labels (spec/types.md §3): `{expr}` in a ket or bra is a `Bit`, a `State` or an
+// array of them, mixed freely with fixed labels.
+
+fn load(bits: [Bit; 4]) -> [Qubit; 4] {
+    |{bits}>
+}
+
+// The label is a measurement result, so the second qubit is prepared conditionally.
+fn copied() -> (Bit, Bit) {
+    let a = |+>
+    let m = mv a.measure()
+    let b = |{m}>
+    (m, mv b.measure())
+}
+
+fn main() {
+    let bits: [Bit; 4] = [1, 0, 1, 1]
+    let r = load(bits)
+    print(mv r.measure())
+    let s = State::PlusI
+    let q = |0{s}1>
+    print(<0(+i)1| mv q)
+    let states = [State::Minus, State::One, State::MinusI]
+    let t = |{states}>
+    print(<{states}| mv t)
+    let u = |{bits}>
+    print(<{[1, 0, 1, 1]}| mv u)
+    let d = sample 200 { copied() }
+    print(d.count((0, 1)) + d.count((1, 0)))
+}

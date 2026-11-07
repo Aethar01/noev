@@ -66,6 +66,19 @@ gate angle chosen from one ([execution.md](execution.md) §4).
 A measurement test is a shortcut for the same thing: `<+| mv q` is
 `mv q.measure_in(Basis::X) == 0`.
 
+### `State`
+
+The six basis states a ket or bra label names, as a value, so a label can be computed
+(`|{s}>`, [types.md](types.md) §3).
+
+```noev
+/// One qubit's basis state: the labels `0 1 + - (+i) (-i)`.
+enum State { Zero, One, Plus, Minus, PlusI, MinusI }
+```
+
+As with `Basis`, a program's own type called `State` takes the name, and kets still accept
+the standard one.
+
 ## 3. Observables
 
 ### `P` and `PX`

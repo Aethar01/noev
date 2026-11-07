@@ -281,6 +281,20 @@ impl Checker<'_> {
         self.struct_names.insert(std_name("Basis"), basis);
         let basis_ty = self.t.types.struct_ty(basis);
         self.t.types.basis = Some(basis_ty);
+        // `enum State { Zero, One, Plus, Minus, PlusI, MinusI }`, in `state::Label`'s order.
+        let state = StructId(self.t.types.structs.len() as u32);
+        let labels = ["Zero", "One", "Plus", "Minus", "PlusI", "MinusI"];
+        self.t.types.structs.push(StructDef {
+            name: std_name("State"),
+            span: Span::default(),
+            fields: Vec::new(),
+            variants: Some(labels.iter().map(|l| variant(l)).collect()),
+            args: Vec::new(),
+            bare: false,
+        });
+        self.struct_names.insert(std_name("State"), state);
+        let state_ty = self.t.types.struct_ty(state);
+        self.t.types.state = Some(state_ty);
         let std_types = self.t.types.structs.len() as u32;
 
         // Struct, enum and alias names next, so field and parameter types can refer to any
@@ -1195,8 +1209,11 @@ impl Checker<'_> {
             },
             ExprKind::Str(parts) => self.string(parts),
             ExprKind::Bool(_) => Ty::BOOL,
-            ExprKind::Ket { qubits } => {
-                let qubits = u64::from(qubits);
+            ExprKind::Ket { qubits, parts } => {
+                let Some(computed) = self.computed_labels(parts) else {
+                    return Ty::ERROR;
+                };
+                let qubits = u64::from(qubits) + computed;
                 if qubits == 1 {
                     Ty::QUBIT
                 } else {
@@ -1369,10 +1386,17 @@ impl Checker<'_> {
             }
             ExprKind::Adj(call) => self.expr(call, Expect::None),
             ExprKind::BraTest {
-                qubits, operand, ..
+                qubits,
+                parts,
+                operand,
+                ..
             } => {
+                let computed = self.computed_labels(parts);
                 let ty = self.expr(operand, Expect::None);
-                let qubits = u64::from(qubits);
+                let Some(computed) = computed else {
+                    return Ty::BOOL;
+                };
+                let qubits = u64::from(qubits) + computed;
                 let want = if qubits == 1 {
                     Ty::QUBIT
                 } else {
@@ -1904,6 +1928,44 @@ impl Checker<'_> {
             Expect::Ty(want) => want,
             Expect::None | Expect::Hint(_) => result.unwrap_or(Ty::UNIT),
         }
+    }
+
+    /// How many qubits a ket's or bra's computed labels stand for: one for a `Bit` or
+    /// `State`, N for an array of them (`spec/types.md` §3). `None` if one was reported.
+    fn computed_labels(&mut self, parts: List<KetPart>) -> Option<u64> {
+        let mut qubits = Some(0);
+        for part in self.ast.list(parts) {
+            let KetPart::Value(value) = *part else {
+                continue;
+            };
+            // `{[0, 1]}` is bits, as `{1}` is a bit.
+            let hint = match self.ast.expr(value).kind {
+                ExprKind::Array(elems) => {
+                    let len = self.ast.list(elems).len() as u64;
+                    self.t.types.array(Ty::BIT, len)
+                }
+                _ => Ty::BIT,
+            };
+            let ty = self.expr(value, Expect::Hint(hint));
+            let ty = self.t.types.deref(ty);
+            let label = |t: Ty| t == Ty::BIT || Some(t) == self.t.types.state;
+            let count = match *self.t.types.kind(ty) {
+                _ if label(ty) => Some(1),
+                TyKind::Array(elem, len) if label(elem) => Some(len),
+                _ if self.t.types.is_wildcard(ty) => None,
+                _ => {
+                    let message = format!(
+                        "a computed label is a `Bit`, `State` or an array of them, not {}",
+                        self.show(ty)
+                    );
+                    let span = self.ast.expr(value).span;
+                    self.error(span, message);
+                    None
+                }
+            };
+            qubits = qubits.zip(count).map(|(a, b)| a + b);
+        }
+        qubits
     }
 
     /// An integer literal: `value`, or one too large for a `u64`. It is the sized integer or

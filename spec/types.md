@@ -168,6 +168,22 @@ parentheses:
 So `|(+i)>` is one qubit and `|0(-i)+>` three. The parentheses keep "one label, one qubit"
 readable: `|-i>` would be two qubits, \|−⟩ and an unknown `i`.
 
+**Computed labels.** A label can also be computed, written `{expr}` as in string
+interpolation, and mixed with fixed ones: `|0{b}+>`. Its value decides the labels:
+
+| Value         | Labels                                                       |
+| ------------- | ------------------------------------------------------------ |
+| `Bit`         | one: `0` or `1`                                              |
+| `[Bit; N]`    | N, one per bit: `\|{bits}>` prepares a register from data     |
+| `State`       | one, any of the six ([std.md](std.md) §2): `State::PlusI` is `(+i)` |
+| `[State; N]`  | N                                                            |
+
+The number of qubits still follows from the types, so `|0{bits}>` with `bits: [Bit; 3]` is a
+`[Qubit; 4]`. A label computed from a measurement result prepares the qubit conditionally, as
+`if m { q.x() }` would, so a circuit can still use it. In a bra, each computed label picks
+its qubit's basis and expected outcome: `<{bits}| mv r` is `true` when `r` measures as
+`bits`. Expectation values take only fixed labels for now.
+
 **Ordering:** labels map to array indices left to right. `|01>` gives `r` with `r[0]`
 in \|0⟩ and `r[1]` in \|1⟩, the same order as the array literal `[|0>, |1>]`. This is
 reading order, not Qiskit's little-endian bit-string order; the backends translate.
@@ -185,7 +201,7 @@ qubits. For any other linear value, `[x; N]` is an error, since it would copy `x
 `[Qubit; N]` when `s` has `N` labels. Each label picks the basis for its qubit, as in the
 table above: `0` and `1` measure in the Z basis, `+` and `-` in the X basis, `(+i)` and
 `(-i)` in the Y basis. The result is `true` when every qubit's outcome matches its label.
-`x` is consumed, as with `measure`.
+`x` is consumed, as with `measure`. Labels can be computed, as in kets.
 
 The probability of `true` is |⟨s|ψ⟩|², so the notation means what it does in physics. When
 the compiler can prove `x` is exactly in \|s⟩, the result is certainly `true`, and the

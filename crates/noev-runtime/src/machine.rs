@@ -789,6 +789,21 @@ impl Machine<'_> {
                 let value = self.rvalue(value)?;
                 self.store(place, value)
             }
+            Stmt::Prepare { qubit, label } => {
+                let qubit = self.qubit(qubit)?;
+                let label = self.operand(label)?;
+                self.prepare_label(qubit, &label)
+            }
+            Stmt::IntoZ { qubit, label } => {
+                let qubit = self.qubit(qubit)?;
+                if let Value::Variant(index, _) = self.operand(label)? {
+                    let label = state_label(index)?;
+                    for &(gate, adjoint) in noev_ir::ir::into_z(label) {
+                        self.emit(gate_op(gate, adjoint, qubit))?;
+                    }
+                }
+                Ok(())
+            }
             Stmt::Alloc(place) => {
                 let qubit = self.allocate()?;
                 self.store(place, Value::Qubit(qubit))
@@ -958,6 +973,40 @@ impl Machine<'_> {
         }
     }
 
+    /// Prepares the fresh `qubit` as a computed label says (`spec/types.md` §3): a `Bit`, which
+    /// while recording may be a measurement result, making the `x` conditional; or a `State`.
+    fn prepare_label(&mut self, qubit: usize, label: &Value) -> Result<()> {
+        let gates = match label {
+            Value::Bit(bit) => {
+                if *bit {
+                    self.emit(gate_op(Gate::X, false, qubit))?;
+                }
+                return Ok(());
+            }
+            Value::Variant(index, _) => noev_ir::ir::label_gates(state_label(*index)?),
+            other => {
+                let Some(condition) = other.condition() else {
+                    return Err(RuntimeError::new(format!(
+                        "expected a Bit or State label, found {other:?}"
+                    )));
+                };
+                let Mode::Build(recording) = &mut self.mode else {
+                    unreachable!("measurement results are only unknown while recording")
+                };
+                recording.circuit.instructions.push(Instruction::If {
+                    condition,
+                    then: vec![Instruction::Gate(gate_op(Gate::X, false, qubit))],
+                    otherwise: Vec::new(),
+                });
+                return Ok(());
+            }
+        };
+        for &gate in gates {
+            self.emit(gate_op(gate, false, qubit))?;
+        }
+        Ok(())
+    }
+
     /// Applies a gate, or records it when a function's gates are being collected (`adj`, a
     /// bra's preparation).
     fn emit(&mut self, op: Op) -> Result<()> {
@@ -1108,6 +1157,23 @@ impl Machine<'_> {
     }
 }
 
+/// A one-qubit gate on `qubit`, with no parameters or controls.
+fn gate_op(gate: Gate, adjoint: bool, qubit: usize) -> Op {
+    Op {
+        gate,
+        adjoint,
+        params: Vec::new(),
+        controls: Vec::new(),
+        targets: vec![qubit],
+    }
+}
+
+/// The label of the standard library's `State` variant number `index`.
+fn state_label(index: u32) -> Result<noev_syntax::state::Label> {
+    noev_syntax::state::Label::from_index(index)
+        .ok_or_else(|| RuntimeError::new(format!("no State variant {index}")))
+}
+
 /// The step that sets classical bit `clbit` to a `Bit` or `Bool` value, known or not.
 fn assign(clbit: usize, value: &Value) -> Result<Instruction> {
     let (value, _) = value.logic().ok_or_else(|| {
@@ -1165,6 +1231,10 @@ impl Machine<'_> {
                     .collect::<Result<Vec<_>>>()?;
                 maths(*math, &args)?
             }
+            Rvalue::LabelBit(op) => match self.operand(op)? {
+                Value::Variant(index, _) => Value::Bit(state_label(index)?.outcome()),
+                bit => bit,
+            },
             Rvalue::BigInt(text) => Value::Int(
                 Int::parse(text)
                     .ok_or_else(|| RuntimeError::new(format!("`{text}` is not an Int")))?,
@@ -1738,17 +1808,8 @@ impl Machine<'_> {
             Prep::Ket(state) => {
                 let mut qubits = Vec::new();
                 for label in noev_syntax::state::labels(state) {
-                    use noev_syntax::state::Label;
                     let qubit = self.allocate()?;
-                    let gates: &[Gate] = match label {
-                        Label::Zero => &[],
-                        Label::One => &[Gate::X],
-                        Label::Plus => &[Gate::H],
-                        Label::Minus => &[Gate::X, Gate::H],
-                        Label::PlusI => &[Gate::H, Gate::S],
-                        Label::MinusI => &[Gate::X, Gate::H, Gate::S],
-                    };
-                    for &gate in gates {
+                    for &gate in noev_ir::ir::label_gates(label) {
                         self.execute(Op {
                             gate,
                             adjoint: false,

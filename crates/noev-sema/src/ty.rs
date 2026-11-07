@@ -136,6 +136,8 @@ pub struct Types {
     pub structs: Vec<StructDef>,
     /// The standard library's `Basis` (`spec/std.md` §2).
     pub basis: Option<Ty>,
+    /// The standard library's `State` (`spec/std.md` §2): the labels as values.
+    pub state: Option<Ty>,
 }
 
 macro_rules! basic {
@@ -156,6 +158,7 @@ macro_rules! basic {
                     map: FxHashMap::default(),
                     structs: Vec::new(),
                     basis: None,
+                    state: None,
                 }
             }
         }

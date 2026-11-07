@@ -10,7 +10,7 @@ use noev_sema::check::{Adjust, Callee, LocalId, Res};
 use noev_sema::prelude::{Builtin, Gate};
 use noev_sema::{Circuits, Ty, TyKind, Typed, Types};
 use noev_syntax::ast::{self as ast, ExprId, ExprKind, OwnKind, StmtKind};
-use noev_syntax::state::{Label, Pauli, labels};
+use noev_syntax::state::{Label, labels};
 use noev_syntax::{Ast, Span};
 
 use crate::ir::*;
@@ -104,6 +104,13 @@ pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &str) -> 
         variant_names,
         variant_fields,
     }
+}
+
+/// One label of a ket or bra: fixed, or a computed value (`spec/types.md` §3).
+#[derive(Clone)]
+enum LabelOp {
+    Fixed(Label),
+    Value(Operand),
 }
 
 /// What every builder of a program shares.
@@ -1011,10 +1018,11 @@ impl Builder<'_> {
                 }
                 self.set(&dest, Rvalue::Format(out));
             }
-            ExprKind::Ket { .. } => {
-                let state = &self.text(expr.span)[1..expr.span.len() as usize - 1];
+            ExprKind::Ket { parts, .. } => {
+                let state = self.text(expr.span)[1..expr.span.len() as usize - 1].to_string();
+                let labels = self.labels(&state, parts);
                 let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
-                self.ket(state, &dest);
+                self.ket(&labels, &dest);
             }
             ExprKind::Path(_) => match self.typed.res[id.index()] {
                 Res::Builtin(Builtin::Const(c)) => self.set(&dest, Rvalue::FloatConst(c)),
@@ -1038,13 +1046,15 @@ impl Builder<'_> {
                 let ExprKind::Int(count) = ast.expr(count).kind else {
                     return;
                 };
-                if matches!(ast.expr(value).kind, ExprKind::Ket { .. }) {
+                if let ExprKind::Ket { parts, .. } = ast.expr(value).kind {
                     let span = ast.expr(value).span;
-                    let state = &self.text(span)[1..span.len() as usize - 1];
+                    let state = self.text(span)[1..span.len() as usize - 1].to_string();
                     let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
+                    // Each element's computed labels are evaluated afresh, as the ket is.
                     for k in 0..count {
+                        let labels = self.labels(&state, parts);
                         let element = dest.with(Proj::Index(Operand::Const(Const::Int(k as i64))));
-                        self.ket(state, &element);
+                        self.ket(&labels, &element);
                     }
                 } else {
                     let op = self.operand(value);
@@ -1095,13 +1105,19 @@ impl Builder<'_> {
                 );
                 // Undone, the qubits are all |0⟩ exactly when they held the state.
                 let qubits = self.types.qubit_count(self.types.deref(self.ty(operand)));
-                let zeros = "0".repeat(qubits.unwrap_or(1) as usize);
+                let zeros = vec![LabelOp::Fixed(Label::Zero); qubits.unwrap_or(1) as usize];
                 self.bra_test(&zeros, target, dest);
             }
-            ExprKind::BraTest { state, operand, .. } => {
-                let state = &self.text(state)[1..state.len() as usize - 1];
+            ExprKind::BraTest {
+                state,
+                operand,
+                parts,
+                ..
+            } => {
+                let state = self.text(state)[1..state.len() as usize - 1].to_string();
+                let labels = self.labels(&state, parts);
                 let base = self.qubit_place(operand);
-                self.bra_test(state, base, dest);
+                self.bra_test(&labels, base, dest);
             }
             ExprKind::Expectation {
                 prep,
@@ -1223,25 +1239,59 @@ impl Builder<'_> {
         }
     }
 
-    /// Allocates qubits for a ket's state at `dest`: one qubit, or an array for several.
-    fn ket(&mut self, state: &str, dest: &Place) {
-        let array = labels(state).count() > 1;
-        for (k, label) in labels(state).enumerate() {
+    /// A ket's or bra's labels in order: its text's fixed labels, or with computed ones
+    /// (`parts`), each value's (`spec/types.md` §3), an array's one per element.
+    fn labels(&mut self, text: &str, parts: ast::List<ast::KetPart>) -> Vec<LabelOp> {
+        let ast = self.ast;
+        if parts.is_empty() {
+            return labels(text).map(LabelOp::Fixed).collect();
+        }
+        let mut out = Vec::new();
+        for &part in ast.list(parts) {
+            let value = match part {
+                ast::KetPart::Label(label) => {
+                    out.push(LabelOp::Fixed(label));
+                    continue;
+                }
+                ast::KetPart::Value(value) => value,
+            };
+            let ty = self.types.deref(self.ty(value));
+            let op = self.operand(value);
+            let TyKind::Array(_, len) = *self.types.kind(ty) else {
+                out.push(LabelOp::Value(op));
+                continue;
+            };
+            let held = self.temp(ty);
+            self.assign(held.clone(), Rvalue::Use(op));
+            for k in 0..len {
+                let element = held.with(Proj::Index(Operand::Const(Const::Int(k as i64))));
+                out.push(LabelOp::Value(Operand::Copy(element)));
+            }
+        }
+        out
+    }
+
+    /// Allocates qubits for a ket's labels at `dest`: one qubit, or an array for several.
+    fn ket(&mut self, labels: &[LabelOp], dest: &Place) {
+        let array = labels.len() > 1;
+        for (k, label) in labels.iter().enumerate() {
             let qubit = if array {
                 dest.with(Proj::Index(Operand::Const(Const::Int(k as i64))))
             } else {
                 dest.clone()
             };
             self.push(Stmt::Alloc(qubit.clone()));
-            let gates: &[Gate] = match label {
-                Label::Zero => &[],
-                Label::One => &[Gate::X],
-                Label::Plus => &[Gate::H],
-                Label::Minus => &[Gate::X, Gate::H],
-                Label::PlusI => &[Gate::H, Gate::S],
-                Label::MinusI => &[Gate::X, Gate::H, Gate::S],
+            let label = match label {
+                LabelOp::Fixed(label) => *label,
+                LabelOp::Value(value) => {
+                    self.push(Stmt::Prepare {
+                        qubit,
+                        label: value.clone(),
+                    });
+                    continue;
+                }
             };
-            for &gate in gates {
+            for &gate in label_gates(label) {
                 self.push(Stmt::Gate {
                     gate,
                     adjoint: false,
@@ -1253,43 +1303,47 @@ impl Builder<'_> {
     }
 
     /// `<s| x`, with `x` at `base`: measure each qubit in its label's basis and compare.
-    fn bra_test(&mut self, state: &str, base: Place, dest: Option<Place>) {
-        let array = labels(state).count() > 1;
+    fn bra_test(&mut self, labels: &[LabelOp], base: Place, dest: Option<Place>) {
+        let array = labels.len() > 1;
         let mut result: Option<Operand> = None;
-        for (k, label) in labels(state).enumerate() {
+        for (k, label) in labels.iter().enumerate() {
             let qubit = if array {
                 base.with(Proj::Index(Operand::Const(Const::Int(k as i64))))
             } else {
                 base.clone()
             };
             // Into the Z basis, as `measure_in` does: `h` for X, `adj s` then `h` for Y.
-            let gates: &[(Gate, bool)] = match label.basis() {
-                Pauli::Z => &[],
-                Pauli::X => &[(Gate::H, false)],
-                Pauli::Y => &[(Gate::S, true), (Gate::H, false)],
+            let expected = match label {
+                LabelOp::Fixed(label) => {
+                    for &(gate, adjoint) in into_z(*label) {
+                        self.push(Stmt::Gate {
+                            gate,
+                            adjoint,
+                            qubits: vec![qubit.clone()],
+                            params: Vec::new(),
+                        });
+                    }
+                    Operand::Const(Const::Bit(label.outcome()))
+                }
+                LabelOp::Value(value) => {
+                    self.push(Stmt::IntoZ {
+                        qubit: qubit.clone(),
+                        label: value.clone(),
+                    });
+                    let bit = self.temp(Ty::BIT);
+                    self.assign(bit.clone(), Rvalue::LabelBit(value.clone()));
+                    Operand::Copy(bit)
+                }
             };
-            for &(gate, adjoint) in gates {
-                self.push(Stmt::Gate {
-                    gate,
-                    adjoint,
-                    qubits: vec![qubit.clone()],
-                    params: Vec::new(),
-                });
-            }
             let bit = self.temp(Ty::BIT);
             self.push(Stmt::Measure {
                 dest: bit.clone(),
                 qubit,
             });
             let matches = self.temp(Ty::BOOL);
-            let expected = label.outcome();
             self.assign(
                 matches.clone(),
-                Rvalue::Binary(
-                    ast::BinaryOp::Eq,
-                    Operand::Copy(bit),
-                    Operand::Const(Const::Bit(expected)),
-                ),
+                Rvalue::Binary(ast::BinaryOp::Eq, Operand::Copy(bit), expected),
             );
             result = Some(match result {
                 None => Operand::Copy(matches),

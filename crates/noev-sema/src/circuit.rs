@@ -606,7 +606,13 @@ fn children(ast: &Ast, node: Node, out: &mut Vec<Node>) {
                 }
                 ExprKind::Own { place, .. } => push(place),
                 ExprKind::Adj(call) => push(call),
-                ExprKind::BraTest { operand, .. } => push(operand),
+                ExprKind::BraTest { operand, parts, .. } => {
+                    crate::ownership::label_values(ast, parts).for_each(&mut push);
+                    push(operand);
+                }
+                ExprKind::Ket { parts, .. } => {
+                    crate::ownership::label_values(ast, parts).for_each(&mut push)
+                }
                 ExprKind::PrepTest { prep, operand } => {
                     if let ExprKind::Call { args, .. } = ast.expr(prep).kind {
                         ast.list(args).iter().for_each(|&a| push(a));
@@ -1091,9 +1097,22 @@ impl<'a> Walker<'a> {
                 }
                 false
             }
-            ExprKind::BraTest { operand, .. } => {
+            ExprKind::BraTest { operand, parts, .. } => {
+                for value in crate::ownership::label_values(ast, parts) {
+                    self.expr(value, before);
+                }
                 self.expr(operand, before);
                 true
+            }
+            // A label computed from a measurement result prepares its qubit conditionally:
+            // classical control, which a circuit records.
+            ExprKind::Ket { parts, .. } => {
+                for value in crate::ownership::label_values(ast, parts) {
+                    if self.expr(value, before) && before {
+                        self.info.feedback = true;
+                    }
+                }
+                false
             }
             // The preparation's arguments choose gates, as a gate's angle does.
             ExprKind::PrepTest { prep, operand } => {
@@ -1239,7 +1258,6 @@ impl<'a> Walker<'a> {
             | ExprKind::BigInt
             | ExprKind::Float(_)
             | ExprKind::Bool(_)
-            | ExprKind::Ket { .. }
             | ExprKind::Path(_)
             | ExprKind::Unit
             | ExprKind::With { .. } => false,

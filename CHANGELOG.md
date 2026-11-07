@@ -34,6 +34,9 @@ before 1.0.
   length); values that fit in 64 bits stay machine integers. `/` truncates and `%` takes the
   dividend's sign; bitwise operators act as on endless two's complement. Converting a
   `Float` to an `Int` is exact (it used to saturate), and NaN or an infinity is an error.
+- Computed labels in kets and bras: `|0{b}>`, `|{bits}>`, `<{bits}| mv r`, where `{…}` is a
+  `Bit`, a `State` (the standard library's six basis states) or an array of them. A label
+  computed from a measurement result prepares its qubit conditionally, inside the circuit.
 - A bra can hold a preparation: `<bell()| mv pair` is `true` when `pair` was in the state
   `bell()` makes, undoing `bell()` on it and testing for \|0⟩. The preparation must be
   reversible apart from creating its qubits (N023).

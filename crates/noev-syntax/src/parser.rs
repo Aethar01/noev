@@ -1399,8 +1399,10 @@ impl Parser<'_> {
             True | False => ExprKind::Bool(self.bump().kind == True),
             Ket => {
                 self.bump();
+                let parts = self.ket_parts(start);
                 ExprKind::Ket {
                     qubits: self.qubits(start),
+                    parts,
                 }
             }
             Str => {
@@ -1700,10 +1702,12 @@ impl Parser<'_> {
                         op.as_str()
                     ));
             }
+            let parts = self.ket_parts(bra);
             return self.push(
                 ExprKind::BraTest {
                     state: bra,
                     qubits: self.qubits(bra),
+                    parts,
                     operand,
                 },
                 bra,
@@ -1712,6 +1716,11 @@ impl Parser<'_> {
         let ket = self.closing_ket();
         let source = self.source;
         let bra_state = &source[bra.start as usize + 1..bra.end as usize - 1];
+        let computed = bra_state.contains('{');
+        if computed {
+            self.error(bra, "an expectation value takes only fixed labels for now")
+                .with_help_mut("prepare the state in a function, as in `<prep(b)| H |prep(b)>`");
+        }
         if let Some(ket) = ket {
             let ket_state = &source[ket.start as usize + 1..ket.end as usize - 1];
             if bra_state != ket_state {
@@ -1724,10 +1733,16 @@ impl Parser<'_> {
             }
         }
         let prep_span = ket.unwrap_or(bra);
-        let prep = self.ast.push_expr(Expr {
-            kind: ExprKind::Ket {
+        let kind = if computed {
+            ExprKind::Error
+        } else {
+            ExprKind::Ket {
                 qubits: self.qubits(prep_span),
-            },
+                parts: List::default(),
+            }
+        };
+        let prep = self.ast.push_expr(Expr {
+            kind,
             span: prep_span,
         });
         let precision = self.within();
@@ -1750,10 +1765,48 @@ impl Parser<'_> {
         Some(self.unary())
     }
 
-    /// How many qubits the ket or bra literal at `span` has labels for.
+    /// How many fixed labels the ket or bra literal at `span` has.
     fn qubits(&self, span: Span) -> u32 {
         let text = self.text(span);
-        crate::state::labels(&text[1..text.len() - 1]).count() as u32
+        let mut count = 0;
+        let mut bytes = &text.as_bytes()[1..text.len() - 1];
+        while !bytes.is_empty() {
+            if let Some((_, len)) = crate::state::label(bytes) {
+                count += 1;
+                bytes = &bytes[len..];
+            } else {
+                let close = crate::lexer::scan_interpolation(bytes, 0).unwrap_or(bytes.len());
+                bytes = &bytes[close..];
+            }
+        }
+        count
+    }
+
+    /// The labels of the ket or bra literal at `span` when some are computed, each `{expr}`
+    /// parsed from its slice of the source; empty when all are fixed.
+    fn ket_parts(&mut self, span: Span) -> List<KetPart> {
+        let text = self.text(span);
+        if !text.contains('{') {
+            return List::default();
+        }
+        let mark = self.ast.mark::<KetPart>();
+        let bytes = self.source.as_bytes();
+        let mut pos = span.start as usize + 1;
+        let end = span.end as usize - 1;
+        while pos < end {
+            if let Some((label, len)) = crate::state::label(&bytes[pos..end]) {
+                self.ast.push_to(KetPart::Label(label));
+                pos += len;
+                continue;
+            }
+            let close = crate::lexer::scan_interpolation(bytes, pos)
+                .unwrap_or(end)
+                .min(end);
+            let expr = self.sub_expr(pos as u32 + 1, close as u32 - 1);
+            self.ast.push_to(KetPart::Value(expr));
+            pos = close;
+        }
+        self.ast.finish(mark)
     }
 
     /// The ket closing an expectation value, starting at `|`. After the observable, the

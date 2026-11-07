@@ -188,6 +188,7 @@ pools! {
     variants: VariantDecl,
     arms: Arm,
     field_pats: FieldPat,
+    ket_parts: KetPart,
 }
 
 /// The variants of `Option` and `Result`, named without their enum: alone, each is a path
@@ -195,9 +196,11 @@ pools! {
 pub const BARE_VARIANTS: [&str; 4] = ["Some", "None", "Ok", "Err"];
 
 /// Names the standard library declares, interned in every file: the enum `Basis` and its
-/// variants (`spec/std.md` §2), and `Option` and `Result` and theirs (`spec/types.md` §2).
-pub const STD_NAMES: [&str; 10] = [
-    "Basis", "X", "Y", "Z", "Option", "Result", "Some", "None", "Ok", "Err",
+/// variants and `State` and its (`spec/std.md` §2), and `Option` and `Result` and theirs
+/// (`spec/types.md` §2).
+pub const STD_NAMES: [&str; 17] = [
+    "Basis", "X", "Y", "Z", "Option", "Result", "Some", "None", "Ok", "Err", "State", "Zero",
+    "One", "Plus", "Minus", "PlusI", "MinusI",
 ];
 
 /// A parsed file.
@@ -304,8 +307,10 @@ pub enum ExprKind {
     Bool(bool),
     /// A ket literal such as `|+0>`; the state is the text of the span.
     Ket {
-        /// How many labels it has: one qubit each.
+        /// How many fixed labels it has: one qubit each.
         qubits: u32,
+        /// Its labels in order, when some are computed (`|0{b}>`); empty when all are fixed.
+        parts: List<KetPart>,
     },
     /// A string literal, as text and interpolated values in order.
     Str(List<StrPart>),
@@ -399,8 +404,10 @@ pub enum ExprKind {
     BraTest {
         /// The bra literal, including `<` and `|`.
         state: Span,
-        /// How many labels it has: one qubit each.
+        /// How many fixed labels it has: one qubit each.
         qubits: u32,
+        /// Its labels in order, when some are computed; empty when all are fixed.
+        parts: List<KetPart>,
         /// The value measured.
         operand: ExprId,
     },
@@ -575,6 +582,15 @@ impl OwnKind {
             OwnKind::Mut => "mut",
         }
     }
+}
+
+/// A piece of a ket or bra with computed labels (`spec/types.md` §3).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum KetPart {
+    /// A fixed label, such as `0` or `(+i)`.
+    Label(crate::state::Label),
+    /// `{expr}`: a `Bit`, `[Bit; N]`, `State` or `[State; N]`.
+    Value(ExprId),
 }
 
 /// A piece of a string literal.

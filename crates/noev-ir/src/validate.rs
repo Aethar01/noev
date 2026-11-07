@@ -43,6 +43,7 @@ pub fn validate(program: &Program) -> Vec<String> {
                             | Rvalue::Repeat(op, _)
                             | Rvalue::Convert(_, op)
                             | Rvalue::TryConvert(_, op)
+                            | Rvalue::LabelBit(op)
                             | Rvalue::Tag(op)
                             | Rvalue::Pauli(_, op) => check_operand(op, &mut report),
                             Rvalue::Binary(_, a, b) => {
@@ -72,6 +73,10 @@ pub fn validate(program: &Program) -> Vec<String> {
                     }
                     Stmt::Alloc(p) | Stmt::Reset(p) | Stmt::Release(p) => {
                         check_place(p, &mut report)
+                    }
+                    Stmt::Prepare { qubit, label } | Stmt::IntoZ { qubit, label } => {
+                        check_place(qubit, &mut report);
+                        check_operand(label, &mut report);
                     }
                     Stmt::Gate { qubits, params, .. } => {
                         qubits.iter().for_each(|q| check_place(q, &mut report));

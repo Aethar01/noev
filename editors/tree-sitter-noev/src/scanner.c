@@ -56,11 +56,20 @@ bool tree_sitter_noev_external_scanner_scan(void *payload, TSLexer *lexer,
     if (lexer->lookahead == '<') {
         return false;
     }
-    // Labels: `0 1 + -`, or `(+i)` and `(-i)`.
+    // Labels: `0 1 + -`, `(+i)` and `(-i)`, and computed ones `{expr}`.
     bool body = false;
     for (;;) {
         if (is_ket_char(lexer->lookahead)) {
             lexer->advance(lexer, false);
+        } else if (lexer->lookahead == '{') {
+            // A computed label, `{expr}`, with braces nested inside.
+            int depth = 0;
+            do {
+                if (lexer->lookahead == '{') depth++;
+                if (lexer->lookahead == '}') depth--;
+                if (lexer->eof(lexer)) return false;
+                lexer->advance(lexer, false);
+            } while (depth > 0);
         } else if (lexer->lookahead == '(') {
             lexer->advance(lexer, false);
             if (lexer->lookahead != '+' && lexer->lookahead != '-') break;

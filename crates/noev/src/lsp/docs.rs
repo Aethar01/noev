@@ -366,6 +366,14 @@ pub fn try_convert(ty: &str) -> (String, String) {
 /// What a ket literal such as `|0+1>` prepares.
 pub fn ket(text: &str) -> (String, String) {
     let body = text.trim_start_matches('|').trim_end_matches('>');
+    if body.contains('{') {
+        return (
+            text.to_string(),
+            "Fresh qubits from fixed and computed labels. Each `{…}` is a `Bit`, a `State` or an \
+             array of them, and prepares as many qubits as it holds when the ket runs."
+                .into(),
+        );
+    }
     let labels: Vec<Label> = labels(body).collect();
     let states: Vec<String> = labels
         .iter()
@@ -398,6 +406,14 @@ pub fn ket(text: &str) -> (String, String) {
 /// What a bra such as `<1|` does.
 pub fn bra(text: &str) -> (String, String) {
     let body = text.trim_start_matches('<').trim_end_matches('|');
+    if body.contains('{') {
+        return (
+            format!("{text} q"),
+            "A measurement test with computed labels: each qubit is measured in its label's \
+             basis, and the test is `true` when every outcome matches."
+                .into(),
+        );
+    }
     let bases: Vec<&str> = labels(body)
         .map(|label| match label.basis() {
             state::Pauli::X => "X",

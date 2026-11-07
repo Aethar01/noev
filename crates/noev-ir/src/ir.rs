@@ -205,6 +205,9 @@ pub enum Rvalue {
     /// `T::try_from(x)`: `Ok` (variant 0) with `x` as a `T` if it is in range, otherwise
     /// `Err` (variant 1) with a message.
     TryConvert(Ty, Operand),
+    /// The outcome a computed label expects when measured in its basis: a `Bit` itself, or
+    /// for a `State`, 1 for the −1 eigenstates.
+    LabelBit(Operand),
     /// An `Int` literal too large for [`Const::Int`], as written (`0x…`, `0b…`, `_`).
     BigInt(String),
     /// `X(i)`, `Y(i)` or `Z(i)`.
@@ -255,6 +258,22 @@ pub enum Stmt {
     Assign(Place, Rvalue),
     /// Allocate a fresh qubit in \|0⟩ at a `Qubit` place.
     Alloc(Place),
+    /// Prepare the fresh qubit at `qubit` in the state a computed label names: a `Bit` (which
+    /// may be a measurement result, making it conditional) or a `State`.
+    Prepare {
+        /// The qubit, in \|0⟩.
+        qubit: Place,
+        /// The label's value.
+        label: Operand,
+    },
+    /// Turn the qubit at `qubit` into the Z basis from a computed label's basis, so that
+    /// measuring it tests for that label (nothing for a `Bit`).
+    IntoZ {
+        /// The qubit.
+        qubit: Place,
+        /// The label's value.
+        label: Operand,
+    },
     /// Apply a gate.
     Gate {
         /// Which gate.
@@ -321,6 +340,30 @@ pub struct Control {
     pub carried: Vec<Local>,
     /// Whether it is a `while`.
     pub repeats: bool,
+}
+
+/// The gates that prepare a ket label's state from \|0⟩ (`spec/types.md` §3).
+pub fn label_gates(label: noev_syntax::state::Label) -> &'static [Gate] {
+    use noev_syntax::state::Label;
+    match label {
+        Label::Zero => &[],
+        Label::One => &[Gate::X],
+        Label::Plus => &[Gate::H],
+        Label::Minus => &[Gate::X, Gate::H],
+        Label::PlusI => &[Gate::H, Gate::S],
+        Label::MinusI => &[Gate::X, Gate::H, Gate::S],
+    }
+}
+
+/// The gates, each with whether it is inverted, that turn a label's basis into the Z basis,
+/// as `measure_in` does: `h` for X, `adj s` then `h` for Y.
+pub fn into_z(label: noev_syntax::state::Label) -> &'static [(Gate, bool)] {
+    use noev_syntax::state::Pauli;
+    match label.basis() {
+        Pauli::Z => &[],
+        Pauli::X => &[(Gate::H, false)],
+        Pauli::Y => &[(Gate::S, true), (Gate::H, false)],
+    }
 }
 
 /// The preparation of an expectation value.
@@ -486,6 +529,12 @@ impl Program {
                 format!("{} = {}", place_text(place), self.rvalue_text(value))
             }
             Stmt::Alloc(place) => format!("{} = alloc", place_text(place)),
+            Stmt::Prepare { qubit, label } => {
+                format!("prepare {} as {}", place_text(qubit), operand_text(label))
+            }
+            Stmt::IntoZ { qubit, label } => {
+                format!("into_z {} from {}", place_text(qubit), operand_text(label))
+            }
             Stmt::Gate {
                 gate,
                 adjoint,
@@ -588,6 +637,7 @@ impl Program {
             Rvalue::Convert(ty, op) => format!("{}({})", self.type_name(*ty), operand_text(op)),
             Rvalue::Math(math, ops) => format!("{math:?}({})", list(ops)).to_lowercase(),
             Rvalue::BigInt(text) => text.clone(),
+            Rvalue::LabelBit(op) => format!("label_bit({})", operand_text(op)),
             Rvalue::TryConvert(ty, op) => {
                 format!("{}::try_from({})", self.type_name(*ty), operand_text(op))
             }

@@ -72,7 +72,9 @@ the context requires it (see [types.md](types.md)).
 ### Ket literals
 
 A ket literal is `|`, then one or more labels, then `>`, with no whitespace inside. A label is
-one of the characters `0 1 + -`, or `(+i)` or `(-i)`; each is one qubit. It creates freshly prepared qubits (see [types.md](types.md)).
+one of the characters `0 1 + -`, `(+i)` or `(-i)`, or a **computed label** `{expr}`, an
+expression in braces as in string interpolation. Each fixed label is one qubit; a computed
+one is as many as its value holds ([types.md](types.md) §3). It creates freshly prepared qubits (see [types.md](types.md)).
 
 `|` is also the bitwise-or operator. The two never conflict, because a ket is only
 recognised **where an operand can start**. The lexer treats `|` as the start of a ket unless

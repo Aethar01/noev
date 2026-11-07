@@ -337,6 +337,21 @@ fn sized_numbers() {
 }
 
 #[test]
+fn computed_labels() {
+    ok("fn f(b: Bit, bits: [Bit; 3]) -> [Qubit; 5] { |{b}0{bits}> }");
+    ok("fn f(s: State) -> Qubit { |{s}> }");
+    ok("fn f(r: [Qubit; 2]) -> Bool { <{[0, 1]}| mv r }");
+    assert_eq!(
+        one_error("fn f(n: Int) -> Qubit { |{n}> }"),
+        "a computed label is a `Bit`, `State` or an array of them, not `Int`"
+    );
+    assert_eq!(
+        one_error("fn f(b: [Bit; 2]) -> Qubit { |{b}> }"),
+        "mismatched types: expected `Qubit`, found `[Qubit; 2]`"
+    );
+}
+
+#[test]
 fn type_aliases() {
     ok("type Byte = [Bit; 8]\nfn f(b: Byte) -> [Bit; 8] { b }");
     ok("type A = B\ntype B = Int\nfn f(a: A) -> Int { a + 1 }");
