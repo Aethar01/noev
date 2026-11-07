@@ -14,7 +14,7 @@
 
 ((type_identifier) @type.builtin
   (#any-of? @type.builtin
-    "Int" "Float" "Bool" "Bit" "String" "Qubit" "Observable" "Distribution"))
+    "Int" "Float" "Bool" "Bit" "String" "Qubit" "Observable" "Distribution" "Basis"))
 
 (self) @variable.builtin
 
@@ -60,7 +60,7 @@
 
 (call_expression
   function: (identifier) @function.builtin
-  (#any-of? @function.builtin "X" "Y" "Z" "I" "P" "PX" "print" "eprint" "measure" "swap"))
+  (#any-of? @function.builtin "X" "Y" "Z" "I" "P" "PX" "print" "eprint" "measure" "measure_in" "swap"))
 
 (method_identifier) @function.method.call
 

@@ -615,43 +615,63 @@ impl Document {
     /// The struct called `name`: its fields and methods, and its doc comment.
     fn describe_struct(&self, name: noev_syntax::Symbol) -> Option<(String, String)> {
         let ast = self.ast();
-        ast.all_items().iter().find_map(|item| match item.kind {
-            ItemKind::Struct {
-                name: n,
-                fields,
-                methods,
-                ..
-            } if n == name => {
-                let mut code = format!("struct {} {{\n", ast.name(name));
-                for field in ast.list(fields) {
-                    let ty = self.field_type(name, field.name).unwrap_or_default();
-                    code.push_str(&format!("    {}: {ty}\n", ast.name(field.name)));
+        ast.all_items()
+            .iter()
+            .find_map(|item| match item.kind {
+                ItemKind::Struct {
+                    name: n,
+                    fields,
+                    methods,
+                    ..
+                } if n == name => {
+                    let mut code = format!("struct {} {{\n", ast.name(name));
+                    for field in ast.list(fields) {
+                        let ty = self.field_type(name, field.name).unwrap_or_default();
+                        code.push_str(&format!("    {}: {ty}\n", ast.name(field.name)));
+                    }
+                    for &m in ast.list(methods) {
+                        code.push_str(&format!("    {}\n", self.signature(m)));
+                    }
+                    code.push('}');
+                    Some((code, self.doc_comment(item.span).unwrap_or_default()))
                 }
-                for &m in ast.list(methods) {
-                    code.push_str(&format!("    {}\n", self.signature(m)));
+                ItemKind::Enum {
+                    name: n,
+                    variants,
+                    methods,
+                    ..
+                } if n == name => {
+                    let mut code = format!("enum {} {{\n", ast.name(name));
+                    for variant in ast.list(variants) {
+                        let text =
+                            &self.text[variant.span.start as usize..variant.span.end as usize];
+                        code.push_str(&format!("    {text}\n"));
+                    }
+                    for &m in ast.list(methods) {
+                        code.push_str(&format!("    {}\n", self.signature(m)));
+                    }
+                    code.push('}');
+                    Some((code, self.doc_comment(item.span).unwrap_or_default()))
                 }
-                code.push('}');
-                Some((code, self.doc_comment(item.span).unwrap_or_default()))
-            }
-            ItemKind::Enum {
-                name: n,
-                variants,
-                methods,
-                ..
-            } if n == name => {
-                let mut code = format!("enum {} {{\n", ast.name(name));
-                for variant in ast.list(variants) {
-                    let text = &self.text[variant.span.start as usize..variant.span.end as usize];
-                    code.push_str(&format!("    {text}\n"));
-                }
-                for &m in ast.list(methods) {
-                    code.push_str(&format!("    {}\n", self.signature(m)));
-                }
-                code.push('}');
-                Some((code, self.doc_comment(item.span).unwrap_or_default()))
-            }
-            _ => None,
-        })
+                _ => None,
+            })
+            .or_else(|| {
+                // The standard library's enums.
+                let def = self
+                    .typed
+                    .types
+                    .structs
+                    .iter()
+                    .find(|d| d.name == name && d.span == Span::default())?;
+                let variants: Vec<&str> = def
+                    .variants
+                    .iter()
+                    .flatten()
+                    .map(|v| ast.name(v.name))
+                    .collect();
+                let code = format!("enum {} {{ {} }}", ast.name(name), variants.join(", "));
+                Some((code, docs::std_variant(ast.name(name), "")))
+            })
     }
 
     /// A variant of the enum `s`: its declaration and the enum's doc comment.
@@ -659,6 +679,14 @@ impl Document {
         let ast = self.ast();
         let def = &self.typed.types.structs[s.index()];
         let variant = def.variants.as_ref()?.get(index as usize)?;
+        // The standard library's enums have no place in the file.
+        if variant.span == Span::default() {
+            let code = format!("{}::{}", ast.name(def.name), ast.name(variant.name));
+            return Some((
+                code,
+                docs::std_variant(ast.name(def.name), ast.name(variant.name)),
+            ));
+        }
         let text = &self.text[variant.span.start as usize..variant.span.end as usize];
         let code = format!("{}::{text}", ast.name(def.name));
         let doc = self.doc_comment(variant.span).unwrap_or_default();
@@ -842,7 +870,8 @@ impl Document {
     /// Where variant `index` of the enum `s` is declared.
     fn variant_span(&self, s: noev_sema::ty::StructId, index: u32) -> Option<Span> {
         let def = &self.typed.types.structs[s.index()];
-        Some(def.variants.as_ref()?.get(index as usize)?.span)
+        let span = def.variants.as_ref()?.get(index as usize)?.span;
+        (span != Span::default()).then_some(span)
     }
 
     /// The enum and variant a variant pattern at `offset` names.

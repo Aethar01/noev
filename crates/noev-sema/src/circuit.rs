@@ -513,6 +513,7 @@ fn is_quantum_op(ast: &Ast, typed: &Typed, quantum: &[bool], e: ExprId) -> bool 
             Some(Callee::Builtin(
                 Builtin::Gate(_)
                 | Builtin::Measure
+                | Builtin::MeasureIn
                 | Builtin::Reset
                 | Builtin::Discard
                 | Builtin::Release,
@@ -1248,6 +1249,15 @@ impl<'a> Walker<'a> {
         let any = tainted_args.iter().any(|&(_, t)| t);
         match callee {
             Some(Callee::Builtin(Builtin::Measure)) => true,
+            // The basis decides the gates, as an angle does.
+            Some(Callee::Builtin(Builtin::MeasureIn)) => {
+                if let Some(&(arg, _)) = tainted_args.iter().find(|&&(_, t)| t)
+                    && before
+                {
+                    self.violate(ast.expr(arg).span, "used as a measurement basis");
+                }
+                true
+            }
             // `Bool(b)` and `Bit(flag)` are logic, so allowed.
             Some(Callee::Convert(Ty::BOOL | Ty::BIT)) => any,
             Some(Callee::Convert(_)) => {

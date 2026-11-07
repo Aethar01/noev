@@ -190,6 +190,10 @@ pools! {
     field_pats: FieldPat,
 }
 
+/// Names the standard library declares, interned in every file: the enum `Basis` and its
+/// variants (`spec/std.md` §2).
+pub const STD_NAMES: [&str; 4] = ["Basis", "X", "Y", "Z"];
+
 /// A parsed file.
 #[derive(Debug, Default)]
 pub struct Ast {

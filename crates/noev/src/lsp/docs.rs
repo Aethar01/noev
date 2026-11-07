@@ -13,6 +13,13 @@ pub fn builtin(b: Builtin) -> (String, String) {
             "Measures the qubit in the Z basis and consumes it. On `[Qubit; N]`, measures every \
              qubit and gives `[Bit; N]`.\n\nNot reversible. Also a free function: `measure(mv q)`.",
         ),
+        Builtin::MeasureIn => (
+            "fn measure_in(mv self, basis: Basis) -> Bit",
+            "Measures the qubit in `Basis::X`, `Basis::Y` or `Basis::Z` and consumes it: 0 for \
+             the +1 eigenstate (|0⟩, |+⟩, |+i⟩), 1 for the −1 eigenstate. On `[Qubit; N]`, \
+             measures every qubit in that basis.\n\nStandard library: a rotation into the Z \
+             basis (X: `h`; Y: `adj s`, then `h`), then `measure`. Not reversible.",
+        ),
         Builtin::Reset => (
             "fn reset(mut self) -> mut Self",
             "Returns the qubit to |0⟩; it stays usable. Not reversible.",
@@ -194,6 +201,20 @@ fn math(m: Math) -> (String, String) {
         sig.into(),
         format!("{doc} Pure, so allowed in reversible code."),
     )
+}
+
+/// The standard library's enums and their variants; `variant` is empty for the enum itself.
+pub fn std_variant(name: &str, variant: &str) -> String {
+    match (name, variant) {
+        ("Basis", "") => "A measurement basis, for `measure_in`: the eigenbasis of a Pauli \
+             operator. Standard library."
+            .into(),
+        ("Basis", v) => format!(
+            "The {v} basis, for `measure_in`: 0 for the +1 eigenstate of {v}, 1 for the −1 \
+             eigenstate."
+        ),
+        _ => String::new(),
+    }
 }
 
 /// What a keyword means, if `word` is one hover explains.

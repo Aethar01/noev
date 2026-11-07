@@ -237,7 +237,29 @@ impl Checker<'_> {
         let ast = self.ast;
         let items = ast.list(ast.root);
 
-        // Struct and enum names first, so field and parameter types can refer to any of them.
+        // The standard library's types first: `enum Basis { X, Y, Z }`. A program's own type
+        // of the same name takes the name; `measure_in` still uses this one.
+        let std_name = |text: &str| ast.symbols.get(text).expect("interned by the parser");
+        let variant = |text: &str| VariantDef {
+            name: std_name(text),
+            span: Span::default(),
+            data: Vec::new(),
+            names: Vec::new(),
+            named: false,
+        };
+        let basis = StructId(self.t.types.structs.len() as u32);
+        self.t.types.structs.push(StructDef {
+            name: std_name("Basis"),
+            span: Span::default(),
+            fields: Vec::new(),
+            variants: Some(vec![variant("X"), variant("Y"), variant("Z")]),
+        });
+        self.struct_names.insert(std_name("Basis"), basis);
+        let basis_ty = self.t.types.struct_ty(basis);
+        self.t.types.basis = Some(basis_ty);
+        let std_types = self.t.types.structs.len() as u32;
+
+        // Struct and enum names next, so field and parameter types can refer to any of them.
         for &item in items {
             let (name, name_span, is_enum) = match ast.item(item).kind {
                 ItemKind::Struct {
@@ -249,7 +271,8 @@ impl Checker<'_> {
                 _ => continue,
             };
             let id = StructId(self.t.types.structs.len() as u32);
-            if self.struct_names.insert(name, id).is_some() {
+            let earlier = self.struct_names.insert(name, id);
+            if earlier.is_some_and(|e| e.0 >= std_types) {
                 let message = format!("the type `{}` is defined twice", self.name(name));
                 self.error(name_span, message);
             }
@@ -279,7 +302,7 @@ impl Checker<'_> {
             })
             .collect();
 
-        let mut next_struct = 0;
+        let mut next_struct = std_types;
         for &item in items {
             let item = ast.item(item);
             match item.kind {

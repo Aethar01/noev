@@ -16,6 +16,9 @@ pub enum Builtin {
     Gate(Gate),
     /// `measure`, on a qubit or an array of qubits.
     Measure,
+    /// `measure_in(basis)`, on a qubit or an array of qubits. Standard library: a rotation
+    /// into the Z basis, then `measure`.
+    MeasureIn,
     /// `reset`.
     Reset,
     /// `discard`. Standard library: `reset`, then `release`.
@@ -51,6 +54,7 @@ impl Builtin {
         !matches!(
             self,
             Builtin::Measure
+                | Builtin::MeasureIn
                 | Builtin::Reset
                 | Builtin::Discard
                 | Builtin::Release
@@ -67,6 +71,7 @@ impl Builtin {
     pub fn name(self) -> &'static str {
         match self {
             Builtin::Measure => "measure",
+            Builtin::MeasureIn => "measure_in",
             Builtin::Reset => "reset",
             Builtin::Discard => "discard",
             Builtin::Release => "release",
@@ -256,6 +261,10 @@ pub fn method(types: &mut Types, base: Ty, name: &str) -> Option<(Builtin, Sig)>
                     Builtin::Measure,
                     Sig::new(Some(OwnKind::Mv), vec![], Ty::BIT, No),
                 ),
+                "measure_in" => (
+                    Builtin::MeasureIn,
+                    Sig::new(Some(OwnKind::Mv), vec![types.basis?], Ty::BIT, No),
+                ),
                 "reset" => (
                     Builtin::Reset,
                     Sig::new(Some(OwnKind::Mut), vec![], self_mut, No),
@@ -278,6 +287,13 @@ pub fn method(types: &mut Types, base: Ty, name: &str) -> Option<(Builtin, Sig)>
             Some((
                 Builtin::Measure,
                 Sig::new(Some(OwnKind::Mv), vec![], bits, No),
+            ))
+        }
+        TyKind::Array(elem, len) if elem == Ty::QUBIT && name == "measure_in" => {
+            let bits = types.array(Ty::BIT, len);
+            Some((
+                Builtin::MeasureIn,
+                Sig::new(Some(OwnKind::Mv), vec![types.basis?], bits, No),
             ))
         }
         TyKind::Float => {
@@ -350,6 +366,10 @@ pub fn function(types: &mut Types, name: &str) -> Option<(Builtin, Sig)> {
         "measure" => (
             Builtin::Measure,
             Sig::new(None, vec![Ty::QUBIT], Ty::BIT, No),
+        ),
+        "measure_in" => (
+            Builtin::MeasureIn,
+            Sig::new(None, vec![Ty::QUBIT, types.basis?], Ty::BIT, No),
         ),
         "reset" => (
             Builtin::Reset,

@@ -26,3 +26,11 @@ circuit fn takes_a_qubit(q: mut Qubit) -> Bit { //~ N021
     let r = |0>
     mv r.measure()
 }
+
+circuit fn basis_from_result() -> Bit {
+    let x = |+>
+    let m = mv x.measure()
+    let basis = if m == 1 { Basis::X } else { Basis::Z }
+    let y = |0>
+    mv y.measure_in(basis)              //~ N021
+}

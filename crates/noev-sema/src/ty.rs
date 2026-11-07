@@ -104,8 +104,10 @@ pub struct VariantDef {
 pub struct Types {
     kinds: Vec<TyKind>,
     map: FxHashMap<TyKind, Ty>,
-    /// The program's structs.
+    /// The program's structs and enums, after the standard library's.
     pub structs: Vec<StructDef>,
+    /// The standard library's `Basis` (`spec/std.md` §2).
+    pub basis: Option<Ty>,
 }
 
 macro_rules! basic {
@@ -123,6 +125,7 @@ macro_rules! basic {
                     kinds: Vec::new(),
                     map: FxHashMap::default(),
                     structs: Vec::new(),
+                    basis: None,
                 };
                 $(
                     let ty = types.intern(TyKind::$kind);

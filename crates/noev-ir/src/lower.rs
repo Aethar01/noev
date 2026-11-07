@@ -585,6 +585,16 @@ impl Builder<'_> {
         }
     }
 
+    /// A gate without angles on one qubit.
+    fn gate_on(&mut self, gate: Gate, adjoint: bool, qubit: &Place) {
+        self.push(Stmt::Gate {
+            gate,
+            adjoint,
+            qubits: vec![qubit.clone()],
+            params: Vec::new(),
+        });
+    }
+
     /// `a == b`, as a `Bool` operand.
     fn compare(&mut self, a: Operand, b: Operand) -> Operand {
         let result = self.temp(Ty::BOOL);
@@ -1432,6 +1442,70 @@ impl Builder<'_> {
                         dest,
                         qubit: target,
                     }),
+                }
+            }
+            // The standard library's `measure_in`: into the Z basis (X: `h`; Y: `adj s`, `h`),
+            // then `measure`.
+            Builtin::MeasureIn => {
+                let (Some(first), Some(&basis)) = (first, rest.first()) else {
+                    return;
+                };
+                let target = self.qubit_place(first);
+                let basis = self.operand(basis);
+                let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
+                let len = match *self.types.kind(self.types.deref(self.ty(first))) {
+                    TyKind::Array(_, len) => Some(len),
+                    _ => None,
+                };
+                let qubits: Vec<Place> = match len {
+                    Some(len) => (0..len)
+                        .map(|k| target.with(Proj::Index(Operand::Const(Const::Int(k as i64)))))
+                        .collect(),
+                    None => vec![target],
+                };
+                let tag = self.temp(Ty::INT);
+                self.assign(tag.clone(), Rvalue::Tag(basis));
+                let (x, not_x, y, measure) = (
+                    self.new_block(),
+                    self.new_block(),
+                    self.new_block(),
+                    self.new_block(),
+                );
+                let is_x = self.compare(Operand::Copy(tag.clone()), Operand::Const(Const::Int(0)));
+                self.terminate_into(
+                    Terminator::Branch {
+                        cond: is_x,
+                        then: x,
+                        otherwise: not_x,
+                        control: None,
+                    },
+                    x,
+                );
+                for q in &qubits {
+                    self.gate_on(Gate::H, false, q);
+                }
+                self.terminate_into(Terminator::Goto(measure), not_x);
+                let is_y = self.compare(Operand::Copy(tag), Operand::Const(Const::Int(1)));
+                self.terminate_into(
+                    Terminator::Branch {
+                        cond: is_y,
+                        then: y,
+                        otherwise: measure,
+                        control: None,
+                    },
+                    y,
+                );
+                for q in &qubits {
+                    self.gate_on(Gate::S, true, q);
+                    self.gate_on(Gate::H, false, q);
+                }
+                self.terminate_into(Terminator::Goto(measure), measure);
+                for (k, qubit) in qubits.into_iter().enumerate() {
+                    let dest = match len {
+                        Some(_) => dest.with(Proj::Index(Operand::Const(Const::Int(k as i64)))),
+                        None => dest.clone(),
+                    };
+                    self.push(Stmt::Measure { dest, qubit });
                 }
             }
             // The standard library's `discard`: reset, then release.

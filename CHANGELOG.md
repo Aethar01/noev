@@ -14,6 +14,8 @@ before 1.0.
 - `match`, with variant, literal (`0`, `-1`, `true`, `"text"`), tuple, array and catch-all
   patterns. Every case must be covered; arms are branches for ownership (N009). A `match` on
   a measurement result runs shot by shot for now.
+- `measure_in(Basis::X)` measures a qubit, or every qubit of an array, in the X, Y or Z
+  basis: 0 for the +1 eigenstate. `Basis` is the standard library's enum.
 
 ### Editors
 

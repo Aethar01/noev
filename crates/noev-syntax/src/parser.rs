@@ -24,11 +24,17 @@ pub struct Parsed {
 /// Lexes and parses `source`.
 pub fn parse(source: &str) -> Parsed {
     let lexed = lex(source);
+    let mut ast = Ast::default();
+    // The standard library's own names, so its types can be named in messages even when a
+    // program never mentions them.
+    for name in crate::ast::STD_NAMES {
+        ast.symbols.intern(name);
+    }
     let mut parser = Parser {
         source,
         tokens: lexed.tokens,
         pos: 0,
-        ast: Ast::default(),
+        ast,
         diagnostics: lexed.diagnostics,
         no_struct: false,
     };

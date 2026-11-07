@@ -1,0 +1,27 @@
+// `measure_in`: each basis's eigenstates measure with certainty, 0 for the +1 eigenstate.
+
+fn eigenstates(basis: Basis) -> (Bit, Bit) {
+    let plus = |0>
+    let minus = |1>
+    // Rotate |0⟩ and |1⟩ onto the basis's eigenstates.
+    match basis {
+        Basis::X => {
+            plus.h()
+            minus.h()
+        }
+        Basis::Y => {
+            plus.h().s()
+            minus.h().s()
+        }
+        Basis::Z => {}
+    }
+    (mv plus.measure_in(basis), mv minus.measure_in(basis))
+}
+
+fn main() {
+    print(eigenstates(Basis::X), eigenstates(Basis::Y), eigenstates(Basis::Z))
+    let r = |+->
+    let bits = mv r.measure_in(Basis::X)
+    print(bits)
+    print(sample 200 { let q = |->; mv q.measure_in(Basis::X) })
+}
