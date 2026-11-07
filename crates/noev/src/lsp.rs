@@ -447,10 +447,13 @@ impl Document {
             return Some(self.describe_fn(f));
         }
         // A type in a parameter's or variable's annotation, rather than the variable.
-        if let Some(name) = self.type_named_at(offset)
-            && let Some(found) = self.describe_struct(name)
-        {
-            return Some(found);
+        if let Some(name) = self.type_named_at(offset) {
+            if let Some(found) = self.describe_struct(name) {
+                return Some(found);
+            }
+            if let Some(found) = docs::builtin_type(ast.name(name)) {
+                return Some(found);
+            }
         }
         if let Some(local) = self.local_declared_at(offset) {
             return Some(self.describe_local(local));
@@ -480,6 +483,7 @@ impl Document {
                     Callee::Convert(ty) => {
                         return Some(docs::builtin(noev_sema::prelude::Builtin::Convert(ty)));
                     }
+                    Callee::TryConvert(ty) => return Some(docs::try_convert(&self.show(ty))),
                     Callee::Variant(s, index) => return self.describe_variant(s, index),
                     Callee::Fn(_) => {}
                 }

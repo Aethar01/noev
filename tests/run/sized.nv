@@ -1,0 +1,28 @@
+// Sized numbers (spec/types.md §1 and §4): their own types, checked arithmetic, conversions
+// that say whether they can fail, and measured registers read as numbers.
+
+fn checksum(data: [u8; 4]) -> u8 {
+    let mut sum: u8 = 0
+    for i in 0..4 {
+        sum = sum ^ data[i]
+    }
+    sum
+}
+
+fn main() {
+    let x: u8 = 200
+    let y: i8 = -128
+    let z: u64 = 18446744073709551615
+    print(x, y, z, x + 55, y + 1, ~x, x >> 2, x << 1)
+    print(checksum([1, 2, 4, 8]), u8(5).bits(), u8(|00000101>.measure()))
+    print(Int(z) + 1, i64(y), u16(x) * 300, u8::try_from(300), u8::try_from(-1 + 2))
+    let f: f32 = 0.1
+    let g: f64 = 0.1
+    print(f, g, f64(f), f32(g), Float(x) / 4.0)
+    print("{x:08b} {z:x} {y:+} {f:.3}")
+    print(i32(-7) / 2, i32(-7) % 2, (y + 1).abs(), x.min(10), x.max(250))
+    match x {
+        200 => print("two hundred"),
+        _ => print("other"),
+    }
+}

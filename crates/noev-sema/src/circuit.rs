@@ -1276,7 +1276,7 @@ impl<'a> Walker<'a> {
             Some(Callee::Convert(Ty::BOOL | Ty::BIT)) => any,
             // Building a variant stores its values, which the rule allows.
             Some(Callee::Variant(..)) => any,
-            Some(Callee::Convert(_)) => {
+            Some(Callee::Convert(_) | Callee::TryConvert(_)) => {
                 if any && before {
                     self.violate(ast.expr(id).span, "converted to a number");
                 }

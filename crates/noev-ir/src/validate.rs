@@ -42,6 +42,7 @@ pub fn validate(program: &Program) -> Vec<String> {
                             | Rvalue::Unary(_, op)
                             | Rvalue::Repeat(op, _)
                             | Rvalue::Convert(_, op)
+                            | Rvalue::TryConvert(_, op)
                             | Rvalue::Tag(op)
                             | Rvalue::Pauli(_, op) => check_operand(op, &mut report),
                             Rvalue::Binary(_, a, b) => {

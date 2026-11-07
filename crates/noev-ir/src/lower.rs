@@ -577,7 +577,10 @@ impl Builder<'_> {
                     ast::PatLiteral::Int(v) if self.types.deref(ty) == Ty::BIT => {
                         Operand::Const(Const::Bit(v == 1))
                     }
-                    ast::PatLiteral::Int(v) => Operand::Const(Const::Int(v)),
+                    ast::PatLiteral::Int(v) => match self.types.deref(ty).width() {
+                        Some(w) => Operand::Const(Const::Sized(i128::from(v), w)),
+                        None => Operand::Const(Const::Int(v)),
+                    },
                     ast::PatLiteral::Bool(b) => Operand::Const(Const::Bool(b)),
                     ast::PatLiteral::Str(text) => {
                         let temp = self.temp(Ty::STRING);
@@ -802,6 +805,9 @@ impl Builder<'_> {
             ExprKind::Int(v) if self.ty(id) == Ty::BIT => {
                 return Operand::Const(Const::Bit(v == 1));
             }
+            ExprKind::Int(v) if let Some(w) = self.ty(id).width() => {
+                return Operand::Const(Const::Sized(i128::from(v), w));
+            }
             ExprKind::Int(v) if let Ok(v) = i64::try_from(v) => {
                 return Operand::Const(Const::Int(v));
             }
@@ -811,6 +817,9 @@ impl Builder<'_> {
                 let text = self.text(expr.span).to_string();
                 self.assign(temp.clone(), Rvalue::BigInt(text));
                 return Operand::Copy(temp);
+            }
+            ExprKind::Float(v) if self.ty(id) == Ty::F32 => {
+                return Operand::Const(Const::F32(v as f32));
             }
             ExprKind::Float(v) => return Operand::Const(Const::Float(v)),
             ExprKind::Bool(v) => return Operand::Const(Const::Bool(v)),
@@ -1465,6 +1474,12 @@ impl Builder<'_> {
                 let op = self.operand(args[0]);
                 if let Some(dest) = dest {
                     self.assign(dest, Rvalue::Convert(target, op));
+                }
+            }
+            Callee::TryConvert(target) => {
+                let op = self.operand(args[0]);
+                if let Some(dest) = dest {
+                    self.assign(dest, Rvalue::TryConvert(target, op));
                 }
             }
             Callee::Variant(_, index) => {

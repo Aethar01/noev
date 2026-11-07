@@ -47,6 +47,26 @@ pub enum TyKind {
     Observable,
     /// `String`.
     String,
+    /// `i8`.
+    I8,
+    /// `i16`.
+    I16,
+    /// `i32`.
+    I32,
+    /// `i64`.
+    I64,
+    /// `u8`.
+    U8,
+    /// `u16`.
+    U16,
+    /// `u32`.
+    U32,
+    /// `u64`.
+    U64,
+    /// `f32`.
+    F32,
+    /// `f64`.
+    F64,
     /// `(A, B, …)`.
     Tuple(Box<[Ty]>),
     /// `[T; N]`.
@@ -129,20 +149,25 @@ macro_rules! basic {
             )*
         }
 
+        // The built-in types sit at fixed indices and are found by matching, not hashing:
+        // every check starts a table, so they must cost next to nothing.
         impl Default for Types {
             fn default() -> Self {
-                let mut types = Types {
-                    kinds: Vec::new(),
+                Types {
+                    kinds: vec![$(TyKind::$kind),*],
                     map: FxHashMap::default(),
                     structs: Vec::new(),
                     basis: None,
-                };
-                $(
-                    let ty = types.intern(TyKind::$kind);
-                    debug_assert_eq!(ty, Ty::$name);
-                )*
-                types
+                }
             }
+        }
+
+        /// The built-in type `kind` is, if it is one.
+        fn basic(kind: &TyKind) -> Option<Ty> {
+            Some(match kind {
+                $(TyKind::$kind => Ty::$name,)*
+                _ => return None,
+            })
         }
     };
 }
@@ -158,12 +183,113 @@ basic! {
     QUBIT = 7: Qubit,
     OBSERVABLE = 8: Observable,
     STRING = 9: String,
+    I8 = 10: I8,
+    I16 = 11: I16,
+    I32 = 12: I32,
+    I64 = 13: I64,
+    U8 = 14: U8,
+    U16 = 15: U16,
+    U32 = 16: U32,
+    U64 = 17: U64,
+    F32 = 18: F32,
+    F64 = 19: F64,
+}
+
+/// A sized integer type's size and signedness (`spec/types.md` §1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Width {
+    /// How many bits it has: 8, 16, 32 or 64.
+    pub bits: u32,
+    /// Whether it is signed (`i8`…`i64`) rather than unsigned (`u8`…`u64`).
+    pub signed: bool,
+}
+
+impl Width {
+    /// The smallest value.
+    pub fn min(self) -> i128 {
+        if self.signed {
+            -(1i128 << (self.bits - 1))
+        } else {
+            0
+        }
+    }
+
+    /// The largest value.
+    pub fn max(self) -> i128 {
+        if self.signed {
+            (1i128 << (self.bits - 1)) - 1
+        } else {
+            (1i128 << self.bits) - 1
+        }
+    }
+
+    /// Whether `v` is in range.
+    pub fn holds(self, v: i128) -> bool {
+        (self.min()..=self.max()).contains(&v)
+    }
+
+    /// Whether every value of `self` is a value of `other`.
+    pub fn fits_in(self, other: Width) -> bool {
+        other.min() <= self.min() && self.max() <= other.max()
+    }
+
+    /// Its name: `u8`, `i64`.
+    pub fn name(self) -> String {
+        format!("{}{}", if self.signed { 'i' } else { 'u' }, self.bits)
+    }
+}
+
+impl Ty {
+    /// The sized integer type's width, if it is one.
+    pub fn width(self) -> Option<Width> {
+        let (bits, signed) = match self {
+            Ty::I8 => (8, true),
+            Ty::I16 => (16, true),
+            Ty::I32 => (32, true),
+            Ty::I64 => (64, true),
+            Ty::U8 => (8, false),
+            Ty::U16 => (16, false),
+            Ty::U32 => (32, false),
+            Ty::U64 => (64, false),
+            _ => return None,
+        };
+        Some(Width { bits, signed })
+    }
+
+    /// The sized integer type of `width`.
+    pub fn of_width(width: Width) -> Ty {
+        match (width.bits, width.signed) {
+            (8, true) => Ty::I8,
+            (16, true) => Ty::I16,
+            (32, true) => Ty::I32,
+            (64, true) => Ty::I64,
+            (8, false) => Ty::U8,
+            (16, false) => Ty::U16,
+            (32, false) => Ty::U32,
+            _ => Ty::U64,
+        }
+    }
+
+    /// Whether it is `Int` or a sized integer.
+    pub fn is_integer(self) -> bool {
+        self == Ty::INT || self.width().is_some()
+    }
+
+    /// Whether it is `Float`, `f32` or `f64`.
+    pub fn is_float(self) -> bool {
+        matches!(self, Ty::FLOAT | Ty::F32 | Ty::F64)
+    }
+
+    /// Whether it is a number: an integer or a float.
+    pub fn is_number(self) -> bool {
+        self.is_integer() || self.is_float()
+    }
 }
 
 impl Types {
     /// The type for `kind`, creating it if needed.
     pub fn intern(&mut self, kind: TyKind) -> Ty {
-        if let Some(&ty) = self.map.get(&kind) {
+        if let Some(ty) = basic(&kind).or_else(|| self.map.get(&kind).copied()) {
             return ty;
         }
         let ty = Ty(u32::try_from(self.kinds.len()).expect("fewer than 2³² types"));
@@ -174,7 +300,7 @@ impl Types {
 
     /// The type for `kind`, if one exists.
     pub fn find(&self, kind: &TyKind) -> Option<Ty> {
-        self.map.get(kind).copied()
+        basic(kind).or_else(|| self.map.get(kind).copied())
     }
 
     /// What `ty` is.
@@ -285,6 +411,7 @@ impl Types {
         }
         match *self.kind(ty) {
             TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Bit | TyKind::String => true,
+            _ if ty.is_number() => true,
             TyKind::Struct(id) => match &self.structs[id.index()].variants {
                 Some(variants) => variants
                     .iter()
@@ -338,6 +465,16 @@ impl Types {
             TyKind::Qubit => "Qubit".into(),
             TyKind::Observable => "Observable".into(),
             TyKind::String => "String".into(),
+            TyKind::I8
+            | TyKind::I16
+            | TyKind::I32
+            | TyKind::I64
+            | TyKind::U8
+            | TyKind::U16
+            | TyKind::U32
+            | TyKind::U64 => ty.width().expect("a sized integer").name(),
+            TyKind::F32 => "f32".into(),
+            TyKind::F64 => "f64".into(),
             TyKind::Tuple(elems) => {
                 let elems: Vec<String> = elems.iter().map(|&t| self.display(t, ast)).collect();
                 if elems.len() == 1 {

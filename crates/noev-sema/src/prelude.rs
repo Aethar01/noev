@@ -182,6 +182,8 @@ pub enum Math {
     Round,
     Floor,
     Ceil,
+    /// `x.bits()` on an unsigned integer: its bits, most significant first.
+    Bits,
 }
 
 /// A `Float` constant.
@@ -241,6 +243,16 @@ pub fn builtin_type(name: &str) -> Option<Ty> {
         "Qubit" => Ty::QUBIT,
         "Observable" => Ty::OBSERVABLE,
         "String" => Ty::STRING,
+        "i8" => Ty::I8,
+        "i16" => Ty::I16,
+        "i32" => Ty::I32,
+        "i64" => Ty::I64,
+        "u8" => Ty::U8,
+        "u16" => Ty::U16,
+        "u32" => Ty::U32,
+        "u64" => Ty::U64,
+        "f32" => Ty::F32,
+        "f64" => Ty::F64,
         _ => return None,
     })
 }
@@ -296,22 +308,24 @@ pub fn method(types: &mut Types, base: Ty, name: &str) -> Option<(Builtin, Sig)>
                 Sig::new(Some(OwnKind::Mv), vec![types.basis?], bits, No),
             ))
         }
-        TyKind::Float => {
+        // `Float`, `f32` and `f64` have the same methods, each on its own type.
+        TyKind::Float | TyKind::F32 | TyKind::F64 => {
             use Math::*;
+            let f = base;
             let (math, params, ret) = match name {
-                "sin" => (Sin, vec![], Ty::FLOAT),
-                "cos" => (Cos, vec![], Ty::FLOAT),
-                "tan" => (Tan, vec![], Ty::FLOAT),
-                "asin" => (Asin, vec![], Ty::FLOAT),
-                "acos" => (Acos, vec![], Ty::FLOAT),
-                "atan" => (Atan, vec![], Ty::FLOAT),
-                "atan2" => (Atan2, vec![Ty::FLOAT], Ty::FLOAT),
-                "sqrt" => (Sqrt, vec![], Ty::FLOAT),
-                "exp" => (Exp, vec![], Ty::FLOAT),
-                "ln" => (Ln, vec![], Ty::FLOAT),
-                "abs" => (Abs, vec![], Ty::FLOAT),
-                "min" => (Min, vec![Ty::FLOAT], Ty::FLOAT),
-                "max" => (Max, vec![Ty::FLOAT], Ty::FLOAT),
+                "sin" => (Sin, vec![], f),
+                "cos" => (Cos, vec![], f),
+                "tan" => (Tan, vec![], f),
+                "asin" => (Asin, vec![], f),
+                "acos" => (Acos, vec![], f),
+                "atan" => (Atan, vec![], f),
+                "atan2" => (Atan2, vec![f], f),
+                "sqrt" => (Sqrt, vec![], f),
+                "exp" => (Exp, vec![], f),
+                "ln" => (Ln, vec![], f),
+                "abs" => (Abs, vec![], f),
+                "min" => (Min, vec![f], f),
+                "max" => (Max, vec![f], f),
                 "trunc" => (Trunc, vec![], Ty::INT),
                 "round" => (Round, vec![], Ty::INT),
                 "floor" => (Floor, vec![], Ty::INT),
@@ -336,16 +350,20 @@ pub fn method(types: &mut Types, base: Ty, name: &str) -> Option<(Builtin, Sig)>
                 Sig::new(Some(OwnKind::Ref), params, ret, Yes),
             ))
         }
-        TyKind::Int => {
-            let (math, params) = match name {
-                "abs" => (Math::Abs, vec![]),
-                "min" => (Math::Min, vec![Ty::INT]),
-                "max" => (Math::Max, vec![Ty::INT]),
+        _ if base.is_integer() => {
+            let (math, params, ret) = match name {
+                "abs" if base.width().is_none_or(|w| w.signed) => (Math::Abs, vec![], base),
+                "min" => (Math::Min, vec![base], base),
+                "max" => (Math::Max, vec![base], base),
+                "bits" if base.width().is_some_and(|w| !w.signed) => {
+                    let bits = base.width().expect("checked").bits;
+                    (Math::Bits, vec![], types.array(Ty::BIT, u64::from(bits)))
+                }
                 _ => return None,
             };
             Some((
                 Builtin::Math(math),
-                Sig::new(Some(OwnKind::Ref), params, Ty::INT, Yes),
+                Sig::new(Some(OwnKind::Ref), params, ret, Yes),
             ))
         }
         _ => None,
@@ -420,14 +438,21 @@ pub fn constant(ty: Ty, name: &str) -> Option<Builtin> {
 }
 
 /// Whether `target(x)` converts a value of type `from` (`spec/types.md` §4).
-pub fn converts(from: Ty, target: Ty) -> bool {
+pub fn converts(types: &Types, from: Ty, target: Ty) -> bool {
+    let logic = matches!(from, Ty::BIT | Ty::BOOL);
+    let exact_int = match (from.width(), target.width()) {
+        (Some(a), Some(b)) => a.fits_in(b),
+        (Some(_) | None, None) => target == Ty::INT && (from.is_integer() || logic),
+        (None, Some(_)) => logic,
+    };
+    // A measured register as a number: `u8(bits)` from a `[Bit; 8]`.
+    let bits = match (types.kind(from), target.width()) {
+        (&TyKind::Array(Ty::BIT, len), Some(w)) => !w.signed && len == u64::from(w.bits),
+        _ => false,
+    };
     from == target
-        || matches!(
-            (from, target),
-            (Ty::INT, Ty::FLOAT)
-                | (Ty::BIT, Ty::BOOL)
-                | (Ty::BOOL, Ty::BIT)
-                | (Ty::BIT, Ty::INT)
-                | (Ty::BOOL, Ty::INT)
-        )
+        || exact_int
+        || bits
+        || (target.is_float() && (from.is_number()))
+        || matches!((from, target), (Ty::BIT, Ty::BOOL) | (Ty::BOOL, Ty::BIT))
 }

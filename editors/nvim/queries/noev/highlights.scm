@@ -15,7 +15,9 @@
 ((type_identifier) @type.builtin
   (#any-of? @type.builtin
     "Int" "Float" "Bool" "Bit" "String" "Qubit" "Observable" "Distribution" "Basis"
-    "Option" "Result"))
+    "Option" "Result"
+    "i8" "i16" "i32" "i64" "u8" "u16" "u32" "u64" "f32" "f64"))
+
 
 (self) @variable.builtin
 
@@ -218,3 +220,8 @@
 ; The variants of `Option` and `Result`, named alone; last, so they win over calls.
 ((identifier) @constant.builtin
   (#any-of? @constant.builtin "Some" "None" "Ok" "Err"))
+
+; Sized number types called as conversions; last, so they win over calls: `u8(x)`, `u8::try_from(x)`.
+((identifier) @type.builtin
+  (#any-of? @type.builtin
+    "i8" "i16" "i32" "i64" "u8" "u16" "u32" "u64" "f32" "f64"))

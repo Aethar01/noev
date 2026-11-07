@@ -1206,7 +1206,7 @@ impl Owner<'_> {
         };
         let ok = match callee {
             Callee::Builtin(b) => b.reversible(),
-            Callee::Convert(_) => true,
+            Callee::Convert(_) | Callee::TryConvert(_) => true,
             Callee::Variant(..) => false,
             Callee::Fn(f) => match self.typed.fns[f.index()].sig.reversible {
                 Reversible::Yes => true,
@@ -1556,7 +1556,9 @@ impl Owner<'_> {
         let Some(callee) = callee else { return };
         let (is_unsafe, reversible, name) = match callee {
             Callee::Builtin(b) => (b.is_unsafe(), b.reversible(), b.name().to_string()),
-            Callee::Convert(_) | Callee::Variant(..) => (false, true, String::new()),
+            Callee::Convert(_) | Callee::TryConvert(_) | Callee::Variant(..) => {
+                (false, true, String::new())
+            }
             Callee::Fn(f) => {
                 let sig = &self.typed.fns[f.index()].sig;
                 let reversible = match sig.reversible {

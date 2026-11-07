@@ -13,6 +13,10 @@ pub enum Value {
     Unit,
     /// An `Int`.
     Int(Int),
+    /// A sized integer (`u8`…`i64`), always in range for its width.
+    Sized(i128, noev_sema::ty::Width),
+    /// An `f32`.
+    F32(f32),
     /// A `Float`.
     Float(f64),
     /// A `Bool`.
@@ -239,6 +243,8 @@ impl fmt::Display for Value {
         match self {
             Value::Unit => write!(f, "()"),
             Value::Int(v) => write!(f, "{v}"),
+            Value::Sized(v, _) => write!(f, "{v}"),
+            Value::F32(v) => write!(f, "{v:?}"),
             Value::Float(v) => write!(f, "{v:?}"),
             Value::Bool(v) => write!(f, "{v}"),
             Value::Bit(v) => write!(f, "{}", u8::from(*v)),

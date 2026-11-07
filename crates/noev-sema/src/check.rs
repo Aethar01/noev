@@ -63,6 +63,8 @@ pub enum Callee {
     Builtin(Builtin),
     /// A conversion, such as `Float(n)`.
     Convert(Ty),
+    /// A conversion that can fail, such as `u8::try_from(n)`: a `Result<T, String>`.
+    TryConvert(Ty),
     /// An enum variant with values, such as `Outcome::Success(b)`.
     Variant(StructId, u32),
 }
@@ -196,6 +198,7 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         loops: 0,
         runs: 0,
         lent_bindings: None,
+        negating: false,
         std_enums: FxHashMap::default(),
         aliases: FxHashMap::default(),
         alias_types: FxHashMap::default(),
@@ -225,6 +228,8 @@ struct Checker<'a> {
     runs: u32,
     /// While binding a `match` arm's pattern on a lent value: whether the lend is `mut`.
     lent_bindings: Option<bool>,
+    /// While checking the operand of `-`: a literal there may reach a signed type's minimum.
+    negating: bool,
     /// The `Option` and `Result` types made so far, by name and type arguments.
     std_enums: FxHashMap<(Symbol, Vec<Ty>), StructId>,
     /// Type aliases: the type each names, and where its name is.
@@ -859,7 +864,11 @@ impl Checker<'_> {
             PatKind::Literal(literal) => {
                 let fits = match literal {
                     _ if self.t.types.is_wildcard(ty) => true,
-                    PatLiteral::Int(v) => ty == Ty::INT || (ty == Ty::BIT && (v == 0 || v == 1)),
+                    PatLiteral::Int(v) => {
+                        ty == Ty::INT
+                            || (ty == Ty::BIT && (v == 0 || v == 1))
+                            || ty.width().is_some_and(|w| w.holds(i128::from(v)))
+                    }
                     PatLiteral::Bool(_) => ty == Ty::BOOL,
                     PatLiteral::Str(_) => ty == Ty::STRING,
                 };
@@ -1178,16 +1187,12 @@ impl Checker<'_> {
         let expr = *ast.expr(id);
         match expr.kind {
             ExprKind::Error => Ty::ERROR,
-            ExprKind::Int(value) => {
-                let wants_bit = expect.ty().map(|t| self.t.types.deref(t)) == Some(Ty::BIT);
-                if wants_bit && value <= 1 {
-                    Ty::BIT
-                } else {
-                    Ty::INT
-                }
-            }
-            ExprKind::BigInt => Ty::INT,
-            ExprKind::Float(_) => Ty::FLOAT,
+            ExprKind::Int(value) => self.int_literal(Some(value), expect, expr.span),
+            ExprKind::BigInt => self.int_literal(None, expect, expr.span),
+            ExprKind::Float(_) => match expect.ty().map(|t| self.t.types.deref(t)) {
+                Some(t @ (Ty::F32 | Ty::F64)) => t,
+                _ => Ty::FLOAT,
+            },
             ExprKind::Str(parts) => self.string(parts),
             ExprKind::Bool(_) => Ty::BOOL,
             ExprKind::Ket { qubits } => {
@@ -1296,11 +1301,19 @@ impl Checker<'_> {
             } => self.method_call(id, receiver, method, args, expr.span),
             ExprKind::Unary { op, operand } => {
                 let hint = expect.ty().map_or(Expect::None, Expect::Hint);
+                // `-128` is an `i8` although `128` alone is not.
+                self.negating = op == UnaryOp::Neg
+                    && matches!(ast.expr(operand).kind, ExprKind::Int(_) | ExprKind::BigInt);
                 let ty = self.expr(operand, hint);
+                self.negating = false;
                 let ty = self.t.types.deref(ty);
                 let ok = match op {
-                    UnaryOp::Neg => matches!(ty, Ty::INT | Ty::FLOAT | Ty::OBSERVABLE),
-                    UnaryOp::BitNot => matches!(ty, Ty::INT | Ty::BIT),
+                    UnaryOp::Neg => {
+                        matches!(ty, Ty::INT | Ty::OBSERVABLE)
+                            || ty.is_float()
+                            || ty.width().is_some_and(|w| w.signed)
+                    }
+                    UnaryOp::BitNot => ty.is_integer() || ty == Ty::BIT,
                     UnaryOp::Not => ty == Ty::BOOL,
                 };
                 if ok || self.t.types.is_wildcard(ty) {
@@ -1317,13 +1330,22 @@ impl Checker<'_> {
                 }
             }
             ExprKind::Binary { op, lhs, rhs } => {
-                // Type a literal side from the other side, so `m == 1` with `m: Bit` works.
-                let (lhs_ty, rhs_ty) = if matches!(ast.expr(lhs).kind, ExprKind::Int(_)) {
-                    let rhs_ty = self.expr(rhs, Expect::None);
+                // Type a literal side from the other side, so `m == 1` with `m: Bit` and
+                // `x + 1` with `x: u8` work; arithmetic also takes the type expected of it,
+                // so `let y: u8 = 1 + 2` does.
+                use BinaryOp::*;
+                let arithmetic = !matches!(op, Eq | NotEq | Lt | Le | Gt | Ge | And | Or);
+                let outer = expect
+                    .ty()
+                    .map(|t| self.t.types.deref(t))
+                    .filter(|&t| arithmetic && (t.is_number() || t == Ty::BIT))
+                    .map_or(Expect::None, Expect::Hint);
+                let (lhs_ty, rhs_ty) = if self.is_literal(lhs) {
+                    let rhs_ty = self.expr(rhs, outer);
                     let hint = self.t.types.deref(rhs_ty);
                     (self.expr(lhs, Expect::Hint(hint)), rhs_ty)
                 } else {
-                    let lhs_ty = self.expr(lhs, Expect::None);
+                    let lhs_ty = self.expr(lhs, outer);
                     let hint = self.t.types.deref(lhs_ty);
                     (lhs_ty, self.expr(rhs, Expect::Hint(hint)))
                 };
@@ -1856,6 +1878,47 @@ impl Checker<'_> {
         }
     }
 
+    /// An integer literal: `value`, or one too large for a `u64`. It is the sized integer or
+    /// `Bit` expected, if it fits, and otherwise an `Int`.
+    fn int_literal(&mut self, value: Option<u64>, expect: Expect, span: Span) -> Ty {
+        let want = expect.ty().map(|t| self.t.types.deref(t));
+        if want == Some(Ty::BIT) && value.is_some_and(|v| v <= 1) {
+            return Ty::BIT;
+        }
+        let Some((ty, width)) = want.and_then(|t| Some((t, t.width()?))) else {
+            return Ty::INT;
+        };
+        // After `-`, a signed type's minimum: `-128` as an `i8`.
+        let limit = if self.negating {
+            -width.min()
+        } else {
+            width.max()
+        };
+        if value.is_none_or(|v| i128::from(v) > limit) {
+            let message = format!(
+                "this literal does not fit in `{}`, which holds {} to {}",
+                width.name(),
+                width.min(),
+                width.max()
+            );
+            self.error(span, message);
+        }
+        ty
+    }
+
+    /// Whether `id` is a number literal, maybe negated, which takes its type from the other
+    /// side of an operator.
+    fn is_literal(&self, id: ExprId) -> bool {
+        match self.ast.expr(id).kind {
+            ExprKind::Int(_) | ExprKind::BigInt | ExprKind::Float(_) => true,
+            ExprKind::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => self.is_literal(operand),
+            _ => false,
+        }
+    }
+
     /// Whether `id` names a place: a variable, or a field or element of one.
     fn is_place(&self, id: ExprId) -> bool {
         match self.ast.expr(id).kind {
@@ -1903,32 +1966,25 @@ impl Checker<'_> {
         let result = match op {
             Or | And => (lhs == Ty::BOOL && rhs == Ty::BOOL).then_some(Ty::BOOL),
             Eq | NotEq => (lhs == rhs && self.t.types.is_comparable(lhs)).then_some(Ty::BOOL),
-            Lt | Le | Gt | Ge => {
-                (lhs == rhs && matches!(lhs, Ty::INT | Ty::FLOAT)).then_some(Ty::BOOL)
-            }
+            Lt | Le | Gt | Ge => (lhs == rhs && lhs.is_number()).then_some(Ty::BOOL),
             BitOr | BitXor | BitAnd => {
-                (lhs == rhs && matches!(lhs, Ty::INT | Ty::BIT)).then_some(lhs)
+                (lhs == rhs && (lhs.is_integer() || lhs == Ty::BIT)).then_some(lhs)
             }
-            Shl | Shr => (lhs == Ty::INT && rhs == Ty::INT).then_some(Ty::INT),
+            // The shift amount is the same type, or an `Int`.
+            Shl | Shr => (lhs.is_integer() && (rhs == lhs || rhs == Ty::INT)).then_some(lhs),
             Add | Sub => match (lhs, rhs) {
-                (Ty::INT, Ty::INT) => Some(Ty::INT),
-                (Ty::FLOAT, Ty::FLOAT) => Some(Ty::FLOAT),
+                (a, b) if a == b && a.is_number() => Some(a),
                 (Ty::OBSERVABLE, Ty::OBSERVABLE) => Some(Ty::OBSERVABLE),
                 _ => None,
             },
             Mul => match (lhs, rhs) {
-                (Ty::INT, Ty::INT) => Some(Ty::INT),
-                (Ty::FLOAT, Ty::FLOAT) => Some(Ty::FLOAT),
+                (a, b) if a == b && a.is_number() => Some(a),
                 (Ty::OBSERVABLE | Ty::FLOAT, Ty::OBSERVABLE) | (Ty::OBSERVABLE, Ty::FLOAT) => {
                     Some(Ty::OBSERVABLE)
                 }
                 _ => None,
             },
-            Div | Rem => match (lhs, rhs) {
-                (Ty::INT, Ty::INT) => Some(Ty::INT),
-                (Ty::FLOAT, Ty::FLOAT) => Some(Ty::FLOAT),
-                _ => None,
-            },
+            Div | Rem => (lhs == rhs && lhs.is_number()).then_some(lhs),
         };
         if let Some(ty) = result {
             return ty;
@@ -1943,6 +1999,10 @@ impl Checker<'_> {
         if matches!((lhs, rhs), (Ty::INT, Ty::FLOAT) | (Ty::FLOAT, Ty::INT)) {
             diagnostic.help = Some(
                 "Noev does not convert between `Int` and `Float` implicitly; use `Float(n)` or a float literal such as `2.0`".into(),
+            );
+        } else if lhs.is_number() && rhs.is_number() {
+            diagnostic.help = Some(
+                "Noev does not convert between number types implicitly; convert one side, as in `i64(x)` or `Int(x)`".into(),
             );
         }
         match op {
@@ -2010,6 +2070,13 @@ impl Checker<'_> {
                 {
                     let path = self.path_text(segments);
                     return self.variant_call(id, ty, index, &path, args, span);
+                }
+                if let [ty_name, name] = *ast.list(segments)
+                    && let Some(target) = self.path_type(ty_name)
+                    && target.width().is_some()
+                    && self.name(name) == "try_from"
+                {
+                    return self.try_conversion(id, target, args, span);
                 }
                 if let [ty_name, name] = *ast.list(segments)
                     && let Some(ty) = self.path_type(ty_name)
@@ -2317,22 +2384,54 @@ impl Checker<'_> {
             self.skip_args(args);
             return target;
         };
-        let ty = self.expr(arg, Expect::None);
+        // A literal takes the target type when it fits: `u8(5)`.
+        let ty = self.expr(arg, Expect::Hint(target));
         let from = self.t.types.deref(ty);
-        if !self.t.types.is_wildcard(from) && !prelude::converts(from, target) {
+        if !self.t.types.is_wildcard(from) && !prelude::converts(&self.t.types, from, target) {
             let message = format!(
                 "{} cannot be converted to {}",
                 self.show(from),
                 self.show(target)
             );
-            let diagnostic = self.error(span, message);
-            if from == Ty::FLOAT && target == Ty::INT {
-                diagnostic.help = Some(
-                    "say how to round: `x.trunc()`, `x.round()`, `x.floor()` or `x.ceil()`".into(),
-                );
-            }
+            let help = if from.is_float() && target.is_integer() {
+                Some("say how to round: `x.trunc()`, `x.round()`, `x.floor()` or `x.ceil()`".into())
+            } else if from.is_integer() && target.width().is_some() {
+                let name = self.t.types.display(target, self.ast);
+                Some(format!(
+                    "not every value fits; `{name}::try_from(x)` gives a `Result` that says whether it did"
+                ))
+            } else {
+                None
+            };
+            self.error(span, message).help = help;
         }
         target
+    }
+
+    /// `u8::try_from(n)`: any integer to a sized integer, as a `Result` (`spec/types.md` §4).
+    fn try_conversion(&mut self, id: ExprId, target: Ty, args: &[ExprId], span: Span) -> Ty {
+        self.t.callees[id.index()] = Some(Callee::TryConvert(target));
+        let result = self.std_enum(vec![target, Ty::STRING]);
+        let name = self.show(target);
+        let [arg] = *args else {
+            let message = format!("{name}::try_from takes one value to convert");
+            self.error(span, message);
+            self.skip_args(args);
+            return result;
+        };
+        let ty = self.expr(arg, Expect::None);
+        let from = self.t.types.deref(ty);
+        if !self.t.types.is_wildcard(from) && !from.is_integer() {
+            let message = format!(
+                "only integers convert with `try_from`, not {}",
+                self.show(from)
+            );
+            let diagnostic = self.error(span, message);
+            if from.is_float() {
+                diagnostic.help = Some("round it first, as in `x.round()`".into());
+            }
+        }
+        result
     }
 
     /// `sample n { … }`: a `Distribution` of the block's results, with returned qubits
@@ -2421,17 +2520,17 @@ impl Checker<'_> {
             if self.t.types.is_wildcard(ty) {
                 continue;
             }
-            let numeric = matches!(ty, Ty::INT | Ty::FLOAT);
+            let numeric = ty.is_number();
             let problem = match spec.kind {
-                Some(FormatKind::Exponent) if ty != Ty::FLOAT => Some("`e` applies to `Float`"),
+                Some(FormatKind::Exponent) if !ty.is_float() => Some("`e` applies to floats"),
                 Some(
                     FormatKind::Binary | FormatKind::Octal | FormatKind::Hex | FormatKind::HexUpper,
-                ) if ty != Ty::INT => Some("`b`, `o`, `x` and `X` apply to `Int`"),
-                _ if spec.precision.is_some() && ty != Ty::FLOAT => {
-                    Some("a precision applies to `Float`")
+                ) if !ty.is_integer() => Some("`b`, `o`, `x` and `X` apply to integers"),
+                _ if spec.precision.is_some() && !ty.is_float() => {
+                    Some("a precision applies to floats")
                 }
-                _ if spec.plus && !numeric => Some("`+` applies to `Int` and `Float`"),
-                _ if spec.zero && !numeric => Some("`0` padding applies to `Int` and `Float`"),
+                _ if spec.plus && !numeric => Some("`+` applies to numbers"),
+                _ if spec.zero && !numeric => Some("`0` padding applies to numbers"),
                 _ => None,
             };
             if let Some(problem) = problem {

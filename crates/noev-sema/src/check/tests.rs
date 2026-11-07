@@ -301,6 +301,41 @@ fn literals_of_any_size() {
 }
 
 #[test]
+fn sized_numbers() {
+    ok("fn f(x: u8) -> u8 { x + 1 }");
+    ok("fn f() -> i8 { -128 }");
+    ok("fn f() -> u8 { let y: u8 = 1 + 2\n y << 3 }");
+    ok("fn f(x: u8) -> Int { Int(x) + Int(i64(-1)) + Int(u16(x)) }");
+    ok("fn f(bits: [Bit; 8]) -> [Bit; 8] { u8(bits).bits() }");
+    ok("fn f(n: Int) -> Bool { match u8::try_from(n) { Ok(_) => true, Err(_) => false } }");
+    ok("fn f(x: f32) -> f64 { f64(x.sqrt()) + 1.0 }");
+    assert_eq!(
+        one_error("fn f() -> u8 { 256 }"),
+        "this literal does not fit in `u8`, which holds 0 to 255"
+    );
+    assert_eq!(
+        one_error("fn f() -> i8 { 128 }"),
+        "this literal does not fit in `i8`, which holds -128 to 127"
+    );
+    assert_eq!(
+        one_error("fn f(a: u8, b: u16) -> u16 { a + b }"),
+        "`+` cannot be applied to `u8` and `u16`"
+    );
+    assert_eq!(
+        one_error("fn f(a: u8) -> u8 { -a }"),
+        "`-` cannot be applied to `u8`"
+    );
+    assert_eq!(
+        one_error("fn f(a: u16) -> u8 { u8(a) }"),
+        "`u16` cannot be converted to `u8`"
+    );
+    assert_eq!(
+        one_error("fn f(x: Float) -> u8 { match u8::try_from(x) { Ok(v) => v, Err(_) => 0 } }"),
+        "only integers convert with `try_from`, not `Float`"
+    );
+}
+
+#[test]
 fn type_aliases() {
     ok("type Byte = [Bit; 8]\nfn f(b: Byte) -> [Bit; 8] { b }");
     ok("type A = B\ntype B = Int\nfn f(a: A) -> Int { a + 1 }");

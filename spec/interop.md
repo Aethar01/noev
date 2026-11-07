@@ -25,6 +25,8 @@ written.
 | ------------------------ | ---------------------------- | -------------------- | --------------- |
 | `Int`                    | `i64`, checked               | `int64_t`, checked   | `int`           |
 | `Float`                  | `f64`                        | `double`             | `float`         |
+| `i8`…`i64`, `u8`…`u64`   | the same                     | `int8_t`…`uint64_t`  | `int`           |
+| `f32`, `f64`             | the same                     | `float`, `double`    | `float`         |
 | `Bool`                   | `bool`                       | `bool`               | `bool`          |
 | `Bit`                    | `noev::Bit`                  | `uint8_t` (0 or 1)   | `int` (0 or 1)  |
 | `()`                     | `()`                         | `void`               | `None`          |

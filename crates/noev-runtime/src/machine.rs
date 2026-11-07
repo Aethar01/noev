@@ -23,6 +23,7 @@ use std::rc::Rc;
 use crate::backend::{Backend, BackendError, Circuit, Condition, Instruction, Op, Session};
 use crate::format;
 use crate::int::Int;
+use crate::sized;
 use crate::value::{Observable, Pauli, Pointer, Value};
 
 /// Where a program's output goes.
@@ -687,6 +688,8 @@ impl Machine<'_> {
             Operand::Const(c) => Ok(match *c {
                 Const::Unit => Value::Unit,
                 Const::Int(v) => Value::Int(Int::from(v)),
+                Const::Sized(v, w) => Value::Sized(v, w),
+                Const::F32(v) => Value::F32(v),
                 Const::Float(v) => Value::Float(v),
                 Const::Bool(v) => Value::Bool(v),
                 Const::Bit(v) => Value::Bit(v),
@@ -1084,6 +1087,10 @@ impl Machine<'_> {
                 Value::Cond(Rc::new(condition), *target == Ty::BIT)
             }
             Rvalue::Convert(target, op) => convert(*target, self.value(op)?)?,
+            Rvalue::TryConvert(target, op) => {
+                let width = target.width().expect("checked: a sized integer");
+                sized::try_from(&self.value(op)?, width)?
+            }
             Rvalue::Math(math, ops) => {
                 let args = ops
                     .iter()
@@ -1183,6 +1190,9 @@ fn unary(op: UnOp, x: Value) -> Result<Value> {
     Ok(match (op, x) {
         (UnOp::Neg, Value::Int(v)) => Value::Int(v.neg()),
         (UnOp::Neg, Value::Float(v)) => Value::Float(-v),
+        (UnOp::Neg, Value::F32(v)) => Value::F32(-v),
+        (UnOp::Neg, Value::Sized(v, w)) => sized::neg(v, w)?,
+        (UnOp::BitNot, Value::Sized(v, w)) => sized::not(v, w),
         (UnOp::Neg, Value::Observable(o)) => Value::Observable(o.scale(-1.0)),
         (UnOp::BitNot, Value::Int(v)) => Value::Int(v.not()),
         (UnOp::BitNot, Value::Bit(v)) => Value::Bit(!v),
@@ -1227,6 +1237,21 @@ fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
             Gt => Value::Bool(a > b),
             Ge => Value::Bool(a >= b),
             And | Or => return Err(RuntimeError::new("logic on Int")),
+        },
+        (Value::Sized(a, w), b) => sized::binary(op, a, w, &b)?,
+        (Value::F32(a), Value::F32(b)) => match op {
+            Add => Value::F32(a + b),
+            Sub => Value::F32(a - b),
+            Mul => Value::F32(a * b),
+            Div => Value::F32(a / b),
+            Rem => Value::F32(a % b),
+            Eq => Value::Bool(a == b),
+            NotEq => Value::Bool(a != b),
+            Lt => Value::Bool(a < b),
+            Le => Value::Bool(a <= b),
+            Gt => Value::Bool(a > b),
+            Ge => Value::Bool(a >= b),
+            _ => return Err(RuntimeError::new(format!("{} on f32", op.as_str()))),
         },
         (Value::Float(a), Value::Float(b)) => match op {
             Add => Value::Float(a + b),
@@ -1287,10 +1312,30 @@ fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
     })
 }
 
+/// A conversion the checker allowed (`spec/types.md` §4).
 fn convert(target: Ty, value: Value) -> Result<Value> {
+    let float = |value: &Value| match *value {
+        Value::Int(ref v) => Some(v.to_f64()),
+        Value::Sized(v, _) => Some(v as f64),
+        Value::Float(v) => Some(v),
+        Value::F32(v) => Some(f64::from(v)),
+        _ => None,
+    };
     Ok(match (target, value) {
-        (Ty::FLOAT, Value::Int(v)) => Value::Float(v.to_f64()),
+        // `f64` values are `Float`s.
+        (Ty::FLOAT | Ty::F64, value) if let Some(x) = float(&value) => Value::Float(x),
+        // Rounded to nearest, from a value already a float or an exact one otherwise.
+        (Ty::F32, Value::Sized(v, _)) => Value::F32(v as f32),
+        (Ty::F32, value) if let Some(x) = float(&value) => Value::F32(x as f32),
         (Ty::INT, Value::Bit(v) | Value::Bool(v)) => Value::Int(Int::from(i64::from(v))),
+        (Ty::INT, Value::Sized(v, _)) => Value::Int(sized::to_int(v)),
+        (target, Value::Sized(v, _)) if let Some(w) = target.width() => Value::Sized(v, w),
+        (target, Value::Bit(v) | Value::Bool(v)) if let Some(w) = target.width() => {
+            Value::Sized(i128::from(v), w)
+        }
+        (target, Value::Aggregate(bits)) if let Some(w) = target.width() => {
+            sized::from_bits(&bits, w)?
+        }
         (Ty::BIT, Value::Bool(v)) => Value::Bit(v),
         (Ty::BOOL, Value::Bit(v)) => Value::Bool(v),
         (_, value) => value,
@@ -1310,6 +1355,37 @@ fn maths(math: Math, args: &[Value]) -> Result<Value> {
             .map(Value::Int)
             .ok_or_else(|| RuntimeError::new(format!("cannot convert {x} to an Int")))
     };
+    // `f32` maths is `Float` maths, rounded back.
+    if let Some(Value::F32(_)) = args.first() {
+        let widened: Vec<Value> = args
+            .iter()
+            .map(|a| match *a {
+                Value::F32(v) => Value::Float(f64::from(v)),
+                ref other => other.clone(),
+            })
+            .collect();
+        return Ok(match maths(math, &widened)? {
+            Value::Float(v) => Value::F32(v as f32),
+            other => other,
+        });
+    }
+    if let Some(&Value::Sized(a, w)) = args.first() {
+        let other = || match args.get(1) {
+            Some(&Value::Sized(b, _)) => Ok(b),
+            other => Err(RuntimeError::new(format!(
+                "expected a `{}`, found {other:?}",
+                w.name()
+            ))),
+        };
+        return Ok(match math {
+            Math::Abs if a < 0 => sized::neg(a, w)?,
+            Math::Abs => Value::Sized(a, w),
+            Math::Min => Value::Sized(a.min(other()?), w),
+            Math::Max => Value::Sized(a.max(other()?), w),
+            Math::Bits => sized::bits(a, w),
+            _ => return Err(RuntimeError::new(format!("{math:?} on `{}`", w.name()))),
+        });
+    }
     if let Some(Value::Int(a)) = args.first() {
         return Ok(Value::Int(match (math, args.get(1)) {
             (Math::Abs, _) => a.abs(),
@@ -1337,6 +1413,7 @@ fn maths(math: Math, args: &[Value]) -> Result<Value> {
         Math::Round => to_int(x.round())?,
         Math::Floor => to_int(x.floor())?,
         Math::Ceil => to_int(x.ceil())?,
+        Math::Bits => return Err(RuntimeError::new("`bits` on a Float")),
     })
 }
 

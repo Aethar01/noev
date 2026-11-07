@@ -180,7 +180,7 @@ fn math(m: Math) -> (String, String) {
         Math::Ln => ("fn ln(self) -> Float", "Natural logarithm."),
         Math::Abs => (
             "fn abs(self) -> Self",
-            "Absolute value, of a `Float` or an `Int`.",
+            "Absolute value, of a float or a signed integer.",
         ),
         Math::Min => (
             "fn min(self, other: Self) -> Self",
@@ -197,6 +197,11 @@ fn math(m: Math) -> (String, String) {
         ),
         Math::Floor => ("fn floor(self) -> Int", "Rounds down."),
         Math::Ceil => ("fn ceil(self) -> Int", "Rounds up."),
+        Math::Bits => (
+            "fn bits(self) -> [Bit; N]",
+            "The bits of an unsigned integer, most significant first, so they print as the \
+             number in binary: `u8(5).bits()` is `00000101`. `u8(bits)` reads them back.",
+        ),
     };
     (
         sig.into(),
@@ -297,6 +302,64 @@ pub fn keyword(word: &str) -> Option<(&'static str, &'static str)> {
         ),
         _ => return None,
     })
+}
+
+/// A built-in type, by name.
+pub fn builtin_type(name: &str) -> Option<(String, String)> {
+    let doc = match name {
+        "Int" => {
+            "An integer of any size: it never overflows. Values that fit in 64 bits are as \
+                  fast as a machine integer."
+        }
+        "Float" => "A 64-bit IEEE 754 float.",
+        "Bool" => "`true` or `false`: logic, for conditions, `and`, `or` and `not`.",
+        "Bit" => {
+            "A classical bit, usually a measurement result: data, where `Bool` is logic. \
+                  `0` and `1` are `Bit`s where one is expected."
+        }
+        "Qubit" => {
+            "The right to act on one qubit. Linear: it must be consumed exactly once, by \
+                    measuring, discarding, moving or returning it."
+        }
+        "String" => "Immutable text, copied cheaply.",
+        "Observable" => {
+            "A real-weighted sum of products of Pauli operators, for expectation \
+                         values: `-1.0 * Z(0) * Z(1) + 0.5 * X(0)`."
+        }
+        "f32" | "f64" => {
+            "An IEEE 754 float of that many bits. Converts to and from `Float` with \
+                          `Float(x)` and `f32(x)`."
+        }
+        _ => {
+            let width = noev_sema::prelude::builtin_type(name)?.width()?;
+            let kind = if width.signed {
+                "A signed"
+            } else {
+                "An unsigned"
+            };
+            let doc = format!(
+                "{kind} {}-bit integer: {} to {}. Overflow is a runtime error. Convert with \
+                 `{name}(x)` when every value fits, and `{name}::try_from(x)` otherwise.",
+                width.bits,
+                width.min(),
+                width.max()
+            );
+            return Some((name.to_string(), doc));
+        }
+    };
+    Some((name.to_string(), doc.to_string()))
+}
+
+/// `T::try_from(x)`, for a sized integer type `T`.
+pub fn try_convert(ty: &str) -> (String, String) {
+    let ty = ty.trim_matches('`');
+    (
+        format!("fn {ty}::try_from(x) -> Result<{ty}, String>"),
+        format!(
+            "Converts any integer to `{ty}`: `Ok` when it is in range, otherwise `Err` saying \
+             why. Use `{ty}(x)` when every value fits."
+        ),
+    )
 }
 
 /// What a ket literal such as `|0+1>` prepares.

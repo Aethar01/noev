@@ -8,6 +8,7 @@
 use std::fmt;
 
 use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli};
+use noev_sema::ty::Width;
 use noev_sema::{Ty, TyKind, Types};
 use noev_syntax::Span;
 pub use noev_syntax::ast::{Align, FormatKind, FormatSpec};
@@ -148,8 +149,12 @@ pub enum Const {
     Unit,
     /// An `Int`.
     Int(i64),
-    /// A `Float`.
+    /// A sized integer (`u8`…`i64`), in range for its width.
+    Sized(i128, Width),
+    /// A `Float` or `f64`.
     Float(f64),
+    /// An `f32`.
+    F32(f32),
     /// A `Bool`.
     Bool(bool),
     /// A `Bit`.
@@ -197,6 +202,9 @@ pub enum Rvalue {
     Math(Math, Vec<Operand>),
     /// A `Float` constant.
     FloatConst(FloatConst),
+    /// `T::try_from(x)`: `Ok` (variant 0) with `x` as a `T` if it is in range, otherwise
+    /// `Err` (variant 1) with a message.
+    TryConvert(Ty, Operand),
     /// An `Int` literal too large for [`Const::Int`], as written (`0x…`, `0b…`, `_`).
     BigInt(String),
     /// `X(i)`, `Y(i)` or `Z(i)`.
@@ -385,6 +393,16 @@ impl Program {
             TyKind::Qubit => "Qubit".into(),
             TyKind::Observable => "Observable".into(),
             TyKind::String => "String".into(),
+            TyKind::I8
+            | TyKind::I16
+            | TyKind::I32
+            | TyKind::I64
+            | TyKind::U8
+            | TyKind::U16
+            | TyKind::U32
+            | TyKind::U64 => ty.width().expect("a sized integer").name(),
+            TyKind::F32 => "f32".into(),
+            TyKind::F64 => "f64".into(),
             TyKind::Tuple(elems) => {
                 let elems: Vec<String> = elems.iter().map(|&t| self.type_name(t)).collect();
                 format!("({})", elems.join(", "))
@@ -557,6 +575,9 @@ impl Program {
             Rvalue::Convert(ty, op) => format!("{}({})", self.type_name(*ty), operand_text(op)),
             Rvalue::Math(math, ops) => format!("{math:?}({})", list(ops)).to_lowercase(),
             Rvalue::BigInt(text) => text.clone(),
+            Rvalue::TryConvert(ty, op) => {
+                format!("{}::try_from({})", self.type_name(*ty), operand_text(op))
+            }
             Rvalue::FloatConst(c) => format!(
                 "Float::{}",
                 match c {
@@ -666,6 +687,8 @@ fn operand_text(op: &Operand) -> String {
         Operand::Const(c) => match c {
             Const::Unit => "()".into(),
             Const::Int(v) => v.to_string(),
+            Const::Sized(v, w) => format!("{v}{}", w.name()),
+            Const::F32(v) => format!("{v:?}f32"),
             Const::Float(v) => format!("{v:?}"),
             Const::Bool(v) => v.to_string(),
             Const::Bit(v) => format!("{}b", u8::from(*v)),

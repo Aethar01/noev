@@ -29,6 +29,31 @@ pub fn format(program: &Program, value: &Value, ty: Ty, spec: Option<&FormatSpec
             };
             (sign(v.is_negative(), spec.plus), digits, true)
         }
+        Value::Sized(v, _) => {
+            let m = v.unsigned_abs();
+            let digits = match spec.kind {
+                Some(FormatKind::Binary) => format!("{m:b}"),
+                Some(FormatKind::Octal) => format!("{m:o}"),
+                Some(FormatKind::Hex) => format!("{m:x}"),
+                Some(FormatKind::HexUpper) => format!("{m:X}"),
+                _ => m.to_string(),
+            };
+            (sign(*v < 0, spec.plus), digits, true)
+        }
+        Value::F32(v) => {
+            let magnitude = v.abs();
+            let digits = match (spec.kind, spec.precision) {
+                (Some(FormatKind::Exponent), Some(p)) => format!("{magnitude:.*e}", p as usize),
+                (Some(FormatKind::Exponent), None) => format!("{magnitude:e}"),
+                (_, Some(p)) => format!("{magnitude:.*}", p as usize),
+                (_, None) => format!("{magnitude:?}"),
+            };
+            (
+                sign(v.is_sign_negative() && !v.is_nan(), spec.plus),
+                digits,
+                true,
+            )
+        }
         Value::Float(v) => {
             let magnitude = v.abs();
             let digits = match (spec.kind, spec.precision) {
@@ -82,6 +107,12 @@ fn write_value(program: &Program, value: &Value, ty: Ty, out: &mut String) {
         (Value::Unit, _) => out.push_str("()"),
         (Value::Int(v), _) => {
             let _ = write!(out, "{v}");
+        }
+        (Value::Sized(v, _), _) => {
+            let _ = write!(out, "{v}");
+        }
+        (Value::F32(v), _) => {
+            let _ = write!(out, "{v:?}");
         }
         // Debug formatting always shows a decimal point: `-1.0`, not `-1`.
         (Value::Float(v), _) => {

@@ -6,6 +6,7 @@ pub mod int;
 pub mod machine;
 pub mod qasm;
 pub mod sampling;
+pub mod sized;
 pub mod value;
 
 use noev_ir::ir::{FuncId, Program};

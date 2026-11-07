@@ -67,6 +67,22 @@ impl Int {
         }
     }
 
+    /// The value, if it fits in an `i128` (every sized integer does).
+    pub fn to_i128(&self) -> Option<i128> {
+        match self {
+            Int::Small(v) => Some(i128::from(*v)),
+            Int::Big(v) => v.to_i128(),
+        }
+    }
+
+    /// The `Int` holding `v`.
+    pub fn from_i128(v: i128) -> Int {
+        match i64::try_from(v) {
+            Ok(small) => Int::Small(small),
+            Err(_) => Int::from(BigInt::from(v)),
+        }
+    }
+
     /// The nearest `Float`: infinite past its range.
     pub fn to_f64(&self) -> f64 {
         match self {

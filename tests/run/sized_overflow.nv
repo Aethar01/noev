@@ -1,0 +1,7 @@
+// fails: `255 + 1` overflows `u8`
+// Sized integers never wrap silently.
+
+fn main() {
+    let x: u8 = 255
+    print(x + 1)
+}
