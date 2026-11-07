@@ -26,6 +26,12 @@ before 1.0.
 - `measure_in(Basis::X)` measures a qubit, or every qubit of an array, in the X, Y or Z
   basis: 0 for the +1 eigenstate. `Basis` is the standard library's enum.
 
+### Compiler
+
+- A `match` on measurement results is classical control in the circuit, as an `if` is: one
+  `if` per test its patterns make, and none for a test an enclosing one already decided.
+  Teleportation corrected by a `match` is one circuit with four branches.
+
 ### Editors
 
 - Enums and `match` in the tree-sitter grammar and the language server (hover, go to
