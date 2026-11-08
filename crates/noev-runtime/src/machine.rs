@@ -1302,6 +1302,19 @@ impl Machine<'_> {
 
     /// Applies a gate with its controls.
     fn execute(&mut self, op: Op) -> Result<()> {
+        // A two-qubit matrix under `ctrl`, or in a circuit for any backend or OpenQASM: as
+        // controlled one-qubit matrices and phases, each also under the outer controls.
+        if op.gate == Gate::Unitary
+            && op.targets.len() == 2
+            && (!op.controls.is_empty() || matches!(self.mode, Mode::Build(_)))
+        {
+            let (first, second) = (op.targets[0], op.targets[1]);
+            for mut part in crate::unitary::decompose(&op.params, op.adjoint, first, second) {
+                part.controls.extend(&op.controls);
+                self.execute(part)?;
+            }
+            return Ok(());
+        }
         if op.controls.iter().any(|c| op.targets.contains(c)) {
             return Err(RuntimeError::new(
                 "a gate's target is also one of its controls",

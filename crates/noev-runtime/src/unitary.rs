@@ -1,7 +1,33 @@
 //! Gates given as matrices (`spec/core.md` §1). A matrix travels as its gate's parameters,
 //! the real and imaginary part of each entry, rows first: 8 numbers for one qubit, 32 for two.
 
+use noev_sema::prelude::Gate;
+
+use crate::backend::Op;
 use crate::value::Value;
+
+/// A complex number as (real, imaginary) parts.
+type C = (f64, f64);
+
+fn mul((a, b): C, (c, d): C) -> C {
+    (a * c - b * d, a * d + b * c)
+}
+
+fn add((a, b): C, (c, d): C) -> C {
+    (a + c, b + d)
+}
+
+fn conj((a, b): C) -> C {
+    (a, -b)
+}
+
+fn abs((a, b): C) -> f64 {
+    a.hypot(b)
+}
+
+fn arg((a, b): C) -> f64 {
+    b.atan2(a)
+}
 
 /// How close `m·m†` must be to the identity, entry by entry.
 const TOLERANCE: f64 = 1e-9;
@@ -102,6 +128,127 @@ pub fn euler(params: &[f64], adjoint: bool) -> (f64, f64, f64, f64) {
     (theta, phi, lambda, gamma)
 }
 
+/// The basis states of two qubits in an order where neighbours differ in one qubit:
+/// \|00⟩, \|01⟩, \|11⟩, \|10⟩, as indices with the first qubit most significant.
+const CHAIN: [usize; 4] = [0, 1, 3, 2];
+
+/// A one-qubit gate on `target`, controlled by `controls`.
+fn op(gate: Gate, params: Vec<f64>, controls: Vec<usize>, target: usize) -> Op {
+    Op {
+        gate,
+        adjoint: false,
+        params,
+        controls,
+        targets: vec![target],
+    }
+}
+
+/// A two-qubit matrix on the qubits `first` (the left label) and `second`, as gates every
+/// backend and OpenQASM have: one-qubit matrices controlled by the other qubit, `x`, and
+/// phase gates. In the basis order [`CHAIN`], rotations of neighbouring rows (Givens) reduce
+/// the matrix to a diagonal; each rotation acts on two basis states that differ in one qubit,
+/// so it is a one-qubit gate controlled by the other, and the diagonal is phase gates. The
+/// overall phase is kept, as `p·x·p·x`, since an outer `ctrl` makes it a relative one.
+pub fn decompose(params: &[f64], adjoint: bool, first: usize, second: usize) -> Vec<Op> {
+    let m = rows(params, adjoint);
+    let mut v = [[(0.0, 0.0); 4]; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            v[i][j] = m[CHAIN[i]][CHAIN[j]];
+        }
+    }
+    // G_k … G_1 · v = d, so v = G_1† … G_k† · d: d runs first, then G_k†, …, G_1†.
+    let mut rotations: Vec<(usize, [[C; 2]; 2])> = Vec::new();
+    for col in 0..3 {
+        for row in (col + 1..4).rev() {
+            let (x, y) = (v[row - 1][col], v[row][col]);
+            if abs(y) < 1e-15 {
+                continue;
+            }
+            let r = abs(x).hypot(abs(y));
+            let scale = |(a, b): C| (a / r, b / r);
+            let g = [
+                [scale(conj(x)), scale(conj(y))],
+                [scale((-y.0, -y.1)), scale(x)],
+            ];
+            let (upper, lower) = v.split_at_mut(row);
+            for (p, q) in upper[row - 1].iter_mut().zip(lower[0].iter_mut()) {
+                (*p, *q) = (
+                    add(mul(g[0][0], *p), mul(g[0][1], *q)),
+                    add(mul(g[1][0], *p), mul(g[1][1], *q)),
+                );
+            }
+            rotations.push((row - 1, g));
+        }
+    }
+    let mut ops = Vec::new();
+    // The diagonal: an overall phase, a phase on each qubit's 1, and a controlled phase.
+    let mut d = [(0.0, 0.0); 4];
+    for i in 0..4 {
+        d[CHAIN[i]] = v[i][i];
+    }
+    let phase = |c: C| arg(mul(c, conj(d[0])));
+    let (whole, on_second, on_first, both) = (arg(d[0]), phase(d[1]), phase(d[2]), phase(d[3]));
+    let p = |angle: f64, controls: Vec<usize>, target| op(Gate::P, vec![angle], controls, target);
+    if whole.abs() > 1e-15 {
+        // e^{iφ}·I = X · P(φ) · X · P(φ).
+        for _ in 0..2 {
+            ops.push(p(whole, vec![], first));
+            ops.push(op(Gate::X, vec![], vec![], first));
+        }
+    }
+    for (angle, controls, target) in [
+        (on_second, vec![], second),
+        (on_first, vec![], first),
+        (both - on_first - on_second, vec![first], second),
+    ] {
+        if angle.abs() > 1e-15 {
+            ops.push(p(angle, controls, target));
+        }
+    }
+    for (row, g) in rotations.into_iter().rev() {
+        let (s, t) = (CHAIN[row], CHAIN[row + 1]);
+        // The qubit that differs, the other, and the value the other has in both states.
+        let (target, other, value) = if (s ^ t) == 1 {
+            (second, first, s >> 1)
+        } else {
+            (first, second, s & 1)
+        };
+        // G† in the basis (s, t), swapped if s has the target qubit at 1.
+        let dagger = [
+            [conj(g[0][0]), conj(g[1][0])],
+            [conj(g[0][1]), conj(g[1][1])],
+        ];
+        let swapped = (if target == second { s & 1 } else { s >> 1 }) == 1;
+        let u = |i: usize, j: usize| {
+            if swapped {
+                dagger[1 - i][1 - j]
+            } else {
+                dagger[i][j]
+            }
+        };
+        let params = vec![
+            u(0, 0).0,
+            u(0, 0).1,
+            u(0, 1).0,
+            u(0, 1).1,
+            u(1, 0).0,
+            u(1, 0).1,
+            u(1, 1).0,
+            u(1, 1).1,
+        ];
+        let flip = value == 0;
+        if flip {
+            ops.push(op(Gate::X, vec![], vec![], other));
+        }
+        ops.push(op(Gate::Unitary, params, vec![other], target));
+        if flip {
+            ops.push(op(Gate::X, vec![], vec![], other));
+        }
+    }
+    ops
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +263,126 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    /// The matrix `ops` apply to two qubits, 0 (the first, most significant) and 1.
+    fn apply(ops: &[Op]) -> [[C; 4]; 4] {
+        let bit = |index: usize, q: usize| if q == 0 { index >> 1 & 1 } else { index & 1 };
+        let mut columns = [[(0.0, 0.0); 4]; 4];
+        for (j, column) in columns.iter_mut().enumerate() {
+            let mut state = [(0.0, 0.0); 4];
+            state[j] = (1.0, 0.0);
+            for op in ops {
+                let target = op.targets[0];
+                let m = match op.gate {
+                    Gate::X => [[(0.0, 0.0), (1.0, 0.0)], [(1.0, 0.0), (0.0, 0.0)]],
+                    Gate::P => [
+                        [(1.0, 0.0), (0.0, 0.0)],
+                        [(0.0, 0.0), (op.params[0].cos(), op.params[0].sin())],
+                    ],
+                    Gate::Unitary => {
+                        let r = rows(&op.params, false);
+                        [[r[0][0], r[0][1]], [r[1][0], r[1][1]]]
+                    }
+                    other => panic!("unexpected {other:?}"),
+                };
+                let mut next = state;
+                for (i, slot) in next.iter_mut().enumerate() {
+                    if op.controls.iter().any(|&c| bit(i, c) == 0) {
+                        continue;
+                    }
+                    let partner = i ^ if target == 0 { 2 } else { 1 };
+                    let (lo, hi) = if bit(i, target) == 0 {
+                        (i, partner)
+                    } else {
+                        (partner, i)
+                    };
+                    let row = bit(i, target);
+                    *slot = add(mul(m[row][0], state[lo]), mul(m[row][1], state[hi]));
+                }
+                state = next;
+            }
+            *column = state;
+        }
+        // columns[j][i] is entry (i, j).
+        let mut out = [[(0.0, 0.0); 4]; 4];
+        for i in 0..4 {
+            for j in 0..4 {
+                out[i][j] = columns[j][i];
+            }
+        }
+        out
+    }
+
+    fn flat(m: &[[C; 4]; 4]) -> Vec<f64> {
+        m.iter().flatten().flat_map(|&(re, im)| [re, im]).collect()
+    }
+
+    fn matmul(a: &[[C; 4]; 4], b: &[[C; 4]; 4]) -> [[C; 4]; 4] {
+        let mut out = [[(0.0, 0.0); 4]; 4];
+        for i in 0..4 {
+            for j in 0..4 {
+                for k in 0..4 {
+                    out[i][j] = add(out[i][j], mul(a[i][k], b[k][j]));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn two_qubit_matrices_decompose_exactly() {
+        let (o, z, i) = ((1.0, 0.0), (0.0, 0.0), (0.0, 1.0));
+        let cnot = [[o, z, z, z], [z, o, z, z], [z, z, z, o], [z, z, o, z]];
+        let swap = [[o, z, z, z], [z, z, o, z], [z, o, z, z], [z, z, z, o]];
+        let iswap = [[o, z, z, z], [z, z, i, z], [z, i, z, z], [z, z, z, o]];
+        let phases = [
+            [i, z, z, z],
+            [z, (-1.0, 0.0), z, z],
+            [z, z, (0.0, -1.0), z],
+            [z, z, z, o],
+        ];
+        // H ⊗ H, iSWAP, CNOT and phases: a dense matrix with every entry set.
+        let hh = [
+            [(0.5, 0.0), (0.5, 0.0), (0.5, 0.0), (0.5, 0.0)],
+            [(0.5, 0.0), (-0.5, 0.0), (0.5, 0.0), (-0.5, 0.0)],
+            [(0.5, 0.0), (0.5, 0.0), (-0.5, 0.0), (-0.5, 0.0)],
+            [(0.5, 0.0), (-0.5, 0.0), (-0.5, 0.0), (0.5, 0.0)],
+        ];
+        let dense = matmul(&phases, &matmul(&cnot, &matmul(&iswap, &hh)));
+        for (name, matrix) in [
+            ("cnot", cnot),
+            ("swap", swap),
+            ("iswap", iswap),
+            ("phases", phases),
+            ("dense", dense),
+        ] {
+            let params = params(&Value::Aggregate(
+                matrix
+                    .iter()
+                    .map(|row| {
+                        Value::Aggregate(
+                            row.iter().map(|&(re, im)| Value::Complex(re, im)).collect(),
+                        )
+                    })
+                    .collect(),
+            ))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(params, flat(&matrix));
+            for adjoint in [false, true] {
+                let got = apply(&decompose(&params, adjoint, 0, 1));
+                let want = rows(&params, adjoint);
+                for r in 0..4 {
+                    for c in 0..4 {
+                        let (g, w) = (got[r][c], want[r][c]);
+                        assert!(
+                            (g.0 - w.0).abs() < 1e-12 && (g.1 - w.1).abs() < 1e-12,
+                            "{name} (adjoint {adjoint}) at ({r}, {c}): {g:?} not {w:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

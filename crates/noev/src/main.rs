@@ -302,13 +302,6 @@ fn export(
     };
     let result = noev_runtime::run_main(program, &exporter, 0, sink);
     let jobs = exporter.jobs.borrow();
-    if let Some(what) = jobs
-        .iter()
-        .find_map(|(circuit, _)| noev_runtime::qasm::unsupported(circuit))
-    {
-        anstream::eprintln!("noev: cannot export {}: it uses {what}", file.display());
-        return ExitCode::FAILURE;
-    }
     let saved = match output {
         Some(dir) => save_circuits(file, dir, &jobs, format),
         None => {
@@ -511,13 +504,6 @@ fn save_circuits(
         anstream::eprintln!("noev: cannot write {}: {error}", dir.display());
         ExitCode::from(2)
     };
-    if let Some(what) = jobs
-        .iter()
-        .find_map(|(circuit, _)| noev_runtime::qasm::unsupported(circuit))
-    {
-        anstream::eprintln!("noev: cannot export {}: it uses {what}", file.display());
-        return Err(ExitCode::FAILURE);
-    }
     std::fs::create_dir_all(dir).map_err(fail)?;
     for (i, (circuit, shots)) in jobs.iter().enumerate() {
         let header = circuit_header(file, i, *shots);

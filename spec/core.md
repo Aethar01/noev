@@ -43,9 +43,11 @@ functions, `ctrl` blocks and under `adj`.
 a `[[Complex; 4]; 4]`. Rows and columns follow the basis states as kets read: \|00⟩, \|01⟩,
 \|10⟩, \|11⟩, with `r[0]` the left label. The matrix is checked to be unitary, to within
 10⁻⁹ in each entry of `m·m†`, where the gate runs. Like every gate it is reversible: `adj`
-applies `m†`, and a one-qubit matrix may be controlled with `ctrl`. A two-qubit matrix under
-`ctrl`, and exporting one to OpenQASM, are not supported yet; a one-qubit matrix exports as
-`U(θ, φ, λ)` with its global phase, which matters under control.
+applies `m†`, and `ctrl` controls it. A one-qubit matrix exports to OpenQASM as
+`U(θ, φ, λ)`, with its global phase under control, where it becomes a relative one. A
+two-qubit matrix is decomposed for circuits and under `ctrl`: rotations of pairs of basis
+states that differ in one qubit, each a one-qubit matrix controlled by the other qubit, and
+phase gates.
 
 Every gate is also a free function with the qubits first: `x(q)`, `ry(q, theta)`,
 `swap(a, b)`. The free functions return `()`. Qubit arguments are lent implicitly, so no

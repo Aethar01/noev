@@ -29,6 +29,27 @@ fn main() {
     let e = |0>
     ctrl d { e.unitary(sqrt_x).unitary(sqrt_x) }
     print(mv d.measure(), mv e.measure())
+    // A two-qubit matrix under `ctrl` keeps its phases relative to the control's other
+    // branch: iSWAP then SWAP, both controlled by |+>, leave the control in |+i>.
+    let swap = [
+        [1.0 + 0i, 0.0 + 0i, 0.0 + 0i, 0.0 + 0i],
+        [0.0 + 0i, 0.0 + 0i, 1.0 + 0i, 0.0 + 0i],
+        [0.0 + 0i, 1.0 + 0i, 0.0 + 0i, 0.0 + 0i],
+        [0.0 + 0i, 0.0 + 0i, 0.0 + 0i, 1.0 + 0i],
+    ]
+    let iswap = [
+        [1.0 + 0i, 0.0 + 0i, 0.0 + 0i, 0.0 + 0i],
+        [0.0 + 0i, 0.0 + 0i, 1i, 0.0 + 0i],
+        [0.0 + 0i, 1i, 0.0 + 0i, 0.0 + 0i],
+        [0.0 + 0i, 0.0 + 0i, 0.0 + 0i, 1.0 + 0i],
+    ]
+    print(sample 100 {
+        let c = |+>
+        let pair = |01>
+        ctrl c { pair.unitary(iswap) }
+        ctrl c { pair.unitary(swap) }
+        (<(+i)| mv c, mv pair.measure())
+    })
     print(sample 100 {
         let f = |1>
         let g = |0>

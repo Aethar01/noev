@@ -9,26 +9,7 @@ use noev_sema::prelude::Gate;
 
 use crate::backend::{Circuit, Condition, Instruction, Op};
 
-/// What in `circuit` OpenQASM export cannot write yet, if anything: a two-qubit matrix gate,
-/// which would need decomposing into named gates.
-pub fn unsupported(circuit: &Circuit) -> Option<&'static str> {
-    fn search(list: &[Instruction]) -> bool {
-        list.iter().any(|i| match i {
-            Instruction::Gate(op) => op.gate == Gate::Unitary && op.targets.len() == 2,
-            Instruction::If {
-                then, otherwise, ..
-            } => search(then) || search(otherwise),
-            Instruction::While { body, .. } => search(body),
-            _ => false,
-        })
-    }
-    search(&circuit.instructions).then_some(
-        "a two-qubit matrix gate (`r.unitary(m)`), which OpenQASM export does not decompose yet",
-    )
-}
-
-/// The OpenQASM 3 program for `circuit`. `header` lines go first, as comments. Check
-/// [`unsupported`] first: what it names is written as a comment.
+/// The OpenQASM 3 program for `circuit`. `header` lines go first, as comments.
 pub fn to_qasm3(circuit: &Circuit, header: &[String]) -> String {
     let mut out = String::new();
     for line in header {
@@ -160,10 +141,8 @@ fn qubits<'q>(out: &mut String, qubits: impl Iterator<Item = &'q usize>) {
 /// A one-qubit matrix gate as `U(θ, φ, λ)`, and under `ctrl` its global phase too, which a
 /// controlled gate makes a relative one.
 fn matrix_gate(out: &mut String, op: &Op) {
-    if op.targets.len() != 1 {
-        out.push_str("// a two-qubit matrix gate, which OpenQASM export does not decompose yet\n");
-        return;
-    }
+    // Two-qubit matrices reach a circuit already decomposed (`unitary::decompose`).
+    debug_assert_eq!(op.targets.len(), 1);
     let (theta, phi, lambda, gamma) = crate::unitary::euler(&op.params, op.adjoint);
     let modifier = match op.controls.len() {
         0 => String::new(),

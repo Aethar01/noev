@@ -20,8 +20,9 @@ before 1.0.
   must be reversible preparations (N023).
 - Gates from matrices: `q.unitary(m)` with `m: [[Complex; 2]; 2]`, and `r.unitary(m)` on a
   `[Qubit; 2]` with a 4×4 matrix over \|00⟩, \|01⟩, \|10⟩, \|11⟩. Checked to be unitary when
-  they run; reversible, so `adj` and (for one qubit) `ctrl` work. A one-qubit matrix exports
-  as `U(θ, φ, λ)` with its global phase under control.
+  they run; reversible, so `adj` and `ctrl` work. A one-qubit matrix exports as
+  `U(θ, φ, λ)` with its global phase under control; a two-qubit one is decomposed, for
+  circuits and under `ctrl`, into one-qubit matrices controlled by the other qubit.
 - `amplitudes(r)`, for debugging on a simulator: a register's state as a `[Complex; 2^N]`,
   over \|00⟩, \|01⟩, … with the first non-zero amplitude real and positive; an error if the
   register is entangled with other qubits. A `sample` that reads amplitudes runs shot by shot.
@@ -34,6 +35,8 @@ before 1.0.
 
 ### Compiler
 
+- ketrs 0.1.2: circuits that measure mid-circuit follow each measurement history once
+  instead of every shot, so feedback and repeat-until-success circuits sample far faster.
 - Indexing or taking a field of a value that is not a variable, such as a call's result
   (`g()[1]`, `p().y`), no longer overflows the compiler's stack.
 
