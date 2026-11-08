@@ -4,14 +4,14 @@ Everything that comes with Noev but is not an intrinsic ([core.md](core.md)). Ea
 specified by a **reference definition** written in Noev, using only core and other
 standard-library items.
 
-**Implementation in v0.1.** The compiler implements the standard library natively, in Rust,
+**Implementation.** The compiler implements the standard library natively, in Rust,
 so it costs nothing to compile or check. Each native item must behave exactly as its
 reference definition: same signature, same ownership rules, same reversibility, same
 results. An item can therefore move to Noev source later without any program noticing.
 
 ## 1. What is in scope
 
-In v0.1, every item in [core.md](core.md) and in this document is in scope in every program,
+Until Noev has modules, every item in [core.md](core.md) and in this document is in scope in every program,
 without imports. A program's own function with the same name takes precedence.
 
 Once Noev has modules ([modules.md](modules.md)), the standard library becomes modules under
@@ -167,13 +167,13 @@ fn print(values: …) {           // variadic: not expressible in Noev yet
 }
 ```
 
-Like the rest of the standard library, `print` and `eprint` are implemented natively in
-v0.1. They are not allowed in a run that is repeated ([execution.md](execution.md) §3).
+Like the rest of the standard library, `print` and `eprint` are implemented natively.
+They are not allowed in a run that is repeated ([execution.md](execution.md) §3).
 
 ### `std::io` (Reserved)
 
 Explicit control over output, as in Rust, for loops that write a lot and for programs that
-must handle write errors. It needs modules and a `Result` type, so it comes after v0.1.
+must handle write errors. It needs modules, so it comes with them.
 
 ```noev
 use std::io::stdout

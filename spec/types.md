@@ -55,7 +55,7 @@ when it is `1`). `and`, `or` and `not` work on `Bool`; `&`, `|`, `^` and `~` wor
 and `Int`. Convert between them with `Bool(b)` and `Bit(flag)`.
 
 `String` has value semantics: assigning or passing a string gives an independent copy, which
-the implementation makes cheap by sharing the text. Strings are immutable in v0.1 and can be
+the implementation makes cheap by sharing the text. Strings are immutable for now and can be
 compared with `==` and `!=`; operations on them (length, concatenation, slicing) come later.
 
 A `Qubit` value is not a quantum state that can be inspected. It is the right to act on one
@@ -77,7 +77,7 @@ logical qubit. The compiler and runtime decide which physical qubit that is.
 - **Distributions** `Distribution<T>`: how often each value of a classical type `T` occurred
   in repeated runs, made by `sample` ([execution.md](execution.md) §3). Copyable.
 - **References** `ref T` (shared) and `mut T` (exclusive). See
-  [ownership.md](ownership.md) §4–5. v0.1 supports elided lifetimes only; references stored
+  [ownership.md](ownership.md) §4–5. Only elided lifetimes are supported so far; references stored
   in struct fields are Reserved.
 
 ### Enums
@@ -301,7 +301,7 @@ users can define conversions for their own types.
 | `Float → Int`              | `f.trunc()`, `f.round()`, `f.floor()`, `f.ceil()` | Exact; NaN and infinities are runtime errors |
 | `Bit ↔ Bool`               | `Bool(b)`, `Bit(flag)` | `1` ↔ `true`                     |
 | `Bit → Int`, `Bool → Int`  | `Int(b)`          | `0` or `1`                            |
-| `Int → Bit`                | none in v0.1      | Write `if n == 0 { 0 } else { 1 }`, or wait for `Bit::try_from` |
+| `Int → Bit`                | none yet          | Write `if n == 0 { 0 } else { 1 }`, or wait for `Bit::try_from` |
 | Sized integer → `Int`, or to a sized integer that holds every value | `Int(x)`, `i64(x)` | Exact (`u8 → i16`, `i32 → i64`, `u32 → u64`) |
 | Any other integer → sized integer | `u8::try_from(n)` | `Ok` when it is in range, otherwise `Err` saying why |
 | Integer → `Float`, `f32`   | `Float(n)`, `f32(n)` | As `Int → Float`: rounded past the type's exact range |
@@ -333,7 +333,7 @@ where it matters: any place a linear value changes hands has an explicit `mv`.
 
 ## 6. Traits and generics (Reserved)
 
-Traits and generics come after v0.1, but two decisions are made now because they shape the
+Traits and generics are not implemented yet, but two decisions are made now because they shape the
 type checker.
 
 **Generic code assumes values may be linear.** Rust assumes every value can be dropped, and
@@ -357,7 +357,7 @@ trait Measure {
 ```
 
 `Qubit` measures to `Bit` and `[Qubit; N]` to `[Bit; N]`, and a user's struct can measure to
-a classical struct of its own, such as `Experiment` to `ExperimentResult`. In v0.1,
+a classical struct of its own, such as `Experiment` to `ExperimentResult`. Until then,
 `measure` is a built-in overload on `Qubit` and `[Qubit; N]`.
 
 Other planned traits: `From` (conversions), `Copy`, `Discard`, and quantum interfaces such
@@ -403,7 +403,7 @@ A spec that does not apply to the value's type is a compile error.
 
 ## 8. Open questions
 
-- **Classical values that are expensive to copy** (growable arrays, maps): v0.1's `String`
+- **Classical values that are expensive to copy** (growable arrays, maps): `String`
   and `Distribution` use value semantics with shared storage; whether growable collections do
   the same, as in Swift, is open.
 - **String operations**: length, concatenation, slicing, and how indexing relates to Unicode.

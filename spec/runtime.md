@@ -5,7 +5,7 @@ program is native code linked to the **Noev runtime**. The runtime sends quantum
 to a **quantum backend**: a simulator such as ketrs, or a quantum computer's control stack.
 The program does not depend on which backend it runs on.
 
-Status: design, except the backend interface (§3), which v0.1's interpreter (`noev run`)
+Status: design, except the backend interface (§3), which the interpreter (`noev run`)
 already uses, with ketrs as its backend (§6).
 
 ```
@@ -157,7 +157,7 @@ a simulator or on hardware.
 backends through the same interface, so a program behaves the same interpreted or compiled.
 The interpreter is the reference implementation: compiled programs are tested against it.
 
-In v0.1, the interface is a Rust trait in `noev-runtime` (`Backend`, with a `Session` for gate
+For now, the interface is a Rust trait in `noev-runtime` (`Backend`, with a `Session` for gate
 level), and ketrs is the only backend.
 
 `main` is a run with one shot, like any other call (§3). On a backend that works gate by gate

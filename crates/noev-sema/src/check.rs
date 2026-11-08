@@ -481,7 +481,7 @@ impl Checker<'_> {
                 }
                 ItemKind::Trait { .. } => {
                     self.error(item.span, "traits are not supported yet").help =
-                        Some("they come after v0.1; see spec/types.md §6".into());
+                        Some("they need generics; see spec/types.md §6".into());
                 }
                 ItemKind::Impl { .. } => {
                     self.error(item.span, "`impl` blocks are not supported yet")
@@ -1550,7 +1550,7 @@ impl Checker<'_> {
             }
             ExprKind::With { .. } => {
                 self.error(expr.span, "`with`/`do` is not supported yet")
-                    .help = Some("it comes after v0.1; see spec/ownership.md §8".into());
+                    .help = Some("see spec/ownership.md §8".into());
                 Ty::UNIT
             }
         }

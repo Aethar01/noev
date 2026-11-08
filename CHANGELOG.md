@@ -7,6 +7,16 @@ before 1.0.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-08
+
+### Spec
+
+- The spec is marked version 0.4 and no longer calls the current compiler "v0.1": features
+  that already exist are marked **Implemented**, and the rest say "not implemented yet".
+  `std::io` needs only modules now, since `Result` came in 0.2.
+- The help on "traits are not supported yet" and "`with`/`do` is not supported yet" no
+  longer says they come after v0.1.
+
 ## [0.4.1] - 2026-11-08
 
 ### Compiler
@@ -176,6 +186,7 @@ compiler that checks, runs and exports it.
 - A tree-sitter grammar (`editors/tree-sitter-noev`) with highlight, indent and fold queries,
   and Neovim runtime files (`editors/nvim`).
 
+[0.4.2]: https://github.com/Aethar01/noev/releases/tag/v0.4.2
 [0.4.1]: https://github.com/Aethar01/noev/releases/tag/v0.4.1
 [0.4.0]: https://github.com/Aethar01/noev/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Aethar01/noev/releases/tag/v0.3.0

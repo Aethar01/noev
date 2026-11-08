@@ -1,6 +1,6 @@
 # Interop
 
-Status: **Reserved.** Nothing here is in v0.1; the syntax and rules are fixed now so that the
+Status: **Reserved.** Nothing here is implemented yet; the syntax and rules are fixed now so that the
 type checker and runtime are designed with them in mind. The order they arrive in is in
 `docs/PLAN.md` §11.
 

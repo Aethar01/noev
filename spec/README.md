@@ -1,6 +1,6 @@
 # Noev Language Specification
 
-Version 0.1, draft. These documents define the Noev language. The Rust compiler in
+Version 0.4, draft. These documents define the Noev language. The Rust compiler in
 `crates/` is one implementation of them. When the compiler and the spec disagree, the
 compiler is wrong, or the spec is changed on purpose.
 
@@ -43,7 +43,7 @@ program in `tests/ui/`.
 
 ## Status markers
 
-- **v0.1**: implemented in the first compiler.
+- **Implemented**: supported by the current compiler.
 - **Reserved**: syntax is specified and parsed, but the compiler rejects it with "not yet
   supported".
 - **Open**: undecided; listed in the "Open questions" section of the relevant document.

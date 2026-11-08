@@ -110,7 +110,7 @@ measurement. "No operation is applied *through* this reference" is what `ref` gu
 
 ## 5. How long a lend lasts
 
-**v0.1 uses lexical lifetimes:** a lend stored in a variable lasts until the end of the
+**Lifetimes are lexical for now:** a lend stored in a variable lasts until the end of the
 block that declares the variable; a lend that is only used within one statement (a call
 argument, a method receiver, a chain) lasts until the end of that statement.
 
@@ -354,11 +354,11 @@ allocated in `with` are back in \|0⟩ at the end and are released automatically
 `do`, every qubit the `with` block allocated or acted on is `ref`-lent (usable only as a
 control). This guarantees the inverse restores them.
 
-Parsed in v0.1, rejected with "not yet supported".
+Parsed, but rejected with "not yet supported".
 
-## 9. Toward automatic release (goal, not v0.1)
+## 9. Toward automatic release (goal, not implemented yet)
 
-v0.1 requires every qubit to be consumed explicitly (N003). The goal is to release a qubit
+For now, every qubit must be consumed explicitly (N003). The goal is to release a qubit
 automatically when the compiler can **prove** it is back in \|0⟩: for example, a qubit never
 acted on since its `|0>` literal, or one restored by `with`/`do`. Accepting those programs
 later breaks no existing code. `discard` stays available for saying it explicitly.
@@ -475,8 +475,8 @@ memory sense. What it risks is a wrong quantum computation.
 
 | Operation                    | Claim                             | Status   |
 | ---------------------------- | --------------------------------- | -------- |
-| `q.release()`                | `q` is in \|0⟩, so it can be released without a reset | v0.1 |
-| Calling an `unsafe fn`       | Whatever that function documents  | v0.1     |
+| `q.release()`                | `q` is in \|0⟩, so it can be released without a reset | Implemented |
+| Calling an `unsafe fn`       | Whatever that function documents  | Implemented |
 | Reversible functions the checker cannot verify, such as measurement-based uncomputation, with hand-written inverse and controlled versions | They act as the stated unitary | Reserved |
 | Calling C functions and inline OpenQASM ([interop.md](interop.md)) | They behave as declared | Reserved |
 | Choosing physical qubits     | The chosen qubits are valid on the target | Reserved |

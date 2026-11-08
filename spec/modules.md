@@ -1,6 +1,6 @@
 # Modules and packages
 
-Status: **Reserved.** v0.1 compiles one file at a time. The design is fixed now because it
+Status: **Reserved.** For now, the compiler takes one file at a time. The design is fixed now because it
 shapes name resolution, visibility, and the rules for reversibility across modules. The
 keywords are reserved already, so no program can start using them as names.
 
@@ -29,7 +29,7 @@ vqe/
 ```
 
 A single file still works on its own: `noev run file.nv` treats it as a package with one
-module, so every v0.1 program stays valid.
+module, so every existing program stays valid.
 
 Rust's `mod` declarations were left out deliberately: they repeat what the file tree
 already says.
@@ -135,7 +135,7 @@ qlib = "1.2"
 Each file is lexed and parsed on its own, so files are processed in parallel. Spans keep
 their 8-byte size: each file gets its own range of `u32` byte offsets, and the file is found
 from the offset (the technique rustc uses). Name resolution then runs over all of a package's
-modules together, and type and ownership checking run per function as in v0.1.
+modules together, and type and ownership checking run per function as they do now.
 
 ## 9. Grammar
 

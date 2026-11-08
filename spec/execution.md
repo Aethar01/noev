@@ -234,7 +234,7 @@ not circuits.
   error, and the exit status is non-zero.
 - `--seed N` fixes the simulator's random numbers, so a run can be reproduced.
 
-## 7. On quantum hardware (not v0.1)
+## 7. On quantum hardware (not implemented yet)
 
 - A circuit becomes a job: the compiler emits it (as QIR or OpenQASM 3) with its classical
   control, and the quantum computer runs it for every shot.

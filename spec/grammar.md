@@ -222,7 +222,7 @@ The receiver states how the method takes the value, using the same words as call
 
 `extern` declares host and C functions; see [interop.md](interop.md). Traits and
 `impl … for …` blocks are Reserved: their syntax is specified so that it can be
-parsed, but they need generics, which come after v0.1. See [types.md](types.md) §6.
+parsed, but they need generics, which are not implemented yet. See [types.md](types.md) §6.
 
 ### Types
 
@@ -537,10 +537,10 @@ fn main() {
   inside an expression (calling a generic function with explicit types) would clash with
   `<`; Rust's `f::<T>()` is the likely answer, decided with generics.
 - **Negative controls.** `ctrl !a { … }` or `ctrl not a { … }` (control on \|0⟩). `!` is
-  reserved for this or similar. Not in v0.1.
-- **`adj` on blocks.** `adj { … }` could invert a whole block. v0.1 only allows `adj` on
-  single calls.
+  reserved for this or similar. Not implemented yet.
+- **`adj` on blocks.** `adj { … }` could invert a whole block. For now `adj` is only allowed
+  on single calls.
 - **Closures.** If added, the `|x| …` form can coexist with kets, because a ket contains
-  only `0 1 + -` and ends in `>`. Not needed for v0.1.
-- **Modules and imports.** Specified in [modules.md](modules.md); Reserved. In v0.1 one
+  only `0 1 + -` and ends in `>`. Not needed so far.
+- **Modules and imports.** Specified in [modules.md](modules.md); Reserved. Until then, one
   `.nv` file is one program, and `main` is the entry point when one exists.
