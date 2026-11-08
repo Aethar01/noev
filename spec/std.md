@@ -79,6 +79,26 @@ enum State { Zero, One, Plus, Minus, PlusI, MinusI }
 As with `Basis`, a program's own type called `State` takes the name, and kets still accept
 the standard one.
 
+### `amplitudes` (simulators only)
+
+For debugging: the amplitudes of a register's state, as a simulator holds them.
+
+```noev
+let r = |+0>
+ctrl r[0] { r[1].x() }
+print(amplitudes(r))     // [0.7071…+0.0i, 0.0+0.0i, 0.0+0.0i, 0.7071…+0.0i]
+```
+
+`amplitudes(r)` lends `r`, a `Qubit` or `[Qubit; N]` with N at most 20, and gives a
+`[Complex; 2^N]` over its basis states in the order kets read them: \|00⟩, \|01⟩, \|10⟩,
+\|11⟩, with `r[0]` the left label. It changes nothing. A register entangled with other qubits
+has no state of its own, so asking for one is a runtime error, as it is on a backend that
+cannot see the state. The overall phase is chosen so that the first amplitude that is not zero
+is real and positive; only the relative phases between amplitudes mean anything physically.
+
+It is not reversible, since under `adj` a function's gates are collected rather than run, and
+a `sample` that reads amplitudes runs shot by shot.
+
 ## 3. Observables
 
 ### `P` and `PX`

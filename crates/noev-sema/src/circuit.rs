@@ -64,6 +64,9 @@ pub struct CircuitInfo {
     /// Where it calls `release` (itself or through a call). The simulator checks that claim,
     /// which needs the state of every shot, so such runs are not sampled from one simulation.
     pub releases: Option<Span>,
+    /// Where it reads amplitudes (itself or through a call): only a simulator running gate
+    /// by gate can show them, so such runs are not sampled from one simulation either.
+    pub inspects: Option<Span>,
 }
 
 impl CircuitInfo {
@@ -74,6 +77,7 @@ impl CircuitInfo {
             && self.not_circuit.is_none()
             && self.feedback_unsupported.is_none()
             && self.releases.is_none()
+            && self.inspects.is_none()
     }
 }
 
@@ -83,7 +87,8 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
     let order = CallOrder::new(ast, typed);
     let quantum = infer_quantum(ast, typed, &order);
     let recordable = infer_recordable(ast, typed, &order);
-    let releases = infer_releases(ast, typed, &order);
+    let releases = infer_calls(ast, typed, &order, Builtin::Release);
+    let inspects = infer_calls(ast, typed, &order, Builtin::Amplitudes);
     // A call is part of the run that makes it, so a function is only a circuit if what it
     // calls is: repeat until nothing changes, since functions can call each other.
     let mut cx = Context {
@@ -115,6 +120,7 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
                 quantum: cx.quantum[index],
                 closed,
                 releases: releases[index],
+                inspects: inspects[index],
                 ..CircuitInfo::default()
             };
             let takes_results = typed.fns[index]
@@ -151,7 +157,8 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
         };
         let mut info = CircuitInfo {
             closed: true,
-            releases: block_releases(ast, typed, &releases, body),
+            releases: block_calls(ast, typed, &releases, body, Builtin::Release),
+            inspects: block_calls(ast, typed, &inspects, body, Builtin::Amplitudes),
             ..CircuitInfo::default()
         };
         info.quantum = contains_quantum(ast, typed, &cx.quantum, Node::Block(body));
@@ -244,6 +251,8 @@ fn repeated_run_warnings(ast: &Ast, typed: &Typed, circuits: &Circuits, out: &mu
                 Diagnostic::error(span, format!("{subject} shot by shot: {why}, which is not compiled to circuits yet"))
                     .with_label(at, "here")
             }
+            None if info.inspects.is_some() => Diagnostic::error(span, format!("{subject} shot by shot so the simulator can show its amplitudes"))
+                .with_label(info.inspects.unwrap_or(span), "read here"),
             None => Diagnostic::error(span, format!("{subject} shot by shot so the simulator can check its `release`"))
                 .with_label(info.releases.unwrap_or(span), "released here")
                 .with_help("`discard` resets instead, and allows sampling from one simulation"),
@@ -347,8 +356,9 @@ fn holds_logic(typed: &Typed, ty: Ty) -> bool {
     }
 }
 
-/// Where each function calls `release`, itself or through the functions it calls.
-fn infer_releases(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<Option<Span>> {
+/// Where each function calls `builtin` (`release`, `amplitudes`), itself or through the
+/// functions it calls.
+fn infer_calls(ast: &Ast, typed: &Typed, order: &CallOrder, builtin: Builtin) -> Vec<Option<Span>> {
     let mut result: Vec<Option<Span>> = vec![None; ast.all_fns().len()];
     loop {
         let mut changed = false;
@@ -358,7 +368,7 @@ fn infer_releases(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<Option<Spa
                 continue;
             }
             let Some(body) = decl.body else { continue };
-            if let Some(span) = block_releases(ast, typed, &result, body) {
+            if let Some(span) = block_calls(ast, typed, &result, body, builtin) {
                 result[index] = Some(span);
                 changed = true;
             }
@@ -369,23 +379,24 @@ fn infer_releases(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<Option<Spa
     }
 }
 
-/// Where a block calls `release`, itself or through a function in `releases`.
-fn block_releases(
+/// Where a block calls `builtin`, itself or through a function that does (`found`).
+fn block_calls(
     ast: &Ast,
     typed: &Typed,
-    releases: &[Option<Span>],
+    found: &[Option<Span>],
     body: BlockId,
+    builtin: Builtin,
 ) -> Option<Span> {
     let mut stack = vec![Node::Block(body)];
     while let Some(node) = stack.pop() {
         children(ast, node, &mut stack);
         let Node::Expr(e) = node else { continue };
-        let found = match typed.callees[e.index()] {
-            Some(Callee::Builtin(Builtin::Release)) => true,
-            Some(Callee::Fn(f)) => releases[f.index()].is_some(),
+        let calls = match typed.callees[e.index()] {
+            Some(Callee::Builtin(b)) => b == builtin,
+            Some(Callee::Fn(f)) => found[f.index()].is_some(),
             _ => false,
         };
-        if found {
+        if calls {
             return Some(ast.expr(e).span);
         }
     }
@@ -1333,6 +1344,8 @@ impl<'a> Walker<'a> {
         let any = tainted_args.iter().any(|&(_, t)| t);
         match callee {
             Some(Callee::Builtin(Builtin::Measure)) => true,
+            // Only a simulator running gate by gate can show its state (`inspects`).
+            Some(Callee::Builtin(Builtin::Amplitudes)) => false,
             // The basis decides the gates, as an angle does.
             Some(Callee::Builtin(Builtin::MeasureIn)) => {
                 if let Some(&(arg, _)) = tainted_args.iter().find(|&&(_, t)| t)

@@ -209,6 +209,8 @@ pub enum Rvalue {
     /// `T::try_from(x)`: `Ok` (variant 0) with `x` as a `T` if it is in range, otherwise
     /// `Err` (variant 1) with a message.
     TryConvert(Ty, Operand),
+    /// A register's amplitudes, given a reference to it: a `[Complex; 2^N]`.
+    Amplitudes(Operand),
     /// The outcome a computed label expects when measured in its basis: a `Bit` itself, or
     /// for a `State`, 1 for the −1 eigenstates.
     LabelBit(Operand),
@@ -671,6 +673,7 @@ impl Program {
             Rvalue::Math(math, ops) => format!("{math:?}({})", list(ops)).to_lowercase(),
             Rvalue::BigInt(text) => text.clone(),
             Rvalue::LabelBit(op) => format!("label_bit({})", operand_text(op)),
+            Rvalue::Amplitudes(op) => format!("amplitudes({})", operand_text(op)),
             Rvalue::TryConvert(ty, op) => {
                 format!("{}::try_from({})", self.type_name(*ty), operand_text(op))
             }

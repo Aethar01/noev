@@ -214,6 +214,13 @@ pub trait Session {
         None
     }
 
+    /// The state of the register `qubits`, as (real, imaginary) amplitudes over its basis
+    /// states with `qubits[0]` the most significant bit; an error if the register is
+    /// entangled with other qubits, so has no state of its own.
+    fn amplitudes(&self, _qubits: &[usize]) -> Option<Result<Vec<(f64, f64)>, BackendError>> {
+        None
+    }
+
     /// The amplitude of the basis state with every qubit in \|0⟩, as (real, imaginary) parts.
     fn zero_amplitude(&self) -> Option<Result<(f64, f64), BackendError>> {
         None

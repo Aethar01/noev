@@ -569,6 +569,11 @@ impl Document {
                     "a circuit, but run shot by shot: {why} (line {})",
                     line(*span)
                 )
+            } else if let Some(span) = info.inspects {
+                format!(
+                    "a circuit, but run shot by shot: it reads amplitudes (line {})",
+                    line(span)
+                )
             } else if let Some(span) = info.releases {
                 format!(
                     "a circuit, but run shot by shot: it calls `release` (line {})",

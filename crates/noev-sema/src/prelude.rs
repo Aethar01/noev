@@ -41,6 +41,8 @@ pub enum Builtin {
     Const(FloatConst),
     /// A method of `Distribution<T>`.
     Dist(DistMethod),
+    /// `amplitudes(r)`: a register's amplitudes, on a simulator (`spec/std.md` §2).
+    Amplitudes,
     /// `print(…)` (`stderr: false`) or `eprint(…)` (`stderr: true`). Standard library.
     Print {
         /// Whether it writes to standard error.
@@ -58,6 +60,7 @@ impl Builtin {
                 | Builtin::Reset
                 | Builtin::Discard
                 | Builtin::Release
+                | Builtin::Amplitudes
                 | Builtin::Print { .. }
         )
     }
@@ -83,6 +86,7 @@ impl Builtin {
             Builtin::Convert(_) => "a conversion",
             Builtin::Const(_) => "a constant",
             Builtin::Dist(_) => "a distribution method",
+            Builtin::Amplitudes => "amplitudes",
             Builtin::Print { stderr: false } => "print",
             Builtin::Print { stderr: true } => "eprint",
         }

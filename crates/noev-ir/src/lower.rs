@@ -755,7 +755,7 @@ impl Builder<'_> {
                     return Place::local(self.local(local));
                 }
             }
-            ExprKind::Field { base, name } if self.is_place_expr(base) => {
+            ExprKind::Field { base, name } => {
                 let base_place = self.place_deref(base);
                 let struct_ty = self.types.deref(self.ty(base));
                 if let TyKind::Struct(s) = *self.types.kind(struct_ty) {
@@ -767,10 +767,11 @@ impl Builder<'_> {
                     return base_place.with(Proj::Field(index as u32));
                 }
             }
-            ExprKind::TupleIndex { base, index } if self.is_place_expr(base) => {
+            // Into a place, or into a temporary holding a value such as a call's (`g()[1]`).
+            ExprKind::TupleIndex { base, index } => {
                 return self.place_deref(base).with(Proj::Field(index));
             }
-            ExprKind::Index { base, index } if self.is_place_expr(base) => {
+            ExprKind::Index { base, index } => {
                 let base_place = self.place_deref(base);
                 let index = self.index_operand(index);
                 return base_place.with(Proj::Index(index));
@@ -853,7 +854,13 @@ impl Builder<'_> {
             self.assign(temp.clone(), Rvalue::Ref { mutable, place });
             return Operand::Copy(temp);
         }
-        if self.is_place_expr(id) {
+        // A projection is read from its place, which `place` makes from a temporary when its
+        // base is a value such as a call's result.
+        let projection = matches!(
+            expr.kind,
+            ExprKind::Field { .. } | ExprKind::TupleIndex { .. } | ExprKind::Index { .. }
+        );
+        if self.is_place_expr(id) || projection {
             let ty = self.ty(id);
             return match adjust {
                 Adjust::Deref => {
@@ -1696,6 +1703,11 @@ impl Builder<'_> {
                         },
                     );
                 }
+            }
+            Builtin::Amplitudes => {
+                let Some(first) = first else { return };
+                let register = self.operand(first);
+                self.set(&dest, Rvalue::Amplitudes(register));
             }
             Builtin::Measure => {
                 let Some(first) = first else { return };

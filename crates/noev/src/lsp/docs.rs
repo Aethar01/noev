@@ -21,6 +21,12 @@ pub fn builtin(b: Builtin) -> (String, String) {
              measures every qubit in that basis.\n\nStandard library: a rotation into the Z \
              basis (X: `h`; Y: `adj s`, then `h`), then `measure`. Not reversible.",
         ),
+        Builtin::Amplitudes => (
+            "fn amplitudes(r: ref [Qubit; N]) -> [Complex; 2^N]",
+            "For debugging on a simulator: the register's amplitudes, over |00⟩, |01⟩, … as kets \
+             read. An error if it is entangled with other qubits, or if the backend cannot see \
+             the state. Not reversible; a `sample` that reads amplitudes runs shot by shot.",
+        ),
         Builtin::Reset => (
             "fn reset(mut self) -> mut Self",
             "Returns the qubit to |0⟩; it stays usable. Not reversible.",

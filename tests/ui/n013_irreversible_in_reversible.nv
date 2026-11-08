@@ -32,3 +32,11 @@ fn reset_in_ctrl() {
     mv a.discard()
     mv b.discard()
 }
+
+fn amplitudes_in_ctrl() {
+    let a = |+>
+    let b = |0>
+    ctrl a { let s = amplitudes(b) }    //~ N013
+    mv a.discard()
+    mv b.discard()
+}

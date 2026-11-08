@@ -2202,6 +2202,9 @@ impl Checker<'_> {
                 if text == "measure" {
                     return self.measure_fn(id, args, span);
                 }
+                if text == "amplitudes" {
+                    return self.amplitudes_fn(id, args, span);
+                }
                 if let Some((builtin, sig)) = prelude::function(&mut self.t.types, &text) {
                     self.t.callees[id.index()] = Some(Callee::Builtin(builtin));
                     return self.check_args(&sig, None, args, span);
@@ -2695,6 +2698,45 @@ impl Checker<'_> {
             }
         }
         Ty::STRING
+    }
+
+    /// `amplitudes(r)`: lends a qubit or an array of at most 20, and gives its 2^N amplitudes
+    /// (`spec/std.md` §2).
+    fn amplitudes_fn(&mut self, id: ExprId, args: &[ExprId], span: Span) -> Ty {
+        self.t.callees[id.index()] = Some(Callee::Builtin(Builtin::Amplitudes));
+        let [arg] = *args else {
+            self.error(span, "`amplitudes` takes one qubit or array of qubits");
+            self.skip_args(args);
+            return Ty::ERROR;
+        };
+        let found = self.expr(arg, Expect::None);
+        let ty = self.t.types.deref(found);
+        let qubits = match (ty, self.array_of(ty)) {
+            (Ty::QUBIT, _) => 1,
+            (_, Some((Ty::QUBIT, len))) => len,
+            _ if self.t.types.is_wildcard(ty) => return Ty::ERROR,
+            _ => {
+                let message = format!(
+                    "`amplitudes` takes a qubit or an array of qubits, but this is {}",
+                    self.show(ty)
+                );
+                let span = self.ast.expr(arg).span;
+                self.error(span, message);
+                return Ty::ERROR;
+            }
+        };
+        if qubits > 20 {
+            let span = self.ast.expr(arg).span;
+            self.error(
+                span,
+                "`amplitudes` shows at most 20 qubits: 2^20 amplitudes",
+            );
+            return Ty::ERROR;
+        }
+        // Lent, as `describe(e)` lends `e`.
+        let lent = self.t.types.reference(false, ty);
+        self.coerce(arg, found, lent);
+        self.t.types.array(Ty::COMPLEX, 1 << qubits)
     }
 
     /// The free function `measure`, on a qubit or an array of qubits.

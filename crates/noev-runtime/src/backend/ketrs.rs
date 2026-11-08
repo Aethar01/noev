@@ -185,6 +185,10 @@ impl Session for KetrsSession {
         Some(self.state.expectation(&sum).map_err(sim_error))
     }
 
+    fn amplitudes(&self, qubits: &[usize]) -> Option<Result<Vec<(f64, f64)>, BackendError>> {
+        Some(register_state(self.state.amplitudes(), qubits))
+    }
+
     fn zero_amplitude(&self) -> Option<Result<(f64, f64), BackendError>> {
         // With no qubits the state is the number 1.
         let zero = self
@@ -206,6 +210,65 @@ impl Session for KetrsSession {
         }
         Some(counts.into_iter().collect())
     }
+}
+
+/// The state of the register `qubits` within the whole state `full` (qubit `q` at bit `q` of
+/// an index), with `qubits[0]` the most significant bit of the result's index. The register
+/// has a state of its own only if `full` is that state times one of the rest: the column of
+/// the rest's largest weight gives it, and every other column must be a multiple of it.
+fn register_state(
+    full: &[ketrs::Complex64],
+    qubits: &[usize],
+) -> Result<Vec<(f64, f64)>, BackendError> {
+    let mask: usize = qubits.iter().map(|&q| 1 << q).sum();
+    // The register's index for a full index, `qubits[0]` most significant.
+    let local = |index: usize| {
+        qubits
+            .iter()
+            .fold(0usize, |acc, &q| (acc << 1) | ((index >> q) & 1))
+    };
+    let mut weights: BTreeMap<usize, f64> = BTreeMap::new();
+    for (index, a) in full.iter().enumerate() {
+        *weights.entry(index & !mask).or_default() += a.norm_sqr();
+    }
+    let (&rest, &weight) = weights
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .ok_or_else(|| BackendError("the state is empty".into()))?;
+    let norm = weight.sqrt();
+    let mut state = vec![ketrs::Complex64::new(0.0, 0.0); 1 << qubits.len()];
+    for (index, a) in full.iter().enumerate() {
+        if index & !mask == rest {
+            state[local(index)] = a / norm;
+        }
+    }
+    // Each column of the rest, projected onto the register's state, must account for all of
+    // its weight.
+    let mut overlaps: BTreeMap<usize, ketrs::Complex64> = BTreeMap::new();
+    for (index, a) in full.iter().enumerate() {
+        *overlaps.entry(index & !mask).or_default() += state[local(index)].conj() * a;
+    }
+    let missing: f64 = weights
+        .iter()
+        .map(|(column, w)| w - overlaps[column].norm_sqr())
+        .sum();
+    if missing > 1e-9 {
+        return Err(BackendError(
+            "the register is entangled with other qubits, so it has no amplitudes of its own"
+                .into(),
+        ));
+    }
+    // A register's overall phase is not its own once other qubits exist, so fix one: the
+    // first amplitude that is not zero is real and positive.
+    let phase = state
+        .iter()
+        .find(|a| a.norm() > 1e-12)
+        .map_or(ketrs::Complex64::new(1.0, 0.0), |a| a.conj() / a.norm());
+    Ok(state
+        .iter()
+        .map(|a| a * phase)
+        .map(|a| (a.re, a.im))
+        .collect())
 }
 
 /// The ketrs operation for a gate with its controls.

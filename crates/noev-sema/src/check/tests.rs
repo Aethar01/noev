@@ -397,6 +397,20 @@ fn matrix_gates() {
 }
 
 #[test]
+fn state_inspection() {
+    ok("fn f(r: ref [Qubit; 3]) -> [Complex; 8] { amplitudes(r) }");
+    ok("fn f(q: ref Qubit) -> Complex { amplitudes(q)[1] }");
+    assert_eq!(
+        one_error("fn f(b: Bit) -> [Complex; 2] { amplitudes(b) }"),
+        "`amplitudes` takes a qubit or an array of qubits, but this is `Bit`"
+    );
+    assert_eq!(
+        one_error("fn f(r: ref [Qubit; 21]) { let a = amplitudes(r) }"),
+        "`amplitudes` shows at most 20 qubits: 2^20 amplitudes"
+    );
+}
+
+#[test]
 fn type_aliases() {
     ok("type Byte = [Bit; 8]\nfn f(b: Byte) -> [Bit; 8] { b }");
     ok("type A = B\ntype B = Int\nfn f(a: A) -> Int { a + 1 }");

@@ -460,6 +460,8 @@ fn plan(checked: &Checked) -> String {
             ))
         } else if let Some((span, why)) = &info.feedback_unsupported {
             Some(format!("{why}, not compiled yet (line {})", line(*span)))
+        } else if let Some(span) = info.inspects {
+            Some(format!("it reads amplitudes (line {})", line(span)))
         } else {
             info.releases
                 .map(|span| format!("the simulator checks its `release` (line {})", line(span)))

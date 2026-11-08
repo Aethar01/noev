@@ -226,6 +226,17 @@ fn expectation_values_are_exact() {
 }
 
 #[test]
+fn projections_of_values() {
+    // Indexing a call's result used to recurse forever while lowering.
+    assert_eq!(
+        always(
+            "struct P {\n x: Int\n y: Int\n}\nfn g() -> [Int; 2] { [1, 2] }\nfn p() -> P { P { x: 4, y: 5 } }\nfn test() -> Int { g()[1] + p().y + [10, 20][0] + (3, 4).1 }"
+        ),
+        "21"
+    );
+}
+
+#[test]
 fn classical_code() {
     assert_eq!(
         always(
@@ -1097,4 +1108,28 @@ ctrl @ gphase(0.7853981633974483) q[0];
 c[0] = measure q[0];
 c[1] = measure q[1];"]
     );
+}
+
+#[test]
+fn amplitudes_need_a_simulator_that_holds_the_state() {
+    let program = compile("fn main() {\n let q = |+>\n print(amplitudes(q))\n mv q.discard()\n}");
+    let sink = || Output {
+        stdout: Box::new(std::io::sink()),
+        stderr: Box::new(std::io::sink()),
+    };
+    // A backend that runs only circuits cannot even reach the call; one that runs gate by
+    // gate without holding the state says it cannot show amplitudes.
+    let error = run_main(&program, &Blind, 7, sink()).unwrap_err();
+    assert!(
+        error.message.contains("only runs circuits")
+            || error.message.contains("cannot show amplitudes"),
+        "{}",
+        error.message
+    );
+    // Entangled with another qubit, a register has no state of its own.
+    let program = compile(
+        "fn main() {\n let r = |+0>\n ctrl r[0] { r[1].x() }\n print(amplitudes(r[0]))\n print(mv r.measure())\n}",
+    );
+    let error = run_main(&program, &Ketrs, 7, sink()).unwrap_err();
+    assert!(error.message.contains("entangled"), "{}", error.message);
 }

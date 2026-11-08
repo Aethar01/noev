@@ -22,8 +22,16 @@ before 1.0.
   `[Qubit; 2]` with a 4×4 matrix over \|00⟩, \|01⟩, \|10⟩, \|11⟩. Checked to be unitary when
   they run; reversible, so `adj` and (for one qubit) `ctrl` work. A one-qubit matrix exports
   as `U(θ, φ, λ)` with its global phase under control.
+- `amplitudes(r)`, for debugging on a simulator: a register's state as a `[Complex; 2^N]`,
+  over \|00⟩, \|01⟩, … with the first non-zero amplitude real and positive; an error if the
+  register is entangled with other qubits. A `sample` that reads amplitudes runs shot by shot.
 - A method call may follow an expectation value or amplitude directly:
   `<ψ| H |ψ>.round()`, `<φ|ψ>.abs()`.
+
+### Compiler
+
+- Indexing or taking a field of a value that is not a variable, such as a call's result
+  (`g()[1]`, `p().y`), no longer overflows the compiler's stack.
 
 ### Editors
 

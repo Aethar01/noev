@@ -788,7 +788,10 @@ impl Machine<'_> {
     fn stmt(&mut self, stmt: &Stmt) -> Result<()> {
         match stmt {
             Stmt::Assign(place, value) => {
-                let value = self.rvalue(value)?;
+                let value = match value {
+                    Rvalue::Amplitudes(register) => self.amplitudes(register)?,
+                    value => self.rvalue(value)?,
+                };
                 self.store(place, value)
             }
             Stmt::Prepare { qubit, label } => {
@@ -1106,6 +1109,33 @@ impl Machine<'_> {
         Ok(())
     }
 
+    /// `amplitudes(r)`: the register's state, from a simulator running gate by gate.
+    fn amplitudes(&mut self, register: &Operand) -> Result<Value> {
+        let mut qubits = Vec::new();
+        match self.operand(register)? {
+            Value::Ref(ptr) => self.get(&ptr)?.qubits(&mut qubits),
+            other => other.qubits(&mut qubits),
+        }
+        if matches!(self.mode, Mode::Build(_)) {
+            return Err(RuntimeError::new(
+                "amplitudes can be read only while a simulator runs gate by gate",
+            ));
+        }
+        let Some(amplitudes) = self.session()?.amplitudes(&qubits) else {
+            return Err(RuntimeError::new(format!(
+                "`{}` cannot show amplitudes: it does not hold the state",
+                self.backend.name()
+            )));
+        };
+        let amplitudes = amplitudes.map_err(backend_error)?;
+        Ok(Value::Aggregate(
+            amplitudes
+                .into_iter()
+                .map(|(re, im)| Value::Complex(re, im))
+                .collect(),
+        ))
+    }
+
     /// Applies a gate, or records it when a function's gates are being collected (`adj`, a
     /// bra's preparation).
     fn emit(&mut self, op: Op) -> Result<()> {
@@ -1369,6 +1399,7 @@ impl Machine<'_> {
                     .collect::<Result<Vec<_>>>()?;
                 maths(*math, &args)?
             }
+            Rvalue::Amplitudes(_) => unreachable!("read by its statement, which needs the session"),
             Rvalue::LabelBit(op) => match self.operand(op)? {
                 Value::Variant(index, _) => Value::Bit(state_label(index)?.outcome()),
                 bit => bit,

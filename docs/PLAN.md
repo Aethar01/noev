@@ -408,7 +408,7 @@ need generics and operator traits.
 | 1  | `Complex` and `c32`           | Types, `i` literals, arithmetic, `re` `im` `abs` `arg` `conj` `exp` `sqrt`, `Complex::polar(r, θ)` for phases, conversions as for floats, printing (`1.0+2.0i`) | ☑ Done |
 | 2  | Amplitudes                    | `<φ\|ψ>` as a `Complex`, and transition values `<φ\| H \|ψ>`: exact on simulators, estimated `within ε` elsewhere (Hadamard tests) | ☑ Done |
 | 3  | Gates from matrices           | A gate given as a unitary matrix of `Complex` values, checked to be unitary, decomposed for backends that need named gates | ◐ One and two qubits; one-qubit export as `U` and a phase; two-qubit export and two-qubit `ctrl` to do |
-| 4  | State inspection              | A simulator's amplitudes for a register, for debugging; an error on backends that cannot see the state | ☐ Todo |
+| 4  | State inspection              | A simulator's amplitudes for a register, for debugging; an error on backends that cannot see the state | ☑ Done |
 | 5  | Classical post-processing     | Standard-library routines on `[Complex; N]`, starting with the Fourier transform used after phase estimation | ☐ Todo |
 
 ### Compilation (`spec/runtime.md`)

@@ -1,0 +1,16 @@
+// `amplitudes(r)` (spec/std.md §2): a register's state on a simulator, for debugging. It
+// lends the register, and fixes the overall phase so the first amplitude that is not zero is
+// real and positive.
+
+fn main() {
+    let r = |+0>
+    ctrl r[0] { r[1].x() }
+    let bell = amplitudes(r)
+    print(bell[1], bell[2], (bell[0] - bell[3]).abs() < 1e-12)
+    let q = |(+i)>
+    let one = |1>
+    print(amplitudes(one), (amplitudes(q)[1] - amplitudes(q)[0] * 1i).abs() < 1e-12)
+    // Lent, not consumed: the qubits are still there to measure.
+    let m = mv r.measure()
+    print(m[0] == m[1], <(+i)| mv q, <1| mv one)
+}
