@@ -7,6 +7,8 @@ before 1.0.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-08
+
 ### Language
 
 - Complex numbers: `Complex` (two `Float`s, also called `c64`, like Python's `complex`) and
@@ -165,6 +167,7 @@ compiler that checks, runs and exports it.
 - A tree-sitter grammar (`editors/tree-sitter-noev`) with highlight, indent and fold queries,
   and Neovim runtime files (`editors/nvim`).
 
+[0.4.0]: https://github.com/Aethar01/noev/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Aethar01/noev/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Aethar01/noev/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Aethar01/noev/releases/tag/v0.1.0
