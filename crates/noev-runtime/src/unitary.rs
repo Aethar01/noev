@@ -144,12 +144,44 @@ fn op(gate: Gate, params: Vec<f64>, controls: Vec<usize>, target: usize) -> Op {
 }
 
 /// A two-qubit matrix on the qubits `first` (the left label) and `second`, as gates every
-/// backend and OpenQASM have: one-qubit matrices controlled by the other qubit, `x`, and
-/// phase gates. In the basis order [`CHAIN`], rotations of neighbouring rows (Givens) reduce
-/// the matrix to a diagonal; each rotation acts on two basis states that differ in one qubit,
-/// so it is a one-qubit gate controlled by the other, and the diagonal is phase gates. The
-/// overall phase is kept, as `p·x·p·x`, since an outer `ctrl` makes it a relative one.
+/// backend and OpenQASM have: the fewest CNOTs, between one-qubit matrices
+/// ([`crate::kak`]). Should that not settle numerically, [`rotations`] gives it exactly
+/// with more two-qubit gates. Either way the overall phase is kept, as `p·x·p·x`, since an
+/// outer `ctrl` makes it a relative one.
 pub fn decompose(params: &[f64], adjoint: bool, first: usize, second: usize) -> Vec<Op> {
+    let m = rows(params, adjoint);
+    let matrix: [[C; 4]; 4] = std::array::from_fn(|i| std::array::from_fn(|j| m[i][j]));
+    let Some((pieces, phase)) = crate::kak::decompose(&matrix) else {
+        return rotations(params, adjoint, first, second);
+    };
+    let qubit = |q: usize| if q == 0 { first } else { second };
+    let mut ops = Vec::new();
+    if phase.abs() > 1e-15 {
+        // e^{iφ}·I = X · P(φ) · X · P(φ).
+        for _ in 0..2 {
+            ops.push(op(Gate::P, vec![phase], vec![], first));
+            ops.push(op(Gate::X, vec![], vec![], first));
+        }
+    }
+    for piece in pieces {
+        ops.push(match piece {
+            crate::kak::Piece::One(q, u) => {
+                let params = u.iter().flatten().flat_map(|&(re, im)| [re, im]).collect();
+                op(Gate::Unitary, params, vec![], qubit(q))
+            }
+            crate::kak::Piece::Cx(control, target) => {
+                op(Gate::X, vec![], vec![qubit(control)], qubit(target))
+            }
+        });
+    }
+    ops
+}
+
+/// A two-qubit matrix as rotations of pairs of basis states: in the basis order [`CHAIN`],
+/// rotations of neighbouring rows (Givens) reduce the matrix to a diagonal; each rotation
+/// acts on two basis states that differ in one qubit, so it is a one-qubit gate controlled by
+/// the other, and the diagonal is phase gates. Always exact, but up to six controlled gates.
+fn rotations(params: &[f64], adjoint: bool, first: usize, second: usize) -> Vec<Op> {
     let m = rows(params, adjoint);
     let mut v = [[(0.0, 0.0); 4]; 4];
     for i in 0..4 {
@@ -370,7 +402,15 @@ mod tests {
             .unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(params, flat(&matrix));
             for adjoint in [false, true] {
+                // Both decompositions: the fewest CNOTs, and the rotations it falls back on.
                 let got = apply(&decompose(&params, adjoint, 0, 1));
+                let fallback = apply(&rotations(&params, adjoint, 0, 1));
+                let want = rows(&params, adjoint);
+                for (got_row, want_row) in fallback.iter().zip(&want) {
+                    for (g, w) in got_row.iter().zip(want_row) {
+                        assert!((g.0 - w.0).abs() < 1e-12 && (g.1 - w.1).abs() < 1e-12);
+                    }
+                }
                 let want = rows(&params, adjoint);
                 for r in 0..4 {
                     for c in 0..4 {

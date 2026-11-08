@@ -7,6 +7,15 @@ before 1.0.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-08
+
+### Compiler
+
+- Two-qubit matrix gates are decomposed with the fewest CNOTs (the KAK decomposition): none
+  for a product of one-qubit gates, one for a CNOT's class, two for iSWAP's, three in
+  general. It used to take up to six two-qubit gates; that method remains as a fallback if
+  the numbers ever fail to settle, so the result is always exact.
+
 ## [0.4.0] - 2026-11-08
 
 ### Language
@@ -167,6 +176,7 @@ compiler that checks, runs and exports it.
 - A tree-sitter grammar (`editors/tree-sitter-noev`) with highlight, indent and fold queries,
   and Neovim runtime files (`editors/nvim`).
 
+[0.4.1]: https://github.com/Aethar01/noev/releases/tag/v0.4.1
 [0.4.0]: https://github.com/Aethar01/noev/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Aethar01/noev/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Aethar01/noev/releases/tag/v0.2.0

@@ -1133,3 +1133,21 @@ fn amplitudes_need_a_simulator_that_holds_the_state() {
     let error = run_main(&program, &Ketrs, 7, sink()).unwrap_err();
     assert!(error.message.contains("entangled"), "{}", error.message);
 }
+
+#[test]
+fn two_qubit_matrices_export_with_the_fewest_cnots() {
+    // In a circuit, a matrix gate is decomposed: SWAP takes 3 CNOTs, iSWAP 2, CNOT 1.
+    let program = |rows: &str| {
+        format!(
+            "fn main() {{\n let m = {rows}\n print(sample 10 {{\n let r = |01>\n r.unitary(m)\n mv r.measure()\n }})\n}}"
+        )
+    };
+    let swap = "[[1.0 + 0i, 0.0 + 0i, 0.0 + 0i, 0.0 + 0i], [0.0 + 0i, 0.0 + 0i, 1.0 + 0i, 0.0 + 0i], [0.0 + 0i, 1.0 + 0i, 0.0 + 0i, 0.0 + 0i], [0.0 + 0i, 0.0 + 0i, 0.0 + 0i, 1.0 + 0i]]";
+    let iswap = "[[1.0 + 0i, 0.0 + 0i, 0.0 + 0i, 0.0 + 0i], [0.0 + 0i, 0.0 + 0i, 1i, 0.0 + 0i], [0.0 + 0i, 1i, 0.0 + 0i, 0.0 + 0i], [0.0 + 0i, 0.0 + 0i, 0.0 + 0i, 1.0 + 0i]]";
+    let cnot = "[[1.0 + 0i, 0.0 + 0i, 0.0 + 0i, 0.0 + 0i], [0.0 + 0i, 1.0 + 0i, 0.0 + 0i, 0.0 + 0i], [0.0 + 0i, 0.0 + 0i, 0.0 + 0i, 1.0 + 0i], [0.0 + 0i, 0.0 + 0i, 1.0 + 0i, 0.0 + 0i]]";
+    for (rows, want) in [(swap, 3), (iswap, 2), (cnot, 1)] {
+        let text = exported(&program(rows)).join("\n");
+        let cnots = text.lines().filter(|l| l.starts_with("ctrl @ x ")).count();
+        assert_eq!(cnots, want, "{text}");
+    }
+}

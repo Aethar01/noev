@@ -45,9 +45,10 @@ a `[[Complex; 4]; 4]`. Rows and columns follow the basis states as kets read: \|
 10⁻⁹ in each entry of `m·m†`, where the gate runs. Like every gate it is reversible: `adj`
 applies `m†`, and `ctrl` controls it. A one-qubit matrix exports to OpenQASM as
 `U(θ, φ, λ)`, with its global phase under control, where it becomes a relative one. A
-two-qubit matrix is decomposed for circuits and under `ctrl`: rotations of pairs of basis
-states that differ in one qubit, each a one-qubit matrix controlled by the other qubit, and
-phase gates.
+two-qubit matrix is decomposed for circuits and under `ctrl` into one-qubit matrices and
+the fewest CNOTs it needs: none for a product of one-qubit gates, one for a gate equivalent
+to a CNOT, two when one of its interaction coefficients is zero (iSWAP), and three otherwise
+(SWAP).
 
 Every gate is also a free function with the qubits first: `x(q)`, `ry(q, theta)`,
 `swap(a, b)`. The free functions return `()`. Qubit arguments are lent implicitly, so no
