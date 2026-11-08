@@ -18,6 +18,10 @@ before 1.0.
   sides), as `Complex` numbers: `<0|+>`, `<bell()|00>`, `<0| X(0) |1>`. Exact on a
   simulator, estimated with Hadamard tests elsewhere, `within ε` for each part. Both sides
   must be reversible preparations (N023).
+- Gates from matrices: `q.unitary(m)` with `m: [[Complex; 2]; 2]`, and `r.unitary(m)` on a
+  `[Qubit; 2]` with a 4×4 matrix over \|00⟩, \|01⟩, \|10⟩, \|11⟩. Checked to be unitary when
+  they run; reversible, so `adj` and (for one qubit) `ctrl` work. A one-qubit matrix exports
+  as `U(θ, φ, λ)` with its global phase under control.
 - A method call may follow an expectation value or amplitude directly:
   `<ψ| H |ψ>.round()`, `<φ|ψ>.abs()`.
 

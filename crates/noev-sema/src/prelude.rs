@@ -118,6 +118,9 @@ pub enum Gate {
     P,
     U,
     Swap,
+    /// `unitary(m)`: a one- or two-qubit gate given as a matrix of `Complex` values. Its
+    /// entries travel as the gate's parameters: real and imaginary parts, rows first.
+    Unitary,
 }
 
 impl Gate {
@@ -148,8 +151,15 @@ impl Gate {
             Rx | Ry | Rz | P => vec![Ty::FLOAT],
             U => vec![Ty::FLOAT; 3],
             Swap => vec![types.reference(true, Ty::QUBIT)],
+            Unitary => vec![matrix(types, 2)],
         }
     }
+}
+
+/// The type of an `n`×`n` matrix of `Complex` values, `[[Complex; n]; n]`.
+fn matrix(types: &mut Types, n: u64) -> Ty {
+    let row = types.array(Ty::COMPLEX, n);
+    types.array(row, n)
 }
 
 /// A Pauli operator.
@@ -277,7 +287,11 @@ pub fn method(types: &mut Types, base: Ty, name: &str) -> Option<(Builtin, Sig)>
     let self_mut = types.reference(true, base);
     match types.kind(base).clone() {
         TyKind::Qubit => {
-            if let Some(gate) = Gate::from_name(name) {
+            let gate = match name {
+                "unitary" => Some(Gate::Unitary),
+                _ => Gate::from_name(name),
+            };
+            if let Some(gate) = gate {
                 let params = gate.params(types);
                 let sig = Sig::new(Some(OwnKind::Mut), params, self_mut, Yes);
                 return Some((Builtin::Gate(gate), sig));
@@ -307,6 +321,14 @@ pub fn method(types: &mut Types, base: Ty, name: &str) -> Option<(Builtin, Sig)>
                 _ => return None,
             };
             Some((builtin, sig))
+        }
+        // A two-qubit gate from its matrix.
+        TyKind::Array(Ty::QUBIT, 2) if name == "unitary" => {
+            let params = vec![matrix(types, 4)];
+            Some((
+                Builtin::Gate(Gate::Unitary),
+                Sig::new(Some(OwnKind::Mut), params, self_mut, Yes),
+            ))
         }
         TyKind::Array(elem, len) if elem == Ty::QUBIT && name == "measure" => {
             let bits = types.array(Ty::BIT, len);

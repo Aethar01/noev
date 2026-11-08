@@ -816,14 +816,28 @@ impl Machine<'_> {
                 qubits,
                 params,
             } => {
-                let targets = qubits
-                    .iter()
-                    .map(|q| self.qubit(q))
-                    .collect::<Result<Vec<_>>>()?;
-                let params = params
-                    .iter()
-                    .map(|p| self.float(p))
-                    .collect::<Result<Vec<_>>>()?;
+                // A two-qubit matrix acts on a `[Qubit; 2]`: its qubits, in order.
+                let targets = if *gate == Gate::Unitary {
+                    let mut targets = Vec::new();
+                    for q in qubits {
+                        self.load(q)?.qubits(&mut targets);
+                    }
+                    targets
+                } else {
+                    qubits
+                        .iter()
+                        .map(|q| self.qubit(q))
+                        .collect::<Result<Vec<_>>>()?
+                };
+                let params = if *gate == Gate::Unitary {
+                    let matrix = self.value(&params[0])?;
+                    crate::unitary::params(&matrix).map_err(RuntimeError::new)?
+                } else {
+                    params
+                        .iter()
+                        .map(|p| self.float(p))
+                        .collect::<Result<Vec<_>>>()?
+                };
                 let op = Op {
                     gate: *gate,
                     adjoint: *adjoint,
@@ -1263,7 +1277,11 @@ impl Machine<'_> {
                 "a gate's target is also one of its controls",
             ));
         }
-        let wanted = if op.gate == Gate::Swap { 2 } else { 1 };
+        let wanted = match op.gate {
+            Gate::Swap => 2,
+            Gate::Unitary => crate::unitary::size(&op.params) / 2,
+            _ => 1,
+        };
         if op.targets.len() != wanted {
             return Err(RuntimeError::new("a gate with the wrong number of qubits"));
         }

@@ -36,6 +36,16 @@ functions, `ctrl` blocks and under `adj`.
 | `fn p(mut self, lambda: Float) -> mut Self`        | diag(1, e^iλ)             |
 | `fn u(mut self, theta: Float, phi: Float, lambda: Float) -> mut Self` | OpenQASM `U` |
 | `fn swap(mut self, other: mut Qubit) -> mut Self`  | Swap two qubits           |
+| `fn unitary(mut self, m: [[Complex; 2]; 2]) -> mut Self` | The matrix `m`      |
+
+**Gates from matrices.** `q.unitary(m)` applies any one-qubit unitary given as a matrix of
+`Complex` values, rows first, and `r.unitary(m)` on `r: [Qubit; 2]` a two-qubit one given as
+a `[[Complex; 4]; 4]`. Rows and columns follow the basis states as kets read: \|00⟩, \|01⟩,
+\|10⟩, \|11⟩, with `r[0]` the left label. The matrix is checked to be unitary, to within
+10⁻⁹ in each entry of `m·m†`, where the gate runs. Like every gate it is reversible: `adj`
+applies `m†`, and a one-qubit matrix may be controlled with `ctrl`. A two-qubit matrix under
+`ctrl`, and exporting one to OpenQASM, are not supported yet; a one-qubit matrix exports as
+`U(θ, φ, λ)` with its global phase, which matters under control.
 
 Every gate is also a free function with the qubits first: `x(q)`, `ry(q, theta)`,
 `swap(a, b)`. The free functions return `()`. Qubit arguments are lent implicitly, so no

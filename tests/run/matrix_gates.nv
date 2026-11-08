@@ -1,0 +1,38 @@
+// Gates from matrices (spec/core.md §1): one- and two-qubit unitaries, inverted by `adj`
+// and controlled by `ctrl`; a matrix that is not unitary is an error.
+
+fn main() {
+    let r = 1.0 / Float(2).sqrt()
+    let hadamard = [[Complex(r), Complex(r)], [Complex(r), Complex(-r)]]
+    let sqrt_x = [[0.5 + 0.5i, 0.5 - 0.5i], [0.5 - 0.5i, 0.5 + 0.5i]]
+    let cnot = [
+        [1.0 + 0i, 0.0 + 0i, 0.0 + 0i, 0.0 + 0i],
+        [0.0 + 0i, 1.0 + 0i, 0.0 + 0i, 0.0 + 0i],
+        [0.0 + 0i, 0.0 + 0i, 0.0 + 0i, 1.0 + 0i],
+        [0.0 + 0i, 0.0 + 0i, 1.0 + 0i, 0.0 + 0i],
+    ]
+    let a = |0>
+    a.unitary(hadamard)
+    print(<+| mv a)
+    let b = |0>
+    b.unitary(sqrt_x).unitary(sqrt_x)
+    print(<1| mv b)
+    let c = |0>
+    adj c.unitary(sqrt_x)
+    c.unitary(sqrt_x)
+    print(<0| mv c)
+    // CNOT with r[0] as control: |10> -> |11>.
+    let r2 = |10>
+    r2.unitary(cnot)
+    print(mv r2.measure())
+    let d = |1>
+    let e = |0>
+    ctrl d { e.unitary(sqrt_x).unitary(sqrt_x) }
+    print(mv d.measure(), mv e.measure())
+    print(sample 100 {
+        let f = |1>
+        let g = |0>
+        ctrl f { g.unitary(sqrt_x).unitary(sqrt_x) }
+        (mv f.measure(), mv g.measure())
+    })
+}

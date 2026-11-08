@@ -1076,3 +1076,25 @@ fn amplitudes_exact_and_estimated() {
         );
     }
 }
+
+#[test]
+fn a_controlled_matrix_gate_exports_with_its_phase() {
+    // √X under `ctrl`: U(θ, φ, λ) and the global phase, which control makes relative.
+    let source = "fn main() {
+    let sqrt_x = [[0.5 + 0.5i, 0.5 - 0.5i], [0.5 - 0.5i, 0.5 + 0.5i]]
+    print(sample 100 {
+        let f = |+>
+        let g = |0>
+        ctrl f { g.unitary(sqrt_x) }
+        (mv f.measure(), mv g.measure())
+    })
+}";
+    assert_eq!(
+        exported(source),
+        ["h q[0];
+ctrl @ U(1.5707963267948966, -1.5707963267948966, 1.5707963267948966) q[0], q[1];
+ctrl @ gphase(0.7853981633974483) q[0];
+c[0] = measure q[0];
+c[1] = measure q[1];"]
+    );
+}

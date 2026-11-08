@@ -387,6 +387,16 @@ fn amplitudes() {
 }
 
 #[test]
+fn matrix_gates() {
+    ok("fn f(q: mut Qubit, m: [[Complex; 2]; 2]) { q.unitary(m).h() }");
+    ok("fn f(r: mut [Qubit; 2], m: [[Complex; 4]; 4]) { r.unitary(m) }");
+    assert_eq!(
+        one_error("fn f(q: mut Qubit, m: [[Complex; 4]; 4]) { q.unitary(m) }"),
+        "mismatched types: expected `[[Complex; 2]; 2]`, found `[[Complex; 4]; 4]`"
+    );
+}
+
+#[test]
 fn type_aliases() {
     ok("type Byte = [Bit; 8]\nfn f(b: Byte) -> [Bit; 8] { b }");
     ok("type A = B\ntype B = Int\nfn f(a: A) -> Int { a + 1 }");

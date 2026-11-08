@@ -9,7 +9,26 @@ use noev_sema::prelude::Gate;
 
 use crate::backend::{Circuit, Condition, Instruction, Op};
 
-/// The OpenQASM 3 program for `circuit`. `header` lines go first, as comments.
+/// What in `circuit` OpenQASM export cannot write yet, if anything: a two-qubit matrix gate,
+/// which would need decomposing into named gates.
+pub fn unsupported(circuit: &Circuit) -> Option<&'static str> {
+    fn search(list: &[Instruction]) -> bool {
+        list.iter().any(|i| match i {
+            Instruction::Gate(op) => op.gate == Gate::Unitary && op.targets.len() == 2,
+            Instruction::If {
+                then, otherwise, ..
+            } => search(then) || search(otherwise),
+            Instruction::While { body, .. } => search(body),
+            _ => false,
+        })
+    }
+    search(&circuit.instructions).then_some(
+        "a two-qubit matrix gate (`r.unitary(m)`), which OpenQASM export does not decompose yet",
+    )
+}
+
+/// The OpenQASM 3 program for `circuit`. `header` lines go first, as comments. Check
+/// [`unsupported`] first: what it names is written as a comment.
 pub fn to_qasm3(circuit: &Circuit, header: &[String]) -> String {
     let mut out = String::new();
     for line in header {
@@ -85,6 +104,9 @@ fn condition_text(condition: &Condition) -> String {
 }
 
 fn gate(out: &mut String, op: &Op) {
+    if op.gate == Gate::Unitary {
+        return matrix_gate(out, op);
+    }
     let angle = |i: usize| {
         let x = op.params.get(i).copied().unwrap_or(0.0);
         if op.adjoint { -x } else { x }
@@ -104,6 +126,7 @@ fn gate(out: &mut String, op: &Op) {
         Gate::Rz => format!("rz({})", number(angle(0))),
         Gate::P => format!("p({})", number(angle(0))),
         // U(θ, φ, λ)† = U(−θ, −λ, −φ).
+        Gate::Unitary => unreachable!("written by matrix_gate"),
         Gate::U => {
             let p = |i: usize| op.params.get(i).copied().unwrap_or(0.0);
             let (theta, phi, lambda) = if op.adjoint {
@@ -122,11 +145,43 @@ fn gate(out: &mut String, op: &Op) {
         }
     }
     out.push_str(&call);
-    for (i, q) in op.controls.iter().chain(&op.targets).enumerate() {
+    qubits(out, op.controls.iter().chain(&op.targets));
+}
+
+/// ` q[a], q[b];` and a line break.
+fn qubits<'q>(out: &mut String, qubits: impl Iterator<Item = &'q usize>) {
+    for (i, q) in qubits.enumerate() {
         out.push_str(if i == 0 { " " } else { ", " });
         let _ = write!(out, "q[{q}]");
     }
     out.push_str(";\n");
+}
+
+/// A one-qubit matrix gate as `U(θ, φ, λ)`, and under `ctrl` its global phase too, which a
+/// controlled gate makes a relative one.
+fn matrix_gate(out: &mut String, op: &Op) {
+    if op.targets.len() != 1 {
+        out.push_str("// a two-qubit matrix gate, which OpenQASM export does not decompose yet\n");
+        return;
+    }
+    let (theta, phi, lambda, gamma) = crate::unitary::euler(&op.params, op.adjoint);
+    let modifier = match op.controls.len() {
+        0 => String::new(),
+        1 => "ctrl @ ".into(),
+        n => format!("ctrl({n}) @ "),
+    };
+    let _ = write!(
+        out,
+        "{modifier}U({}, {}, {})",
+        number(theta),
+        number(phi),
+        number(lambda)
+    );
+    qubits(out, op.controls.iter().chain(&op.targets));
+    if !op.controls.is_empty() && gamma.abs() > 1e-12 {
+        let _ = write!(out, "{modifier}gphase({})", number(gamma));
+        qubits(out, op.controls.iter());
+    }
 }
 
 /// A float that reads back exactly, with a decimal point.

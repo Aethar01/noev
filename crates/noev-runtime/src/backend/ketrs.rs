@@ -210,6 +210,23 @@ impl Session for KetrsSession {
 
 /// The ketrs operation for a gate with its controls.
 fn operation(op: &Op) -> Result<Operation, BackendError> {
+    // A two-qubit matrix: ketrs counts its qubits from the least significant, so the first
+    // (the left label, most significant) goes second.
+    if op.gate == Gate::Unitary && op.targets.len() == 2 {
+        if !op.controls.is_empty() {
+            return Err(BackendError(
+                "a two-qubit matrix gate under `ctrl` is not supported yet".into(),
+            ));
+        }
+        let m = crate::unitary::rows(&op.params, op.adjoint);
+        let matrix = std::array::from_fn(|i| {
+            std::array::from_fn(|j| ketrs::Complex64::new(m[i][j].0, m[i][j].1))
+        });
+        return Ok(Operation::Unitary2 {
+            matrix,
+            qubits: [op.targets[1], op.targets[0]],
+        });
+    }
     let gate = ketrs_gate(op.gate, op.adjoint, &op.params);
     Ok(
         match (op.controls.as_slice(), gate, op.targets.as_slice()) {
@@ -269,6 +286,11 @@ fn ketrs_gate(gate: Gate, adjoint: bool, params: &[f64]) -> Option<ketrs::Gate> 
             lambda: param(2),
         },
         Gate::Swap => return None,
+        Gate::Unitary => {
+            let m = crate::unitary::rows(params, adjoint);
+            let c = |(re, im): (f64, f64)| ketrs::Complex64::new(re, im);
+            K::Unitary([[c(m[0][0]), c(m[0][1])], [c(m[1][0]), c(m[1][1])]])
+        }
     })
 }
 
