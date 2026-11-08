@@ -1590,6 +1590,17 @@ fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
             NotEq => Value::Bool(a != b),
             _ => return Err(RuntimeError::new(format!("{} on Bool", op.as_str()))),
         },
+        // Element by element, each by its own type's `==`.
+        (Value::Aggregate(xs), Value::Aggregate(ys)) if matches!(op, Eq | NotEq) => {
+            let mut same = xs.len() == ys.len();
+            for (x, y) in xs.into_iter().zip(ys) {
+                if !same {
+                    break;
+                }
+                same = binary(Eq, x, y)? == Value::Bool(true);
+            }
+            Value::Bool(same == (op == Eq))
+        }
         (a @ Value::Variant(..), b @ Value::Variant(..)) => match op {
             Eq => Value::Bool(a == b),
             NotEq => Value::Bool(a != b),

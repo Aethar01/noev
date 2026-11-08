@@ -411,6 +411,16 @@ fn state_inspection() {
 }
 
 #[test]
+fn arrays_and_tuples_compare() {
+    ok("fn f(m: [Bit; 2]) -> Bool { m == [0, 1] and (1, true) != (0, true) }");
+    ok("fn f(a: [[Int; 2]; 2]) -> Bool { a == [[1, 2], [3, 4]] }");
+    assert_eq!(
+        one_error("fn f(a: [Qubit; 2], b: [Qubit; 2]) -> Bool { a == b }"),
+        "`==` cannot be applied to `[Qubit; 2]` and `[Qubit; 2]`"
+    );
+}
+
+#[test]
 fn type_aliases() {
     ok("type Byte = [Bit; 8]\nfn f(b: Byte) -> [Bit; 8] { b }");
     ok("type A = B\ntype B = Int\nfn f(a: A) -> Int { a + 1 }");

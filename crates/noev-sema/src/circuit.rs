@@ -356,6 +356,17 @@ fn holds_logic(typed: &Typed, ty: Ty) -> bool {
     }
 }
 
+/// Whether every value in `ty` is a `Bit` or `Bool`: logic, including a bit string compared
+/// with `==`.
+fn all_logic(types: &crate::ty::Types, ty: Ty) -> bool {
+    match types.kind(ty) {
+        TyKind::Bit | TyKind::Bool => true,
+        &TyKind::Array(elem, _) => all_logic(types, elem),
+        TyKind::Tuple(elems) => elems.iter().all(|&t| all_logic(types, t)),
+        _ => false,
+    }
+}
+
 /// Where each function calls `builtin` (`release`, `amplitudes`), itself or through the
 /// functions it calls.
 fn infer_calls(ast: &Ast, typed: &Typed, order: &CallOrder, builtin: Builtin) -> Vec<Option<Span>> {
@@ -1064,7 +1075,7 @@ impl<'a> Walker<'a> {
     fn expr(&mut self, id: ExprId, before: bool) -> bool {
         let ast = self.cx.ast;
         let expr = *ast.expr(id);
-        let is_logic_type = |ty: Ty| matches!(self.cx.typed.types.deref(ty), Ty::BIT | Ty::BOOL);
+        let is_logic_type = |ty: Ty| all_logic(&self.cx.typed.types, self.cx.typed.types.deref(ty));
         match expr.kind {
             ExprKind::Name(_) => match self.cx.typed.res[id.index()] {
                 Res::Local(local) => self.tainted[local.index()],

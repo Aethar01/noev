@@ -1,0 +1,17 @@
+// Arrays and tuples compare element by element (spec/types.md §2); on measured bits the
+// comparison is a condition a circuit can use.
+
+fn main() {
+    let r = |01>
+    let m = mv r.measure()
+    print(m == [0, 1], m != [1, 1], (1, true) == (1, true), [[1, 2], [3, 4]] != [[1, 2], [3, 5]])
+    // In a circuit: the comparison is a condition on measured bits.
+    print(sample 100 {
+        let pair = |+0>
+        ctrl pair[0] { pair[1].x() }
+        let bits = mv pair.measure()
+        let q = |0>
+        if bits == [1, 1] { q.x() }
+        (bits == [1, 1]) == (mv q.measure() == 1)
+    })
+}

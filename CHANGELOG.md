@@ -25,6 +25,8 @@ before 1.0.
 - `amplitudes(r)`, for debugging on a simulator: a register's state as a `[Complex; 2^N]`,
   over \|00⟩, \|01⟩, … with the first non-zero amplitude real and positive; an error if the
   register is entangled with other qubits. A `sample` that reads amplitudes runs shot by shot.
+- Arrays and tuples compare with `==` and `!=`, element by element, when their elements do:
+  `m == [0, 1]` for measured bits, which a circuit records as one condition.
 - A method call may follow an expectation value or amplitude directly:
   `<ψ| H |ψ>.round()`, `<φ|ψ>.abs()`.
 

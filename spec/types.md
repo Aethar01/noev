@@ -111,7 +111,9 @@ enum Outcome {
 - Variants can hold any type, qubits included. An enum is linear, affine or copyable by its
   variants' data (§5), and ownership follows from that ([ownership.md](ownership.md) §13).
 - Enums whose data can be compared can be compared with `==` and `!=`: same variant and
-  equal data.
+  equal data. So can arrays and tuples whose elements can be, element by element:
+  `m == [0, 1]` for measured bits, `(a, b) != (0, 0)`. Comparing measurement results this way
+  is logic on them, which a circuit can use ([execution.md](execution.md) §4).
 
 **Type aliases** name a type that is long or used often:
 

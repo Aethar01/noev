@@ -411,8 +411,8 @@ impl Types {
         self.linearity(ty) == Kind::Copyable && !matches!(self.kind(ty), TyKind::Ref { .. })
     }
 
-    /// Whether `==` and `!=` work on values of `ty`: numbers, logic, strings, and enums whose
-    /// data all work.
+    /// Whether `==` and `!=` work on values of `ty`: numbers, logic, strings, and arrays,
+    /// tuples and enums whose parts all work.
     pub fn is_comparable(&self, ty: Ty) -> bool {
         self.comparable_at(ty, 0)
     }
@@ -424,6 +424,9 @@ impl Types {
         match *self.kind(ty) {
             TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Bit | TyKind::String => true,
             _ if ty.is_number() || ty.is_complex() => true,
+            // Element by element: `m == [0, 1]` for measured bits.
+            TyKind::Array(elem, _) => self.comparable_at(elem, depth + 1),
+            TyKind::Tuple(ref elems) => elems.iter().all(|&t| self.comparable_at(t, depth + 1)),
             TyKind::Struct(id) => match &self.structs[id.index()].variants {
                 Some(variants) => variants
                     .iter()

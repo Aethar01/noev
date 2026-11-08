@@ -212,6 +212,23 @@ impl Value {
         if !self.has_clbits() && !other.is_some_and(Value::has_clbits) {
             return None;
         }
+        // Bit strings compared element by element: one condition, all of them equal.
+        if let (Value::Aggregate(xs), Some(Value::Aggregate(ys)), Some(Eq | NotEq)) =
+            (self, other, op)
+        {
+            let mut all = Condition::Const(xs.len() == ys.len());
+            for (x, y) in xs.iter().zip(ys) {
+                let same = match x.symbolic_logic(Some(Eq), Some(y)) {
+                    Some(Value::Cond(c, _)) => (*c).clone(),
+                    _ => Condition::Const(x == y),
+                };
+                all = Condition::and(all, same);
+            }
+            if op == Some(NotEq) {
+                all = Condition::negate(all);
+            }
+            return Some(Value::Cond(Rc::new(all), false));
+        }
         let (a, bit) = self.logic()?;
         let Some(op) = op else {
             return Some(Value::Cond(Rc::new(Condition::negate(a)), bit));
