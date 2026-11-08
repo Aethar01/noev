@@ -208,6 +208,10 @@ pub enum Math {
     Conj,
     /// `Complex::polar(r, theta)`: the complex number with modulus `r` and phase `theta`.
     Polar,
+    /// `fft(x)`: the discrete Fourier transform of an array of complex numbers.
+    Fft,
+    /// `ifft(x)`: its inverse.
+    Ifft,
 }
 
 /// A `Float` constant.

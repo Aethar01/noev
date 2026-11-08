@@ -421,6 +421,17 @@ fn arrays_and_tuples_compare() {
 }
 
 #[test]
+fn fourier_transforms() {
+    ok("fn f(x: [Complex; 8]) -> [Complex; 8] { ifft(fft(x)) }");
+    ok("fn f(x: [c32; 3]) -> [c32; 3] { fft(x) }");
+    ok("fn f() -> [Complex; 2] { fft([1.0, 0.0]) }");
+    assert_eq!(
+        one_error("fn f(x: [Float; 2]) -> [Float; 2] { fft(x) }"),
+        "`fft` takes a non-empty `[Complex; N]` or `[c32; N]`, but this is `[Float; 2]`"
+    );
+}
+
+#[test]
 fn type_aliases() {
     ok("type Byte = [Bit; 8]\nfn f(b: Byte) -> [Bit; 8] { b }");
     ok("type A = B\ntype B = Int\nfn f(a: A) -> Int { a + 1 }");

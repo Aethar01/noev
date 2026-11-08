@@ -87,8 +87,7 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
     let order = CallOrder::new(ast, typed);
     let quantum = infer_quantum(ast, typed, &order);
     let recordable = infer_recordable(ast, typed, &order);
-    let releases = infer_calls(ast, typed, &order, Builtin::Release);
-    let inspects = infer_calls(ast, typed, &order, Builtin::Amplitudes);
+    let state_use = infer_state_use(ast, typed, &order);
     // A call is part of the run that makes it, so a function is only a circuit if what it
     // calls is: repeat until nothing changes, since functions can call each other.
     let mut cx = Context {
@@ -119,8 +118,8 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
             let base = CircuitInfo {
                 quantum: cx.quantum[index],
                 closed,
-                releases: releases[index],
-                inspects: inspects[index],
+                releases: state_use[index].releases,
+                inspects: state_use[index].inspects,
                 ..CircuitInfo::default()
             };
             let takes_results = typed.fns[index]
@@ -155,10 +154,11 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
         let ExprKind::Sample { body, .. } = expr.kind else {
             continue;
         };
+        let uses = block_state_use(ast, typed, &state_use, body);
         let mut info = CircuitInfo {
             closed: true,
-            releases: block_calls(ast, typed, &releases, body, Builtin::Release),
-            inspects: block_calls(ast, typed, &inspects, body, Builtin::Amplitudes),
+            releases: uses.releases,
+            inspects: uses.inspects,
             ..CircuitInfo::default()
         };
         info.quantum = contains_quantum(ast, typed, &cx.quantum, Node::Block(body));
@@ -367,20 +367,27 @@ fn all_logic(types: &crate::ty::Types, ty: Ty) -> bool {
     }
 }
 
-/// Where each function calls `builtin` (`release`, `amplitudes`), itself or through the
-/// functions it calls.
-fn infer_calls(ast: &Ast, typed: &Typed, order: &CallOrder, builtin: Builtin) -> Vec<Option<Span>> {
-    let mut result: Vec<Option<Span>> = vec![None; ast.all_fns().len()];
+/// Where a function or block needs the simulator's state shot by shot: where it calls
+/// `release` (whose claim the simulator checks) and `amplitudes`, itself or through a call.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct StateUse {
+    releases: Option<Span>,
+    inspects: Option<Span>,
+}
+
+/// [`StateUse`] for each function, repeating until nothing changes, since functions can
+/// call each other.
+fn infer_state_use(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<StateUse> {
+    let mut result = vec![StateUse::default(); ast.all_fns().len()];
     loop {
         let mut changed = false;
         for &index in &order.fns {
-            let decl = &ast.all_fns()[index];
-            if result[index].is_some() {
+            let Some(body) = ast.all_fns()[index].body else {
                 continue;
-            }
-            let Some(body) = decl.body else { continue };
-            if let Some(span) = block_calls(ast, typed, &result, body, builtin) {
-                result[index] = Some(span);
+            };
+            let found = block_state_use(ast, typed, &result, body);
+            if found != result[index] {
+                result[index] = found;
                 changed = true;
             }
         }
@@ -390,28 +397,34 @@ fn infer_calls(ast: &Ast, typed: &Typed, order: &CallOrder, builtin: Builtin) ->
     }
 }
 
-/// Where a block calls `builtin`, itself or through a function that does (`found`).
-fn block_calls(
-    ast: &Ast,
-    typed: &Typed,
-    found: &[Option<Span>],
-    body: BlockId,
-    builtin: Builtin,
-) -> Option<Span> {
+/// [`StateUse`] for a block, given what is known of the functions it calls.
+fn block_state_use(ast: &Ast, typed: &Typed, known: &[StateUse], body: BlockId) -> StateUse {
+    let mut found = StateUse::default();
     let mut stack = vec![Node::Block(body)];
     while let Some(node) = stack.pop() {
         children(ast, node, &mut stack);
         let Node::Expr(e) = node else { continue };
-        let calls = match typed.callees[e.index()] {
-            Some(Callee::Builtin(b)) => b == builtin,
-            Some(Callee::Fn(f)) => found[f.index()].is_some(),
-            _ => false,
+        let span = ast.expr(e).span;
+        let (releases, inspects) = match typed.callees[e.index()] {
+            Some(Callee::Builtin(Builtin::Release)) => (true, false),
+            Some(Callee::Builtin(Builtin::Amplitudes)) => (false, true),
+            Some(Callee::Fn(f)) => (
+                known[f.index()].releases.is_some(),
+                known[f.index()].inspects.is_some(),
+            ),
+            _ => (false, false),
         };
-        if calls {
-            return Some(ast.expr(e).span);
+        if releases {
+            found.releases.get_or_insert(span);
+        }
+        if inspects {
+            found.inspects.get_or_insert(span);
+        }
+        if found.releases.is_some() && found.inspects.is_some() {
+            break;
         }
     }
-    None
+    found
 }
 
 /// Whether each function can be recorded inside classical control of a circuit, itself and

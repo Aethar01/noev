@@ -227,6 +227,15 @@ fn math(m: Math) -> (String, String) {
             "The complex number with modulus `r` and phase `theta`, such as a phase factor \
              `Complex::polar(1.0, theta)`.",
         ),
+        Math::Fft => (
+            "fn fft(x: [Complex; N]) -> [Complex; N]",
+            "The discrete Fourier transform, as NumPy computes it: X[k] = Σ x[n] e^(−2πi·kn/N). \
+             N log N steps for a power-of-two length.",
+        ),
+        Math::Ifft => (
+            "fn ifft(x: [Complex; N]) -> [Complex; N]",
+            "The inverse of `fft`: x[n] = (1/N) Σ X[k] e^(2πi·kn/N), so `ifft(fft(x))` is `x`.",
+        ),
         Math::Bits => (
             "fn bits(self) -> [Bit; N]",
             "The bits of an unsigned integer, most significant first, so they print as the \

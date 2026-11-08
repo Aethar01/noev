@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod format;
+pub mod fourier;
 pub mod int;
 pub mod machine;
 pub mod qasm;

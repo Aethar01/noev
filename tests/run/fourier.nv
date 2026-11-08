@@ -1,0 +1,17 @@
+// `fft` and `ifft` (spec/std.md §3): NumPy's discrete Fourier transform on complex arrays.
+
+fn close(a: Complex, b: Complex) -> Bool {
+    (a - b).abs() < 1e-12
+}
+
+fn main() {
+    let x = [1.0 + 0i, 2.0 + 0i, 3.0 + 0i, 4.0 + 0i]
+    let y = fft(x)
+    print(close(y[0], 10.0 + 0i), close(y[1], -2.0 + 2.0i), close(y[3], -2.0 - 2.0i))
+    let back = ifft(y)
+    print(close(back[0], x[0]), close(back[3], x[3]))
+    // Any length; a lone impulse has every frequency.
+    print(fft([1.0, 0.0, 0.0]))
+    let small: [c32; 2] = [1.0 + 0i, 1.0 + 0i]
+    print(fft(small))
+}

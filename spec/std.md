@@ -99,7 +99,22 @@ is real and positive; only the relative phases between amplitudes mean anything 
 It is not reversible, since under `adj` a function's gates are collected rather than run, and
 a `sample` that reads amplitudes runs shot by shot.
 
-## 3. Observables
+## 3. Classical post-processing
+
+### `fft` and `ifft`
+
+The discrete Fourier transform of a `[Complex; N]` or `[c32; N]`, as NumPy computes it:
+
+```noev
+fn fft(x: [Complex; N]) -> [Complex; N]     // X[k] = Σ x[n] e^(−2πi·kn/N)
+fn ifft(x: [Complex; N]) -> [Complex; N]    // x[n] = (1/N) Σ X[k] e^(2πi·kn/N)
+```
+
+`ifft(fft(x))` is `x`, to rounding. Lengths that are powers of two take N log N steps, others
+N². Phase estimation reads its phase from the inverse transform of the measured register's
+amplitudes or counts; the quantum Fourier transform itself is a circuit of gates.
+
+## 4. Observables
 
 ### `P` and `PX`
 
@@ -125,7 +140,7 @@ multi-qubit state:
 let p11 = <ansatz(theta)| P(0, 1) * P(1, 1) |ansatz(theta)>   // probability of measuring 11
 ```
 
-## 4. Output
+## 5. Output
 
 ### `print` and `eprint`
 
@@ -175,7 +190,7 @@ out.flush()
 - `write(s: String)` buffers; `flush()` writes the buffer out. Both report write errors as a
   `Result`.
 
-## 5. Planned
+## 6. Planned
 
 Most of the standard library needs generics, so that one definition works for any register
 size: the quantum Fourier transform, Grover iterations, arithmetic circuits, state

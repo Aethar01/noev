@@ -8,7 +8,7 @@
 use noev_syntax::ast::*;
 use noev_syntax::{Diagnostic, FxHashMap, Span, Symbol};
 
-use crate::prelude::{self, Builtin, Reversible, Sig};
+use crate::prelude::{self, Builtin, Math, Reversible, Sig};
 use crate::ty::{Kind, StructDef, StructId, Ty, TyKind, Types, VariantDef};
 
 /// A local variable: a `let` binding, parameter, `self`, or loop variable.
@@ -2205,6 +2205,9 @@ impl Checker<'_> {
                 if text == "amplitudes" {
                     return self.amplitudes_fn(id, args, span);
                 }
+                if text == "fft" || text == "ifft" {
+                    return self.fourier_fn(id, text == "ifft", args, span);
+                }
                 if let Some((builtin, sig)) = prelude::function(&mut self.t.types, &text) {
                     self.t.callees[id.index()] = Some(Callee::Builtin(builtin));
                     return self.check_args(&sig, None, args, span);
@@ -2737,6 +2740,44 @@ impl Checker<'_> {
         let lent = self.t.types.reference(false, ty);
         self.coerce(arg, found, lent);
         self.t.types.array(Ty::COMPLEX, 1 << qubits)
+    }
+
+    /// `fft(x)` and `ifft(x)`: a `[Complex; N]` or `[c32; N]` to the same (`spec/std.md` §3).
+    fn fourier_fn(&mut self, id: ExprId, inverse: bool, args: &[ExprId], span: Span) -> Ty {
+        let math = if inverse { Math::Ifft } else { Math::Fft };
+        self.t.callees[id.index()] = Some(Callee::Builtin(Builtin::Math(math)));
+        let name = if inverse { "ifft" } else { "fft" };
+        let [arg] = *args else {
+            self.error(span, format!("`{name}` takes one array of complex numbers"));
+            self.skip_args(args);
+            return Ty::ERROR;
+        };
+        // `fft([1.0, 0.0])`: literals take the type expected, `Complex` unless said otherwise.
+        let hint = match self.ast.expr(arg).kind {
+            ExprKind::Array(elems) => {
+                let len = self.ast.list(elems).len() as u64;
+                Expect::Hint(self.t.types.array(Ty::COMPLEX, len))
+            }
+            _ => Expect::None,
+        };
+        let found = self.expr(arg, hint);
+        let ty = self.t.types.deref(found);
+        match self.array_of(ty) {
+            Some((elem, len)) if elem.is_complex() && len > 0 => {
+                self.coerce(arg, found, ty);
+                ty
+            }
+            _ if self.t.types.is_wildcard(ty) => Ty::ERROR,
+            _ => {
+                let message = format!(
+                    "`{name}` takes a non-empty `[Complex; N]` or `[c32; N]`, but this is {}",
+                    self.show(ty)
+                );
+                let span = self.ast.expr(arg).span;
+                self.error(span, message);
+                Ty::ERROR
+            }
+        }
     }
 
     /// The free function `measure`, on a qubit or an array of qubits.

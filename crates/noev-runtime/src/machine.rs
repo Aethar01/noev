@@ -1741,6 +1741,32 @@ fn maths(math: Math, args: &[Value]) -> Result<Value> {
             .map(Value::Int)
             .ok_or_else(|| RuntimeError::new(format!("cannot convert {x} to an Int")))
     };
+    if let (Math::Fft | Math::Ifft, Some(Value::Aggregate(items))) = (math, args.first()) {
+        let parts = items
+            .iter()
+            .map(|v| match *v {
+                Value::Complex(re, im) => Ok((re, im)),
+                Value::C32(re, im) => Ok((f64::from(re), f64::from(im))),
+                ref other => Err(RuntimeError::new(format!(
+                    "expected a complex number, found {other:?}"
+                ))),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // `c32` values are transformed in `f64` and rounded back.
+        let narrow = matches!(items.first(), Some(Value::C32(..)));
+        let out = crate::fourier::transform(&parts, math == Math::Ifft);
+        return Ok(Value::Aggregate(
+            out.into_iter()
+                .map(|(re, im)| {
+                    if narrow {
+                        Value::C32(re as f32, im as f32)
+                    } else {
+                        Value::Complex(re, im)
+                    }
+                })
+                .collect(),
+        ));
+    }
     // `Complex::polar(r, theta)`, or `c32::polar` from `f32`s.
     if math == Math::Polar {
         return Ok(match args {
@@ -1824,7 +1850,14 @@ fn maths(math: Math, args: &[Value]) -> Result<Value> {
         Math::Round => to_int(x.round())?,
         Math::Floor => to_int(x.floor())?,
         Math::Ceil => to_int(x.ceil())?,
-        Math::Bits | Math::Re | Math::Im | Math::Arg | Math::Conj | Math::Polar => {
+        Math::Bits
+        | Math::Re
+        | Math::Im
+        | Math::Arg
+        | Math::Conj
+        | Math::Polar
+        | Math::Fft
+        | Math::Ifft => {
             return Err(RuntimeError::new(format!("{math:?} on a Float")));
         }
     })
