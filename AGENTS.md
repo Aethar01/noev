@@ -4,7 +4,7 @@ Hybrid classical–quantum language; compiler written in Rust. The full plan, sc
 milestones live in `docs/PLAN.md` — read it before starting work and update the milestone
 table there as milestones complete.
 
-- Source files use the `.nv` extension; CLI binary is `noev` (`check`, `build --emit=qasm3`, `run --shots=N`).
+- Source files use the `.nv` extension; CLI binary is `noev` (`check`, `build --emit=ir|plan`, `run [--seed N] [--backend ketrs|export] [--circuits DIR]`, `export [-o DIR]` for OpenQASM 3, `lsp`). Shot counts are in the program (`sample n { … }`), not on the CLI.
 - Build order: parser → types → ownership checker first; IR, OpenQASM 3 codegen and simulator after.
 - Speed matters: performance is a high priority and add or update a benchmark when changing a compiler phase.
 - The language is defined in `spec/`; the compiler implements it. Change the spec first when behaviour changes.

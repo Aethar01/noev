@@ -23,7 +23,7 @@ names, and its imports, take precedence over the prelude's ([modules.md](modules
 Resets a qubit and releases it. Consumes the qubit; not reversible.
 
 ```noev
-fn discard(mv q: Qubit) {
+fn discard(q: Qubit) {
     q.reset()
     unsafe { mv q.release() }
 }
@@ -46,7 +46,7 @@ enum Basis { X, Y, Z }
 
 /// Measures in `basis`: 0 for the +1 eigenstate (|0⟩, |+⟩, |+i⟩), 1 for the −1 eigenstate
 /// (|1⟩, |−⟩, |−i⟩), so the outcome is always (−1)^bit.
-fn measure_in(mv q: Qubit, basis: Basis) -> Bit {
+fn measure_in(q: Qubit, basis: Basis) -> Bit {
     match basis {
         Basis::X => { q.h() }
         Basis::Y => { adj q.s(); q.h() }
