@@ -24,6 +24,13 @@ before 1.0.
 - Spans are offsets into a source map in which each file has its own range, so diagnostics
   find their file and can point into several files (`spec/modules.md` §8). The lexer, parser
   and lowering take a file's starting offset (`lex_at`, `parse_at`).
+- `pub`, `pub(pkg)`, `pub(super)`, `pub(self)` and `pub(in path)` are parsed on items, fields
+  and methods, and `use` trees with braces, `self`, `*` and `as`, flattened into one import
+  per name. `pub` on a variant or an `impl` block is an error, as in Rust.
+
+### Tools
+
+- The tree-sitter grammar and Neovim highlights know visibilities and `use`.
 
 ## [0.4.2] - 2026-11-08
 

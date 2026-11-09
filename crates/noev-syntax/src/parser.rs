@@ -320,35 +320,70 @@ impl Parser<'_> {
         }
     }
 
-    /// Reports `pub`, which needs modules, and skips it so the item is still parsed.
-    fn skip_pub(&mut self) {
-        if self.at(TokenKind::Pub) {
-            let span = self.bump().span;
-            self.error(
-                span,
-                "`pub` is not supported yet: every program is one module",
-            )
-            .with_help_mut("see spec/modules.md for what is planned");
+    /// `pub`, `pub(pkg)`, `pub(super)`, `pub(self)` or `pub(in path)`, if there is one
+    /// (`spec/modules.md` §4). After `pub`, a `(` always starts a visibility.
+    fn vis(&mut self) -> Vis {
+        if !self.eat(TokenKind::Pub) {
+            return Vis::Private;
+        }
+        if !self.eat(TokenKind::LParen) {
+            return Vis::Pub;
+        }
+        let vis = if self.eat(TokenKind::SelfValue) {
+            Vis::Private
+        } else if self.nth_is_word(0, "pkg") {
+            self.bump();
+            Vis::Pkg
+        } else if self.nth_is_word(0, "super") {
+            self.bump();
+            Vis::Super
+        } else if self.eat(TokenKind::In) {
+            let start = self.span();
+            let path = self.path_segments();
+            Vis::In {
+                path,
+                span: start.to(self.prev_span()),
+            }
+        } else {
+            self.expected("`pkg`, `super`, `self` or `in` and a module's path");
+            while !matches!(self.kind(), TokenKind::RParen | TokenKind::Eof) {
+                self.bump();
+            }
+            Vis::Pub
+        };
+        self.expect(TokenKind::RParen, "`)`");
+        vis
+    }
+
+    /// Parses a visibility where none is allowed, and reports it.
+    fn no_vis(&mut self, what: &str) {
+        let start = self.span();
+        self.vis();
+        if self.span() != start {
+            let span = start.to(self.prev_span());
+            let message = format!("{what} cannot be marked `pub`");
+            self.error(span, message);
         }
     }
 
     fn item(&mut self) -> Option<ItemId> {
-        self.skip_pub();
         let start = self.span();
+        let vis = self.vis();
+        if self.at(TokenKind::Impl) && self.span() != start {
+            let span = start.to(self.prev_span());
+            self.error(span, "an `impl` block cannot be marked `pub`")
+                .with_help_mut("mark its functions instead");
+        }
         if self.at(TokenKind::Use) {
-            self.error(
-                start,
-                "`use` is not supported yet: every program is one module",
-            )
-            .with_help_mut("see spec/modules.md for what is planned");
-            self.recover_statement();
+            let imports = self.use_decl();
             return Some(self.ast.push_item(Item {
-                kind: ItemKind::Error,
+                kind: ItemKind::Use(imports),
+                vis,
                 span: start.to(self.prev_span()),
             }));
         }
         let kind = match self.kind() {
-            _ if self.at_fn_start() => ItemKind::Fn(self.fn_decl(true)),
+            _ if self.at_fn_start() => ItemKind::Fn(self.fn_decl(true, vis)),
             TokenKind::Struct => self.struct_def(),
             TokenKind::Enum => self.enum_def(),
             TokenKind::Type => {
@@ -371,19 +406,118 @@ impl Parser<'_> {
                 self.bump();
                 // Read the declaration so it is not reported again as a broken item.
                 if self.at_fn_start() {
-                    self.fn_decl(false);
+                    self.fn_decl(false, vis);
                 } else {
                     self.recover_item();
                 }
                 return Some(self.ast.push_item(Item {
                     kind: ItemKind::Error,
+                    vis,
                     span: start.to(self.prev_span()),
                 }));
             }
             _ => return None,
         };
         let span = start.to(self.prev_span());
-        Some(self.ast.push_item(Item { kind, span }))
+        Some(self.ast.push_item(Item { kind, vis, span }))
+    }
+
+    /// `use tree`, with the tree's braces flattened into one import per name.
+    fn use_decl(&mut self) -> List<Import> {
+        self.bump();
+        let mark = self.ast.mark::<Import>();
+        let mut prefix = Vec::new();
+        self.use_tree(&mut prefix, false);
+        self.ast.finish(mark)
+    }
+
+    /// One tree of a `use`, after `prefix`: `a::b`, `a::b as c`, `a::*`, `a::{…}`, or `self`
+    /// directly inside braces.
+    fn use_tree(&mut self, prefix: &mut Vec<Symbol>, in_braces: bool) {
+        use TokenKind::*;
+        let start = self.span();
+        let depth = prefix.len();
+        loop {
+            let span = self.span();
+            match self.kind() {
+                SelfValue if in_braces && prefix.len() == depth => {
+                    // `a::{self}` imports the module `a` itself.
+                    self.bump();
+                    let alias = self.use_alias();
+                    self.push_import(prefix, alias, false, start);
+                    break;
+                }
+                Ident => {
+                    self.bump();
+                    let symbol = self.intern(span);
+                    prefix.push(symbol);
+                }
+                _ => {
+                    self.expected("a name to import");
+                    self.recover_use();
+                    break;
+                }
+            }
+            if !self.eat(ColonColon) {
+                let alias = self.use_alias();
+                self.push_import(prefix, alias, false, start);
+                break;
+            }
+            if self.eat(Star) {
+                self.push_import(prefix, None, true, start);
+                break;
+            }
+            if self.eat(LBrace) {
+                loop {
+                    self.skip_newlines();
+                    if matches!(self.kind(), RBrace | Eof) {
+                        break;
+                    }
+                    self.use_tree(prefix, true);
+                    self.skip_newlines();
+                    if !self.eat(Comma) {
+                        break;
+                    }
+                }
+                self.skip_newlines();
+                self.expect(RBrace, "`}` or `,`");
+                break;
+            }
+        }
+        prefix.truncate(depth);
+    }
+
+    /// `as name` or `as _` after an imported name.
+    fn use_alias(&mut self) -> Option<Symbol> {
+        if !self.eat(TokenKind::As) {
+            return None;
+        }
+        let (name, _) = self.name("a name to import it as");
+        Some(name)
+    }
+
+    fn push_import(&mut self, path: &[Symbol], alias: Option<Symbol>, glob: bool, start: Span) {
+        let mark = self.ast.mark::<Symbol>();
+        for &segment in path {
+            self.ast.push_to(segment);
+        }
+        let path = self.ast.finish(mark);
+        let span = start.to(self.prev_span());
+        self.ast.push_to(Import {
+            path,
+            alias,
+            glob,
+            span,
+        });
+    }
+
+    /// Skips the rest of a broken `use` tree, up to a `,` or `}` of its braces or the end of
+    /// the statement.
+    fn recover_use(&mut self) {
+        use TokenKind::*;
+        while !matches!(self.kind(), Comma | RBrace | Newline | Semi | Eof) {
+            self.bump();
+        }
     }
 
     fn name(&mut self, what: &str) -> (Symbol, Span) {
@@ -413,8 +547,8 @@ impl Parser<'_> {
     }
 
     /// `[unsafe] [rev] [circuit] fn name(params) [-> type] block`, or without the block when
-    /// `needs_body` is false (trait declarations).
-    fn fn_decl(&mut self, needs_body: bool) -> FnId {
+    /// `needs_body` is false (trait declarations), visible as `vis` says.
+    fn fn_decl(&mut self, needs_body: bool, vis: Vis) -> FnId {
         let start = self.span();
         let is_unsafe = self.eat(TokenKind::Unsafe);
         let is_rev = self.nth_is_word(0, "rev");
@@ -462,6 +596,7 @@ impl Parser<'_> {
         self.ast.push_fn(FnDecl {
             name,
             name_span,
+            vis,
             is_unsafe,
             is_rev,
             is_circuit,
@@ -529,17 +664,22 @@ impl Parser<'_> {
                 if matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
                     break;
                 }
-                self.skip_pub();
+                let start = self.span();
+                let vis = self.vis();
                 if self.at_fn_start() {
-                    let method = self.fn_decl(true);
+                    let method = self.fn_decl(true, vis);
                     self.ast.push_to(method);
                 } else if self.at(TokenKind::Ident) {
-                    let start = self.span();
                     let (name, _) = self.name("a field name");
                     self.expect(TokenKind::Colon, "`:` and the field's type");
                     let ty = self.ty();
                     let span = start.to(self.prev_span());
-                    self.ast.push_to(FieldDecl { name, ty, span });
+                    self.ast.push_to(FieldDecl {
+                        name,
+                        vis,
+                        ty,
+                        span,
+                    });
                 } else {
                     self.expected("a field or `fn`");
                     self.recover_member();
@@ -572,11 +712,17 @@ impl Parser<'_> {
                 if matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
                     break;
                 }
-                self.skip_pub();
+                let start = self.span();
+                let vis = self.vis();
                 if self.at_fn_start() {
-                    let method = self.fn_decl(true);
+                    let method = self.fn_decl(true, vis);
                     self.ast.push_to(method);
                 } else if self.at(TokenKind::Ident) {
+                    if self.span() != start {
+                        let span = start.to(self.prev_span());
+                        self.error(span, "a variant cannot be marked `pub`")
+                            .with_help_mut("a variant is as visible as its enum");
+                    }
                     let variant = self.variant();
                     self.ast.push_to(variant);
                 } else {
@@ -623,11 +769,17 @@ impl Parser<'_> {
                     break;
                 }
                 let field_start = self.span();
+                self.no_vis("a variant's field");
                 let (name, _) = self.name("a field name");
                 self.expect(TokenKind::Colon, "`:` and the field's type");
                 let ty = self.ty();
                 let span = field_start.to(self.prev_span());
-                self.ast.push_to(FieldDecl { name, ty, span });
+                self.ast.push_to(FieldDecl {
+                    name,
+                    vis: Vis::Private,
+                    ty,
+                    span,
+                });
             }
             self.expect(TokenKind::RBrace, "`}`");
             VariantData::Fields(self.ast.finish(mark))
@@ -654,7 +806,7 @@ impl Parser<'_> {
                     break;
                 }
                 if self.at_fn_start() {
-                    let f = self.fn_decl(false);
+                    let f = self.fn_decl(false, Vis::Private);
                     self.ast.push_to(f);
                 } else if self.eat(TokenKind::Type) {
                     let (name, _) = self.name("an associated type name");
@@ -688,7 +840,7 @@ impl Parser<'_> {
                     break;
                 }
                 if self.at_fn_start() {
-                    let f = self.fn_decl(true);
+                    let f = self.fn_decl(true, Vis::Private);
                     self.ast.push_to(f);
                 } else if self.eat(TokenKind::Type) {
                     let (name, _) = self.name("an associated type name");

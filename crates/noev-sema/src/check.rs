@@ -487,6 +487,13 @@ impl Checker<'_> {
                     self.error(item.span, "`impl` blocks are not supported yet")
                         .help = Some("methods go inside the struct".into());
                 }
+                ItemKind::Use(_) => {
+                    self.error(
+                        item.span,
+                        "`use` is not supported yet: every program is one module",
+                    )
+                    .help = Some("see spec/modules.md for what is planned".into());
+                }
                 ItemKind::Type { .. } | ItemKind::Error => {}
             }
         }

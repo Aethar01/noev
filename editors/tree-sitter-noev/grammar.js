@@ -61,13 +61,44 @@ module.exports = grammar({
         $.trait_item,
         $.impl_item,
         $.extern_item,
+        $.use_declaration,
       ),
 
     // Items
 
+    // `pub`, `pub(pkg)`, `pub(super)`, `pub(self)`, `pub(in a::b)` (spec/modules.md §4).
+    visibility_modifier: ($) =>
+      seq(
+        'pub',
+        optional(
+          seq('(', choice('pkg', 'super', 'self', seq('in', $._module_path)), ')'),
+        ),
+      ),
+
+    _module_path: ($) => choice($.identifier, $.path),
+
+    // `use a::b as c`, `use a::*`, `use a::{self, b, c::*}`.
+    use_declaration: ($) => seq(optional($.visibility_modifier), 'use', $._use_tree),
+
+    _use_tree: ($) => choice($._module_path, $.use_as_clause, $.use_wildcard, $.use_list),
+
+    use_as_clause: ($) =>
+      seq(field('path', choice($._module_path, $.self)), 'as', field('alias', $.identifier)),
+
+    use_wildcard: ($) => seq($._module_path, '::', '*'),
+
+    use_list: ($) =>
+      seq(
+        optional(seq($._module_path, '::')),
+        '{',
+        sepBy(',', choice($._use_tree, $.self)),
+        '}',
+      ),
+
     // `type Byte = [Bit; 8]`.
     type_item: ($) =>
       seq(
+        optional($.visibility_modifier),
         'type',
         field('name', alias($.identifier, $.type_identifier)),
         '=',
@@ -76,6 +107,7 @@ module.exports = grammar({
 
     struct_item: ($) =>
       seq(
+        optional($.visibility_modifier),
         'struct',
         field('name', alias($.identifier, $.type_identifier)),
         '{',
@@ -85,6 +117,7 @@ module.exports = grammar({
 
     enum_item: ($) =>
       seq(
+        optional($.visibility_modifier),
         'enum',
         field('name', alias($.identifier, $.type_identifier)),
         '{',
@@ -104,12 +137,18 @@ module.exports = grammar({
       ),
 
     field_declaration: ($) =>
-      seq(field('name', alias($.identifier, $.field_identifier)), ':', field('type', $._type)),
+      seq(
+        optional($.visibility_modifier),
+        field('name', alias($.identifier, $.field_identifier)),
+        ':',
+        field('type', $._type),
+      ),
 
     function_item: ($) => seq($._function_signature, field('body', $.block)),
 
     _function_signature: ($) =>
       seq(
+        optional($.visibility_modifier),
         optional(alias('unsafe', $.modifier)),
         optional(alias('rev', $.modifier)),
         optional(alias('circuit', $.modifier)),
@@ -129,6 +168,7 @@ module.exports = grammar({
 
     trait_item: ($) =>
       seq(
+        optional($.visibility_modifier),
         'trait',
         field('name', alias($.identifier, $.type_identifier)),
         '{',

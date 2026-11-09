@@ -115,6 +115,12 @@
 
 "fn" @keyword.function
 
+"use" @keyword.import
+
+"as" @keyword.operator
+
+(visibility_modifier) @keyword.modifier
+
 [
   "if"
   "else"

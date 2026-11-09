@@ -189,6 +189,7 @@ pools! {
     arms: Arm,
     field_pats: FieldPat,
     ket_parts: KetPart,
+    imports: Import,
 }
 
 /// The variants of `Option` and `Result`, named without their enum: alone, each is a path
@@ -889,6 +890,45 @@ pub enum TypeKind {
 pub struct Item {
     /// What kind of item.
     pub kind: ItemKind,
+    /// Where it can be used from.
+    pub vis: Vis,
+    /// Where it is.
+    pub span: Span,
+}
+
+/// Where an item, field or method can be used from (`spec/modules.md` §4).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Vis {
+    /// No marker, or `pub(self)`: its own module and the modules inside it.
+    #[default]
+    Private,
+    /// `pub(super)`: its parent module and the modules inside it.
+    Super,
+    /// `pub(in path)`: the named module, which contains this one, and the modules inside it.
+    In {
+        /// The module's path.
+        path: List<Symbol>,
+        /// Where the path is.
+        span: Span,
+    },
+    /// `pub(pkg)`: the whole package.
+    Pkg,
+    /// `pub`: everywhere.
+    Pub,
+}
+
+/// One name a `use` declaration imports, with its braces flattened: `use a::{b, c as d}` is
+/// two imports, `a::b` and `a::c as d`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Import {
+    /// The item's path, ending with its name. For `self` in braces, the module's path; for a
+    /// glob import, the module whose items it imports.
+    pub path: List<Symbol>,
+    /// The name it is imported as, from `as`: `_` imports a trait's methods without its name.
+    /// Without `as`, the path's last name.
+    pub alias: Option<Symbol>,
+    /// Whether it is a glob import, `use m::*`.
+    pub glob: bool,
     /// Where it is.
     pub span: Span,
 }
@@ -900,6 +940,8 @@ pub enum ItemKind {
     Error,
     /// A function.
     Fn(FnId),
+    /// `use …`: the names it imports.
+    Use(List<Import>),
     /// A struct with its fields and methods.
     Struct {
         /// The struct's name.
@@ -960,6 +1002,8 @@ pub struct FnDecl {
     pub name: Symbol,
     /// Where the name is.
     pub name_span: Span,
+    /// Where it can be used from. For a function item, the item's visibility.
+    pub vis: Vis,
     /// Whether it is `unsafe fn`.
     pub is_unsafe: bool,
     /// Whether it is `rev fn`.
@@ -1003,6 +1047,8 @@ pub struct Param {
 pub struct FieldDecl {
     /// The field's name.
     pub name: Symbol,
+    /// Where it can be used from. Fields of enum variants are as visible as their enum.
+    pub vis: Vis,
     /// Its type.
     pub ty: TypeId,
     /// Where it is.

@@ -1,0 +1,76 @@
+================================================================================
+Imports and visibility
+================================================================================
+
+use std::observables::{self, P, PX as X}
+pub use pkg::ansatz::*
+pub(pkg) use super::helpers
+
+pub struct Register {
+    pub(super) size: Int
+    qubits: Qubit
+
+    pub(in pkg::a) fn new() -> Self { Register { size: 8, qubits: |0> } }
+}
+
+pub(self) fn f() {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (use_declaration
+    (use_list
+      (path
+        (identifier)
+        (identifier))
+      (self)
+      (identifier)
+      (use_as_clause
+        (identifier)
+        (identifier))))
+  (use_declaration
+    (visibility_modifier)
+    (use_wildcard
+      (path
+        (identifier)
+        (identifier))))
+  (use_declaration
+    (visibility_modifier)
+    (path
+      (identifier)
+      (identifier)))
+  (struct_item
+    (visibility_modifier)
+    (type_identifier)
+    (field_declaration
+      (visibility_modifier)
+      (field_identifier)
+      (type_path
+        (type_identifier)))
+    (field_declaration
+      (field_identifier)
+      (type_path
+        (type_identifier)))
+    (function_item
+      (visibility_modifier
+        (path
+          (identifier)
+          (identifier)))
+      (identifier)
+      (parameters)
+      (type_path
+        (type_identifier))
+      (block
+        (struct_expression
+          (type_identifier)
+          (field_initializer
+            (field_identifier)
+            (integer))
+          (field_initializer
+            (field_identifier)
+            (ket))))))
+  (function_item
+    (visibility_modifier)
+    (identifier)
+    (parameters)
+    (block)))

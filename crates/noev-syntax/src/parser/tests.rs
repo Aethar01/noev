@@ -204,6 +204,86 @@ fn errors(source: &str) -> Vec<String> {
         .collect()
 }
 
+/// Each import of the first item, which must be a `use`, as `path`, `path as alias` or
+/// `path::*`.
+fn imports(source: &str) -> Vec<String> {
+    let parsed = parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ast = &parsed.ast;
+    let ItemKind::Use(imports) = ast.item(ast.list(ast.root)[0]).kind else {
+        panic!("not a `use`");
+    };
+    ast.list(imports)
+        .iter()
+        .map(|i| {
+            let path: Vec<&str> = ast.list(i.path).iter().map(|&s| ast.name(s)).collect();
+            let mut text = path.join("::");
+            if i.glob {
+                text.push_str("::*");
+            }
+            if let Some(alias) = i.alias {
+                text = format!("{text} as {}", ast.name(alias));
+            }
+            text
+        })
+        .collect()
+}
+
+#[test]
+fn use_trees_are_flattened() {
+    assert_eq!(imports("use std::observables::P"), ["std::observables::P"]);
+    assert_eq!(
+        imports("use qlib::qft::qft as fourier"),
+        ["qlib::qft::qft as fourier"]
+    );
+    assert_eq!(imports("use pkg::ansatz::*"), ["pkg::ansatz::*"]);
+    assert_eq!(
+        imports("use std::observables::{self, P, PX as X}"),
+        [
+            "std::observables",
+            "std::observables::P",
+            "std::observables::PX as X"
+        ]
+    );
+    assert_eq!(
+        imports("use a::{b::{c, d::*}, e as _,\n f,\n}"),
+        ["a::b::c", "a::b::d::*", "a::e as _", "a::f"]
+    );
+    assert_eq!(imports("use super::helpers"), ["super::helpers"]);
+}
+
+#[test]
+fn visibilities() {
+    let parsed = parse(
+        "pub struct R {\n pub(pkg) size: Int\n qubits: Qubit\n pub(super) fn new() {}\n}\n\
+         pub(in pkg::a) fn f() {}\npub(self) fn g() {}\npub use a::b",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ast = &parsed.ast;
+    let items: Vec<&Item> = ast.list(ast.root).iter().map(|&i| ast.item(i)).collect();
+    assert_eq!(items[0].vis, Vis::Pub);
+    let ItemKind::Struct {
+        fields, methods, ..
+    } = items[0].kind
+    else {
+        panic!("not a struct");
+    };
+    let fields: Vec<Vis> = ast.list(fields).iter().map(|f| f.vis).collect();
+    assert_eq!(fields, [Vis::Pkg, Vis::Private]);
+    assert_eq!(ast.function(ast.list(methods)[0]).vis, Vis::Super);
+    let Vis::In { path, .. } = items[1].vis else {
+        panic!("not `pub(in …)`");
+    };
+    let path: Vec<&str> = ast.list(path).iter().map(|&s| ast.name(s)).collect();
+    assert_eq!(path, ["pkg", "a"]);
+    let ItemKind::Fn(f) = items[1].kind else {
+        panic!("not a function");
+    };
+    assert_eq!(ast.function(f).vis, items[1].vis);
+    assert_eq!(items[2].vis, Vis::Private);
+    assert_eq!(items[3].vis, Vis::Pub);
+}
+
 #[test]
 fn arithmetic_precedence() {
     assert_eq!(expr("a + b * c"), "(+ a (* b c))");
@@ -407,12 +487,24 @@ fn helpful_errors() {
         ["Noev has no `as` casts"]
     );
     assert_eq!(
-        errors("pub fn f() {}"),
-        ["`pub` is not supported yet: every program is one module"]
+        errors("pub impl Shape for S {}"),
+        ["an `impl` block cannot be marked `pub`"]
     );
     assert_eq!(
-        errors("use std::observables::P\nfn f() {}"),
-        ["`use` is not supported yet: every program is one module"]
+        errors("enum E { pub A }"),
+        ["a variant cannot be marked `pub`"]
+    );
+    assert_eq!(
+        errors("enum E { A { pub x: Int } }"),
+        ["a variant's field cannot be marked `pub`"]
+    );
+    assert_eq!(
+        errors("pub(crate) fn f() {}"),
+        ["expected `pkg`, `super`, `self` or `in` and a module's path, found `crate`"]
+    );
+    assert_eq!(
+        errors("use a::{b, 3}"),
+        ["expected a name to import, found `3`"]
     );
     assert_eq!(
         errors("fn g() { let extern = 1 }"),
