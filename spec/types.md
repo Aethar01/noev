@@ -338,8 +338,8 @@ where it matters: any place a linear value changes hands has an explicit `mv`.
 Status: **Implemented** for type parameters of functions, structs and enums, bounds (`Copy`
 and traits), inference of type arguments, `::<…>`, traits without type parameters,
 associated types (with `Copy` as their only bound), `impl`s (generic ones too) and
-monomorphisation, and `Measure` (built in for qubits and arrays of qubits, not yet for
-tuples or arrays of other measurable types). Not implemented yet: size parameters, generic
+monomorphisation, `Trait::f(x)`, and `Measure` (for qubits, and tuples and arrays of
+measurable types). Not implemented yet: size parameters, generic
 traits, and bounds inferred from bodies. The syntax is in [grammar.md](grammar.md) §2.
 
 ### Generic parameters
@@ -442,6 +442,11 @@ impl Oracle<4> for Parity {
 - A trait function declared `rev fn` is reversible in every `impl`, which is checked there.
   Generic code cannot see an `impl`'s body, so this is how `adj oracle.apply(r)` and
   `ctrl c { oracle.apply(r) }` work on any `T: Oracle<N>`.
+- A call on a known type reaches its `impl`'s function, which is analysed like any other:
+  its reversibility is inferred within a package, and a call of a function not declared
+  `rev fn` on a concrete type can still be part of a circuit.
+- When two traits a type implements both have a function `f`, `x.f()` is an error; say
+  which with `Trait::f(x)`. `Trait::f(x)` also works when only one has it.
 - There are no trait objects (`dyn Trait`): generic code is compiled for each type it is
   used with, so qubit counts are always known.
 
@@ -475,8 +480,8 @@ arguments it is used with. Circuits need concrete sizes, a target's checks need 
 counts, and native code needs concrete types. Types and ownership are checked once, on the
 generic body; circuits are found, and code is generated, for each copy. (For now circuits are
 found once, on the generic body, and a run that calls a trait's function not declared
-`rev fn` runs shot by shot, since what its `impl`s do is not looked at; a `rev` one cannot
-measure, so it keeps a run a circuit.)
+`rev fn` through a bound runs shot by shot, since what its `impl`s do is not looked at
+there; a `rev` one cannot measure, so it keeps a run a circuit.)
 
 ### Not yet
 

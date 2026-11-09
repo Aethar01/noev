@@ -134,9 +134,11 @@ fn reversible_trait_functions() {
         )),
         ["N014 only reversible functions can be inverted with `adj`"]
     );
+    // On a known type the call reaches the `impl`'s function, which is analysed as usual.
+    let resets = "impl Flip for Qubit {\n rev fn flip(mut self) { self.x() }\n fn plain(mut self) { self.reset() }\n}\n";
     assert_eq!(
         ownership(&format!(
-            "{flip}{impl_}rev fn r(q: mut Qubit) {{ q.plain() }}"
+            "{flip}{resets}rev fn r(q: mut Qubit) {{ q.plain() }}"
         )),
         ["N013 `plain` is not reversible"]
     );
@@ -216,4 +218,48 @@ fn measure_is_a_trait() {
         ),
         ["`f` needs `T: Measure`, but `S` does not implement `Measure`"]
     );
+}
+
+const TWO_NAMES: &str = "trait A { fn name(ref self) -> Int }\ntrait B { fn name(ref self) -> Int }\n\
+                         struct S { x: Int }\nimpl A for S { fn name(ref self) -> Int { 1 } }\n\
+                         impl B for S { fn name(ref self) -> Int { 2 } }\n";
+
+#[test]
+fn ambiguous_methods() {
+    assert_eq!(
+        errors(&format!("{TWO_NAMES}fn f(s: S) -> Int {{ s.name() }}")),
+        ["`name` is a function of `A` and `B`, which `S` implements"]
+    );
+    ok(&format!(
+        "{TWO_NAMES}fn f(s: S) -> Int {{ A::name(ref s) + B::name(ref s) }}"
+    ));
+}
+
+#[test]
+fn concrete_calls_see_the_impl() {
+    // A call on a known type reaches the impl's function, so its reversibility is inferred.
+    let flip = "trait Flip { fn flip(mut self) }\nimpl Flip for Qubit { fn flip(mut self) { self.x() } }\n";
+    assert!(ownership(&format!("{flip}rev fn f(q: mut Qubit) {{ q.flip() }}")).is_empty());
+    assert!(
+        ownership(&format!(
+            "{flip}rev fn f(q: mut Qubit) {{ Flip::flip(mut q) }}"
+        ))
+        .is_empty()
+    );
+}
+
+#[test]
+fn measure_by_parts() {
+    let e = "struct E { state: Qubit, tag: Int }\nstruct R { bit: Bit, tag: Int }\n\
+             impl Measure for E {\n type Result = R\n \
+             fn measure(mv self) -> R { R { bit: mv self.state.measure(), tag: self.tag } }\n}\n";
+    ok(&format!(
+        "{e}fn f(p: (E, Qubit)) -> (R, Bit) {{ mv p.measure() }}"
+    ));
+    ok(&format!(
+        "{e}fn f(es: [E; 2]) -> [R; 2] {{ measure(mv es) }}"
+    ));
+    ok(&format!(
+        "{e}fn f<T: Measure>(x: T) -> T::Result {{ mv x.measure() }}\nfn g(p: (E, [Qubit; 2])) -> (R, [Bit; 2]) {{ f(p) }}"
+    ));
 }

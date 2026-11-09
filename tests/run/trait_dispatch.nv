@@ -1,0 +1,30 @@
+// Naming the trait, concrete calls and measuring by parts.
+trait A { fn name(ref self) -> Int }
+trait B { fn name(ref self) -> Int }
+struct S { x: Int }
+impl A for S { fn name(ref self) -> Int { 1 } }
+impl B for S { fn name(ref self) -> Int { 2 } }
+
+trait Flip { fn flip(mut self) }
+impl Flip for Qubit { fn flip(mut self) { self.x() } }
+rev fn concrete(q: mut Qubit) { q.flip() }
+
+struct E { state: Qubit, tag: Int }
+struct R { bit: Bit, tag: Int }
+impl Measure for E {
+    type Result = R
+    fn measure(mv self) -> R { R { bit: mv self.state.measure(), tag: self.tag } }
+}
+
+fn main() {
+    let s = S { x: 0 }
+    print("{A::name(ref s)} {B::name(ref s)}")
+    let q = |0>
+    adj concrete(mut q)
+    let pair = (E { state: |1>, tag: 7 }, |1>)
+    let (r, b) = mv pair.measure()
+    print("{r.bit} {r.tag} {b}")
+    let es = [E { state: |1>, tag: 1 }, E { state: |0>, tag: 2 }]
+    let rs = measure(mv es)
+    print("{rs[0].bit}{rs[1].bit} {rs[0].tag}{rs[1].tag} {mv q.measure()}")
+}

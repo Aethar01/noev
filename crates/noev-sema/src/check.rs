@@ -139,11 +139,32 @@ pub fn normalize(impls: &[ImplInfo], types: &mut Types, ty: Ty) -> Ty {
             copy,
         } => {
             let base = normalize(impls, types, base);
-            // Qubits measure to bits by the built-in measurement.
-            if Some(trait_index) == types.measure
-                && let Some(result) = types.measured(base)
-            {
-                return result;
+            // Qubits measure to bits by the built-in measurement, and tuples and arrays
+            // element by element.
+            if Some(trait_index) == types.measure {
+                if let Some(result) = types.measured(base) {
+                    return result;
+                }
+                let part = |types: &mut Types, elem: Ty| {
+                    let assoc = types.intern(TyKind::Assoc {
+                        base: elem,
+                        trait_index,
+                        name,
+                        copy,
+                    });
+                    normalize(impls, types, assoc)
+                };
+                match types.kind(base).clone() {
+                    TyKind::Tuple(elems) => {
+                        let results: Box<[Ty]> = elems.iter().map(|&e| part(types, e)).collect();
+                        return types.intern(TyKind::Tuple(results));
+                    }
+                    TyKind::Array(elem, len) => {
+                        let result = part(types, elem);
+                        return types.array(result, len);
+                    }
+                    _ => {}
+                }
             }
             let found = impls.iter().find_map(|i| {
                 if i.trait_id.0 != trait_index {
@@ -1182,6 +1203,24 @@ impl<'a> Checker<'a> {
         self.scopes.qualified(self.module, root, name, Ns::Type)
     }
 
+    /// The trait `name` names in the module `at`, or here, without reporting anything.
+    fn trait_at(&self, at: Option<ModuleId>, name: Symbol) -> Option<TraitId> {
+        let found = match at {
+            None => self
+                .scopes
+                .lexical(self.module, name, Ns::Type)
+                .or_else(|| self.prelude_trait(name)),
+            Some(module) => self.scopes.qualified(self.module, module, name, Ns::Type),
+        }?;
+        match found {
+            Found::Entry(Entry {
+                binding: Binding::Item(item),
+                ..
+            }) => self.item_traits.get(&item).copied(),
+            _ => None,
+        }
+    }
+
     /// Resolves associated types in `ty` that are known: through an `impl`, a bound that
     /// fixes one (`T: Measure<Result = Bit>`), or an `impl` being collected.
     fn resolve_assoc(&mut self, ty: Ty) -> Ty {
@@ -1248,8 +1287,20 @@ impl<'a> Checker<'a> {
                 .get(&ty)
                 .is_some_and(|b| b.contains(&trait_id));
         }
-        if Some(trait_id.0) == self.t.types.measure && self.t.types.is_measurable(ty) {
-            return true;
+        if Some(trait_id.0) == self.t.types.measure {
+            if self.t.types.is_measurable(ty) {
+                return true;
+            }
+            // Tuples and arrays measure element by element.
+            match self.t.types.kind(ty) {
+                TyKind::Tuple(elems) => {
+                    let elems = elems.clone();
+                    return !elems.is_empty()
+                        && elems.iter().all(|&e| self.implements(e, trait_id));
+                }
+                &TyKind::Array(elem, _) => return self.implements(elem, trait_id),
+                _ => {}
+            }
         }
         // An `impl` for a generic type matches instances whose arguments are parameters too.
         self.t.impls.iter().any(|i| {
@@ -3650,6 +3701,34 @@ impl<'a> Checker<'a> {
                     let path = self.path_text(segments);
                     return self.variant_call(id, ty, index, &path, args, span);
                 }
+                // `Trait::f(x, …)`: the trait's function, for the type of its receiver.
+                if let [trait_name, name] = *rest
+                    && let Some(trait_id) = self.trait_at(at, trait_name)
+                {
+                    let ast = self.ast;
+                    let Some(&f) = self.t.traits[trait_id.index()]
+                        .fns
+                        .iter()
+                        .find(|&&f| ast.function(f).name == name)
+                    else {
+                        let message = format!(
+                            "`{}` has no function `{}`",
+                            self.name(trait_name),
+                            self.name(name)
+                        );
+                        self.error(path_span, message);
+                        return self.skip_args(args);
+                    };
+                    let sig = self.t.fns[f.index()].sig.clone();
+                    let self_param = self.t.traits[trait_id.index()].self_param;
+                    let receiver = sig.receiver.map(|kind| match kind {
+                        OwnKind::Mv => self_param,
+                        OwnKind::Ref => self.t.types.reference(false, self_param),
+                        OwnKind::Mut => self.t.types.reference(true, self_param),
+                    });
+                    self.t.callees[id.index()] = Some(Callee::Fn(f));
+                    return self.method_args(id, f, &sig, None, receiver, args, span);
+                }
                 if let [ty_name, name] = *rest
                     && let Some(target) = self.path_type(at, ty_name, path_span)
                     && target.width().is_some()
@@ -3660,7 +3739,7 @@ impl<'a> Checker<'a> {
                 if let [ty_name, name] = *rest
                     && let Some(ty) = self.path_type(at, ty_name, path_span)
                 {
-                    if let Some((callee_kind, sig)) = self.lookup_method(ty, name) {
+                    if let Some((callee_kind, sig)) = self.lookup_method(ty, name, path_span) {
                         if let Callee::Fn(f) = callee_kind {
                             self.method_visible(f, path_span);
                         }
@@ -3673,7 +3752,7 @@ impl<'a> Checker<'a> {
                         });
                         return match callee_kind {
                             Callee::Fn(f) => {
-                                self.method_args(id, f, &sig, ty, receiver, args, span)
+                                self.method_args(id, f, &sig, Some(ty), receiver, args, span)
                             }
                             _ => self.check_args(&sig, receiver, args, span),
                         };
@@ -3903,7 +3982,7 @@ impl<'a> Checker<'a> {
     }
 
     /// A method or associated function of `ty`, built-in or declared in a struct.
-    fn lookup_method(&mut self, ty: Ty, name: Symbol) -> Option<(Callee, Sig)> {
+    fn lookup_method(&mut self, ty: Ty, name: Symbol, span: Span) -> Option<(Callee, Sig)> {
         if let Some(id) = self.struct_of(ty) {
             // An instance's methods are its generic definition's.
             let id = self.t.types.structs[id.index()].template.unwrap_or(id);
@@ -3916,12 +3995,12 @@ impl<'a> Checker<'a> {
             return Some((Callee::Builtin(builtin), sig));
         }
         // A trait's function, for a type that implements the trait.
-        let f = self.trait_fn(ty, name)?;
+        let f = self.trait_fn(ty, name, span)?;
         Some((Callee::Fn(f), self.t.fns[f.index()].sig.clone()))
     }
 
-    /// The function `name` of a trait `ty` implements, if exactly one has it.
-    fn trait_fn(&mut self, ty: Ty, name: Symbol) -> Option<FnId> {
+    /// The function `name` of a trait `ty` implements, reporting when several have one.
+    fn trait_fn(&mut self, ty: Ty, name: Symbol, span: Span) -> Option<FnId> {
         let ast = self.ast;
         let candidates: Vec<FnId> = (0..self.t.traits.len())
             .filter(|&t| self.implements(ty, TraitId(t as u32)))
@@ -3933,6 +4012,26 @@ impl<'a> Checker<'a> {
                     .find(|&f| ast.function(f).name == name)
             })
             .collect();
+        if candidates.len() > 1 {
+            let traits: Vec<String> = candidates
+                .iter()
+                .map(|f| {
+                    format!(
+                        "`{}`",
+                        self.name(self.t.traits[self.t.fn_traits[f].index()].name)
+                    )
+                })
+                .collect();
+            let first = self.name(self.t.traits[self.t.fn_traits[&candidates[0]].index()].name);
+            let message = format!(
+                "`{}` is a function of {}, which {} implements",
+                self.name(name),
+                traits.join(" and "),
+                self.show(ty)
+            );
+            let help = format!("say which with `{first}::{}(…)`", self.name(name));
+            self.error(span, message).help = Some(help);
+        }
         candidates.first().copied()
     }
 
@@ -3950,7 +4049,7 @@ impl<'a> Checker<'a> {
         if self.t.types.is_wildcard(base) {
             return self.skip_args(args);
         }
-        let Some((callee, sig)) = self.lookup_method(base, method) else {
+        let Some((callee, sig)) = self.lookup_method(base, method, span) else {
             let message = format!("{} has no method `{}`", self.show(base), self.name(method));
             self.error(span, message);
             return self.skip_args(args);
@@ -3973,21 +4072,21 @@ impl<'a> Checker<'a> {
             self.t.adjust[receiver.index()] = Adjust::Deref;
         }
         match callee {
-            Callee::Fn(f) => self.method_args(id, f, &sig, base, None, args, span),
+            Callee::Fn(f) => self.method_args(id, f, &sig, Some(base), None, args, span),
             _ => self.check_args(&sig, None, args, span),
         }
     }
 
     /// The arguments of a call `id` of the method or associated function `f` of `owner`'s
     /// type, and the call's type. For a generic struct's method, `owner`'s type arguments
-    /// are the struct's; the method's own are inferred.
+    /// are the struct's; the method's own are inferred. `owner` is `None` for `Trait::f(…)`.
     #[allow(clippy::too_many_arguments)]
     fn method_args(
         &mut self,
         id: ExprId,
         f: FnId,
         sig: &Sig,
-        owner: Ty,
+        owner: Option<Ty>,
         receiver: Option<Ty>,
         args: &[ExprId],
         span: Span,
@@ -4000,8 +4099,9 @@ impl<'a> Checker<'a> {
         // for a trait's function, `Self` is `owner`.
         let mut known = vec![None; generics.len()];
         if self.t.fn_traits.contains_key(&f) {
-            known[0] = Some(owner);
-        } else if let Some(s) = self.struct_of(owner) {
+            // `Trait::f(x)` names no type: `Self` is inferred from `x`.
+            known[0] = owner;
+        } else if let Some(s) = owner.and_then(|o| self.struct_of(o)) {
             let def = &self.t.types.structs[s.index()];
             if def.template.is_some() {
                 for (slot, &arg) in known.iter_mut().zip(&def.args) {
@@ -4017,8 +4117,22 @@ impl<'a> Checker<'a> {
         self.check_bounds(&generics, &type_args, &name, span);
         let ret = self.t.types.subst(sig.ret, &generics, &type_args);
         let ret = self.resolve_assoc(ret);
-        self.t.type_args.insert(id, type_args);
+        self.record_call(id, f, type_args);
         ret
+    }
+
+    /// Records the type arguments of the call `id` of `f`. A call of a trait's function whose
+    /// `Self` has an `impl` calls that `impl`'s function, so its body is analysed like any
+    /// other's; through a bound, the `impl` is only known in each copy.
+    fn record_call(&mut self, id: ExprId, f: FnId, type_args: Vec<Ty>) {
+        if let Some((g, args)) = self.t.dispatch(&self.t.types, f, &type_args)
+            && g != f
+        {
+            self.t.callees[id.index()] = Some(Callee::Fn(g));
+            self.t.type_args.insert(id, args);
+            return;
+        }
+        self.t.type_args.insert(id, type_args);
     }
 
     /// Checks arguments against `sig`'s parameters (preceded by `receiver`, for
@@ -4320,7 +4434,7 @@ impl<'a> Checker<'a> {
         {
             let f = self.t.traits[m as usize].fns[0];
             self.t.callees[id.index()] = Some(Callee::Fn(f));
-            self.t.type_args.insert(id, vec![ty]);
+            self.record_call(id, f, vec![ty]);
             let result = self.t.traits[m as usize].assoc[0].0;
             let ret = self.t.types.intern(TyKind::Assoc {
                 base: ty,

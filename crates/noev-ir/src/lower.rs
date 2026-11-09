@@ -492,20 +492,59 @@ impl<'a> Builder<'a> {
         self.subst(ty)
     }
 
-    /// Whether the call `call` of `f` is of `Measure::measure` for a qubit or an array of
-    /// them, which the built-in measurement does.
-    fn measures_builtin(&mut self, f: ast::FnId, call: ExprId) -> bool {
-        let Some(&t) = self.typed.fn_traits.get(&f) else {
-            return false;
-        };
+    /// For a call `call` of `Measure::measure` whose `Self` has no `impl` of its own (a
+    /// qubit, an array, a tuple), `Self`.
+    fn measured_by_parts(&mut self, f: ast::FnId, call: ExprId) -> Option<Ty> {
+        let &t = self.typed.fn_traits.get(&f)?;
         if Some(t.index() as u32) != self.types.measure {
-            return false;
+            return None;
         }
-        let Some(&self_ty) = self.typed.type_args.get(&call).and_then(|a| a.first()) else {
-            return false;
-        };
+        let &self_ty = self.typed.type_args.get(&call)?.first()?;
         let self_ty = self.subst(self_ty);
-        self.types.is_measurable(self_ty)
+        let by_parts = self.types.is_measurable(self_ty)
+            || matches!(
+                self.types.kind(self_ty),
+                TyKind::Tuple(_) | TyKind::Array(..)
+            );
+        by_parts.then_some(self_ty)
+    }
+
+    /// Measures the value at `source`, of type `ty`, into `dest`: qubits by the built-in
+    /// measurement, tuples and arrays element by element, and anything else by its `impl` of
+    /// `Measure`, whose function is `measure`.
+    fn measure_into(&mut self, dest: Place, source: Place, ty: Ty, measure: ast::FnId) {
+        match self.types.kind(ty).clone() {
+            TyKind::Qubit => self.push(Stmt::Measure {
+                dest,
+                qubit: source,
+            }),
+            TyKind::Array(elem, len) => {
+                for k in 0..len {
+                    let index = Proj::Index(Operand::Const(Const::Int(k as i64)));
+                    self.measure_into(dest.with(index.clone()), source.with(index), elem, measure);
+                }
+            }
+            TyKind::Tuple(elems) => {
+                for (i, &elem) in elems.iter().enumerate() {
+                    let field = Proj::Field(i as u32);
+                    self.measure_into(dest.with(field.clone()), source.with(field), elem, measure);
+                }
+            }
+            _ => {
+                let func = self.func_for(measure, vec![ty]);
+                let next = self.new_block();
+                self.terminate_into(
+                    Terminator::Call {
+                        func,
+                        args: vec![Operand::Move(source)],
+                        dest,
+                        adjoint: false,
+                        next,
+                    },
+                    next,
+                );
+            }
+        }
     }
 
     /// The function a call `call` of `f` runs: `f` itself, or the copy of it for the call's
@@ -516,6 +555,13 @@ impl<'a> Builder<'a> {
         }
         let args: Vec<Ty> = self.typed.type_args.get(&call).cloned().unwrap_or_default();
         let args: Vec<Ty> = args.into_iter().map(|t| self.subst(t)).collect();
+        self.func_for(f, args)
+    }
+
+    /// The function `f` with the type arguments `args`, with no parameters left: `f`, the
+    /// `impl`'s function it stands for, or a copy of either, made if this is the first call
+    /// to ask for it.
+    fn func_for(&mut self, f: ast::FnId, args: Vec<Ty>) -> FuncId {
         // A trait's function runs its `impl`'s, or its own default, for this `Self`.
         let (f, args) = self
             .typed
@@ -1801,11 +1847,27 @@ impl Builder<'_> {
         let Some(callee) = self.typed.callees[id.index()] else {
             return;
         };
-        // `Measure::measure` of a qubit, or an array of them, is the built-in measurement.
+        // `Measure::measure` of a qubit, or an array of them, is the built-in measurement;
+        // of a tuple, or an array of values of our own, it is each element's.
         if let Callee::Fn(f) = callee
-            && self.measures_builtin(f, id)
+            && let Some(self_ty) = self.measured_by_parts(f, id)
         {
-            return self.builtin(id, Builtin::Measure, receiver, args, dest, adjoint);
+            if self.types.is_measurable(self_ty) {
+                return self.builtin(id, Builtin::Measure, receiver, args, dest, adjoint);
+            }
+            let Some(&first) = receiver.as_ref().or(args.first()) else {
+                return;
+            };
+            let source = self.qubit_place(first);
+            let dest = dest.unwrap_or_else(|| {
+                let ty = self.ty(id);
+                self.temp(ty)
+            });
+            let measure = *self.typed.traits[self.types.measure.expect("named") as usize]
+                .fns
+                .first()
+                .expect("`measure`");
+            return self.measure_into(dest, source, self_ty, measure);
         }
         match callee {
             Callee::Fn(f) => {

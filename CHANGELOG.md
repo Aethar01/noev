@@ -66,14 +66,16 @@ before 1.0.
   functions, which every `impl` must keep and generic code can invert with `adj`. An `impl`
   must provide every function without a default, with the trait's signature, be in the
   package of the trait or the type, and not give a trait twice for one type. A call through a
-  trait function not declared `rev` is irreversible, and runs shot by shot.
+  trait function not declared `rev` through a bound is irreversible, and runs shot by shot;
+  on a known type the call reaches the `impl`'s function, whose reversibility is inferred.
+  `Trait::f(x)` names the trait, and is needed when two traits of a type share a name.
 - Associated types: `type Result: Copy` in a trait, `type Result = Bit` in each `impl`,
   `T::Result` and `Self::Result` in signatures, and bounds that fix one
   (`T: Readout<Result = Bit>`), checked at each call.
 - `Measure` is a trait in the prelude: a struct measures to a classical result by an
   `impl` (`Experiment` to `ExperimentResult`), and `x.measure()`, `measure(x)` and generic
-  code with `T: Measure` measure it. Qubits and arrays of qubits implement it with the
-  built-in measurement.
+  code with `T: Measure` measure it. Qubits implement it with the built-in measurement,
+  and tuples and arrays of measurable types by measuring each element.
 
 ### Tools
 
