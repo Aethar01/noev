@@ -15,3 +15,13 @@ fn invert_irreversible_fn() {
     adj coin(q)                     //~ N014
     mv q.discard()
 }
+
+// Generic code cannot see an `impl`'s body: only a trait function declared `rev fn` can be
+// inverted through a bound.
+trait Nudge {
+    fn nudge(mut self)
+}
+
+fn invert_through_a_bound<T: Nudge>(x: mut T) {
+    adj x.nudge()                   //~ N014
+}

@@ -85,6 +85,45 @@ pub enum Adjust {
     Deref,
 }
 
+/// A trait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TraitId(u32);
+
+impl TraitId {
+    /// The trait's position in [`Typed::traits`].
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// A trait's name and functions (`spec/types.md` §6).
+#[derive(Clone, Debug)]
+pub struct TraitInfo {
+    /// Its name.
+    pub name: Symbol,
+    /// Its item.
+    pub item: ItemId,
+    /// `Self` in its functions: a type parameter, the first of each function's.
+    pub self_param: Ty,
+    /// Its functions, with or without default bodies.
+    pub fns: Vec<FnId>,
+}
+
+/// An `impl` of a trait for a type.
+#[derive(Clone, Debug)]
+pub struct ImplInfo {
+    /// The trait.
+    pub trait_id: TraitId,
+    /// The type, which can mention the `impl`'s type parameters.
+    pub self_ty: Ty,
+    /// The `impl`'s type parameters: `impl<T> … for Pair<T, T>`.
+    pub generics: Vec<Ty>,
+    /// The functions it provides; the trait's defaults stand for the others.
+    pub fns: Vec<FnId>,
+    /// Where it is.
+    pub span: Span,
+}
+
 /// A function's resolved signature and where it lives.
 #[derive(Clone, Debug)]
 pub struct FnInfo {
@@ -98,9 +137,12 @@ pub struct FnInfo {
     pub self_local: Option<LocalId>,
     /// The receiver's type (`Self`, `ref Self` or `mut Self`), for methods.
     pub receiver_ty: Option<Ty>,
-    /// Its type parameters: for a method, its struct's first, then its own. Empty if it is
-    /// not generic.
+    /// Its type parameters: for a method, its struct's first, then its own; for a trait's
+    /// function, `Self` first; for an `impl`'s, the `impl`'s first. Empty if it is not
+    /// generic.
     pub generics: Vec<Ty>,
+    /// `Self` in a trait's or an `impl`'s function.
+    pub self_ty: Option<Ty>,
 }
 
 /// Everything the type checker learned about a program.
@@ -138,6 +180,16 @@ pub struct Typed {
     /// [`FnInfo::generics`], by the call's expression. They can mention the calling
     /// function's own type parameters.
     pub type_args: FxHashMap<ExprId, Vec<Ty>>,
+    /// Every trait.
+    pub traits: Vec<TraitInfo>,
+    /// Every `impl`.
+    pub impls: Vec<ImplInfo>,
+    /// The trait each trait function belongs to.
+    pub fn_traits: FxHashMap<FnId, TraitId>,
+    /// The `impl` each `impl` function belongs to, by its index in [`Typed::impls`].
+    pub fn_impls: FxHashMap<FnId, usize>,
+    /// The name of each trait and `impl` function, to match one with the other.
+    impl_names: FxHashMap<FnId, Symbol>,
 }
 
 /// The block of a `sample` expression, which is run separately from the code around it.
@@ -159,6 +211,50 @@ impl Typed {
     /// A local variable.
     pub fn local(&self, id: LocalId) -> &Local {
         &self.locals[id.index()]
+    }
+
+    /// The `impl` of `trait_id` for `ty`, a type without parameters in `types` (this
+    /// table's, or one made from it), and the `impl`'s type arguments, if there is one.
+    pub fn impl_for(&self, types: &Types, trait_id: TraitId, ty: Ty) -> Option<(usize, Vec<Ty>)> {
+        self.impls.iter().enumerate().find_map(|(index, i)| {
+            if i.trait_id != trait_id {
+                return None;
+            }
+            let mut found = vec![None; i.generics.len()];
+            if !types.match_params(i.self_ty, ty, &i.generics, &mut found) {
+                return None;
+            }
+            let args = found.into_iter().collect::<Option<Vec<Ty>>>()?;
+            Some((index, args))
+        })
+    }
+
+    /// What a call of the trait function `f` runs, given its type arguments (`Self`'s
+    /// first, with no parameters left, in `types`): the `impl`'s function, or the trait's
+    /// default, and that function's type arguments. `None` if `f` is not a trait's function,
+    /// or there is no `impl` for `Self`.
+    pub fn dispatch(&self, types: &Types, f: FnId, args: &[Ty]) -> Option<(FnId, Vec<Ty>)> {
+        let &trait_id = self.fn_traits.get(&f)?;
+        let (&self_ty, rest) = args.split_first()?;
+        let (index, impl_args) = self.impl_for(types, trait_id, self_ty)?;
+        let provided = self.impls[index]
+            .fns
+            .iter()
+            .copied()
+            .find(|&g| self.same_fn(g, f));
+        match provided {
+            Some(g) => {
+                let mut all = impl_args;
+                all.extend_from_slice(rest);
+                Some((g, all))
+            }
+            None => Some((f, args.to_vec())),
+        }
+    }
+
+    /// Whether the `impl` function `g` provides the trait function `f`.
+    fn same_fn(&self, g: FnId, f: FnId) -> bool {
+        self.impl_names.get(&g) == self.impl_names.get(&f)
     }
 }
 
@@ -233,6 +329,8 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         type_params: Vec::new(),
         struct_params: FxHashMap::default(),
         inference: Vec::new(),
+        item_traits: FxHashMap::default(),
+        param_bounds: FxHashMap::default(),
     };
     checker.collect();
     checker.check_bodies();
@@ -284,6 +382,10 @@ struct Checker<'a> {
     struct_params: FxHashMap<StructId, Vec<(Symbol, Ty)>>,
     /// The generic calls whose type arguments are being inferred, innermost last.
     inference: Vec<Inference>,
+    /// The trait each trait item declares.
+    item_traits: FxHashMap<ItemId, TraitId>,
+    /// The traits each type parameter is bound by.
+    param_bounds: FxHashMap<Ty, Vec<TraitId>>,
 }
 
 /// The type parameters of a generic call or literal, and what each is found to be so far.
@@ -350,6 +452,47 @@ impl<'a> Checker<'a> {
         let state_ty = self.t.types.struct_ty(state);
         self.t.types.state = Some(state_ty);
         let std_types = self.t.types.structs.len() as u32;
+
+        // Traits first, so any bound can name one.
+        for &item in items {
+            let ItemKind::Trait {
+                name,
+                generics,
+                fns,
+                types,
+                ..
+            } = ast.item(item).kind
+            else {
+                continue;
+            };
+            if !generics.params.is_empty() {
+                self.error(ast.item(item).span, "generic traits are not supported yet")
+                    .help = Some("see spec/types.md §6 for what is planned".into());
+            }
+            if !types.is_empty() {
+                self.error(
+                    ast.item(item).span,
+                    "associated types are not supported yet",
+                )
+                .help = Some("see spec/types.md §6 for what is planned".into());
+            }
+            let id = TraitId(self.t.traits.len() as u32);
+            // `Self` in the trait's functions: a type parameter bound by the trait.
+            let self_name = ast.symbols.get("Self").unwrap_or(name);
+            let self_param = self.t.types.param(self_name, false);
+            self.param_bounds.insert(self_param, vec![id]);
+            self.item_traits.insert(item, id);
+            self.t.traits.push(TraitInfo {
+                name,
+                item,
+                self_param,
+                fns: ast.list(fns).to_vec(),
+            });
+            for &f in ast.list(fns) {
+                self.t.fn_traits.insert(f, id);
+                self.t.impl_names.insert(f, ast.function(f).name);
+            }
+        }
 
         // Struct, enum and alias names next, so field and parameter types can refer to any
         // of them.
@@ -427,6 +570,7 @@ impl<'a> Checker<'a> {
                 self_local: None,
                 receiver_ty: None,
                 generics: Vec::new(),
+                self_ty: None,
             })
             .collect();
 
@@ -438,7 +582,7 @@ impl<'a> Checker<'a> {
             match item.kind {
                 ItemKind::Fn(f) => {
                     let decl = ast.function(f);
-                    self.collect_fn(f, None);
+                    self.collect_fn(f, None, Vec::new(), None);
                     if self.name(decl.name) == "main" && Some(self.module) == main_root {
                         self.t.main = Some(f);
                         self.check_main(f);
@@ -474,7 +618,7 @@ impl<'a> Checker<'a> {
                             let span = ast.function(method).name_span;
                             self.error(span, message);
                         }
-                        self.collect_fn(method, Some(id));
+                        self.collect_fn(method, Some(id), Vec::new(), None);
                     }
                     self.self_ty = None;
                 }
@@ -538,17 +682,57 @@ impl<'a> Checker<'a> {
                             let span = ast.function(method).name_span;
                             self.error(span, message);
                         }
-                        self.collect_fn(method, Some(id));
+                        self.collect_fn(method, Some(id), Vec::new(), None);
                     }
                     self.self_ty = None;
                 }
-                ItemKind::Trait { .. } => {
-                    self.error(item.span, "traits are not supported yet").help =
-                        Some("they need generics; see spec/types.md §6".into());
+                ItemKind::Trait { fns, .. } => {
+                    let id = self.item_traits[&item_id];
+                    let self_param = self.t.traits[id.index()].self_param;
+                    let self_name = self.t.types.params[self
+                        .t
+                        .types
+                        .as_param(self_param)
+                        .expect("a parameter")
+                        .index()]
+                    .name;
+                    for &f in ast.list(fns) {
+                        self.collect_fn(f, None, vec![(self_name, self_param)], Some(self_param));
+                    }
                 }
-                ItemKind::Impl { .. } => {
-                    self.error(item.span, "`impl` blocks are not supported yet")
-                        .help = Some("methods go inside the struct".into());
+                ItemKind::Impl {
+                    generics,
+                    bound,
+                    ty,
+                    fns,
+                    types,
+                } => {
+                    let params = self.generic_params(generics);
+                    self.type_params = params.clone();
+                    let trait_id = self.bound_trait(&bound);
+                    let self_ty = self.resolve_type(ty);
+                    self.type_params.clear();
+                    if !types.is_empty() {
+                        self.error(item.span, "associated types are not supported yet")
+                            .help = Some("see spec/types.md §6 for what is planned".into());
+                    }
+                    for &f in ast.list(fns) {
+                        self.collect_fn(f, None, params.clone(), Some(self_ty));
+                        self.t.impl_names.insert(f, ast.function(f).name);
+                    }
+                    if let Some(trait_id) = trait_id {
+                        let index = self.t.impls.len();
+                        for &f in ast.list(fns) {
+                            self.t.fn_impls.insert(f, index);
+                        }
+                        self.t.impls.push(ImplInfo {
+                            trait_id,
+                            self_ty,
+                            generics: params.iter().map(|&(_, t)| t).collect(),
+                            fns: ast.list(fns).to_vec(),
+                            span: item.span,
+                        });
+                    }
                 }
                 ItemKind::Use(_) | ItemKind::Type { .. } | ItemKind::Error => {}
             }
@@ -556,6 +740,169 @@ impl<'a> Checker<'a> {
         }
         // Instances made while fields were being resolved may have missed some.
         self.t.types.refill_instances();
+        for index in 0..self.t.impls.len() {
+            self.check_impl(index);
+        }
+    }
+
+    /// The trait `bound` names, reporting one that is not a trait or is not supported yet.
+    fn bound_trait(&mut self, bound: &Bound) -> Option<TraitId> {
+        let span = bound.span;
+        let (at, rest) = self.qualify(bound.path, span)?;
+        let [name] = *rest else {
+            let message = format!("cannot find the trait `{}`", self.path_text(bound.path));
+            self.error(span, message);
+            return None;
+        };
+        let found = match at {
+            None => self.scopes.lexical(self.module, name, Ns::Type),
+            Some(module) => self.scopes.qualified(self.module, module, name, Ns::Type),
+        };
+        let trait_id = match self.found(found, name, span) {
+            Some(Binding::Item(item)) => self.item_traits.get(&item).copied(),
+            _ => None,
+        };
+        let Some(trait_id) = trait_id else {
+            let message = format!("cannot find the trait `{}`", self.path_text(bound.path));
+            self.error(span, message);
+            return None;
+        };
+        if !bound.args.is_empty() {
+            self.error(span, "trait arguments are not supported yet")
+                .help = Some("see spec/types.md §6 for what is planned".into());
+        }
+        Some(trait_id)
+    }
+
+    /// Checks an `impl` against its trait: every function the trait has no default for is
+    /// there, with the trait's signature for `Self`; it is in the trait's package or the
+    /// type's; and no other `impl` gives the same trait for the same type.
+    fn check_impl(&mut self, index: usize) {
+        let ast = self.ast;
+        let info = self.t.impls[index].clone();
+        let trait_info = self.t.traits[info.trait_id.index()].clone();
+        let trait_name = self.name(trait_info.name).to_string();
+        let shown = self.show(info.self_ty);
+        for &g in &info.fns {
+            let name = ast.function(g).name;
+            let Some(&f) = trait_info
+                .fns
+                .iter()
+                .find(|&&f| ast.function(f).name == name)
+            else {
+                let message = format!("`{}` is not a function of `{trait_name}`", self.name(name));
+                self.error(ast.function(g).name_span, message);
+                continue;
+            };
+            self.check_impl_fn(f, g, &info, &trait_name);
+        }
+        for &f in &trait_info.fns {
+            let decl = ast.function(f);
+            let provided = info.fns.iter().any(|&g| ast.function(g).name == decl.name);
+            if !provided && decl.body.is_none() {
+                let message = format!(
+                    "this `impl` of `{trait_name}` for {shown} lacks `{}`",
+                    self.name(decl.name)
+                );
+                self.error(info.span, message);
+            }
+        }
+        // Coherence: the `impl` is in the package of the trait or of the type.
+        let impl_module = self.scopes.item_module(
+            ast.list(ast.root)
+                .iter()
+                .copied()
+                .find(|&i| ast.item(i).span == info.span)
+                .expect("the impl's item"),
+        );
+        let package = ast.module(impl_module).package;
+        let trait_package = ast.module(self.scopes.item_module(trait_info.item)).package;
+        let type_package = self.struct_of(info.self_ty).and_then(|s| {
+            let template = self.t.types.structs[s.index()].template.unwrap_or(s);
+            let item = self
+                .item_structs
+                .iter()
+                .position(|&id| id == Some(template))?;
+            Some(
+                ast.module(self.scopes.item_module(ItemId::from_index(item)))
+                    .package,
+            )
+        });
+        if package != trait_package && type_package != Some(package) {
+            let message = format!(
+                "an `impl` of `{trait_name}` for {shown} must be in the package of `{trait_name}` or of the type"
+            );
+            self.error(info.span, message).help =
+                Some("so two packages can never give the same one".into());
+        }
+        // No two `impl`s of the trait for the same type.
+        for earlier in 0..index {
+            let other = &self.t.impls[earlier];
+            if other.trait_id != info.trait_id {
+                continue;
+            }
+            let mut params = info.generics.clone();
+            params.extend(&other.generics);
+            let mut found = vec![None; params.len()];
+            let overlap =
+                self.t
+                    .types
+                    .match_params(other.self_ty, info.self_ty, &params, &mut found)
+                    || {
+                        let mut found = vec![None; params.len()];
+                        self.t
+                            .types
+                            .match_params(info.self_ty, other.self_ty, &params, &mut found)
+                    };
+            if overlap {
+                let message = format!("`{trait_name}` is implemented for {shown} twice");
+                let span = other.span;
+                self.error(info.span, message)
+                    .labels
+                    .push((span, "first here".into()));
+            }
+        }
+    }
+
+    /// Checks that the `impl` function `g` has the signature of the trait function `f`
+    /// for the `impl`'s type, and makes it reversible if `f` is declared so.
+    fn check_impl_fn(&mut self, f: FnId, g: FnId, info: &ImplInfo, trait_name: &str) {
+        let trait_sig = self.t.fns[f.index()].sig.clone();
+        let impl_sig = self.t.fns[g.index()].sig.clone();
+        let trait_generics = self.t.fns[f.index()].generics.clone();
+        let impl_generics = self.t.fns[g.index()].generics.clone();
+        // `Self`, then the trait function's own parameters, for the `impl`'s.
+        let own = &impl_generics[info.generics.len()..];
+        let span = self.ast.function(g).name_span;
+        let name = self.name(self.ast.function(f).name).to_string();
+        if own.len() + 1 != trait_generics.len() {
+            let message = format!(
+                "`{name}` takes {} type parameter{} in `{trait_name}`",
+                trait_generics.len() - 1,
+                if trait_generics.len() == 2 { "" } else { "s" }
+            );
+            self.error(span, message);
+            return;
+        }
+        let mut to = vec![info.self_ty];
+        to.extend_from_slice(own);
+        let types = &mut self.t.types;
+        let want_params: Vec<Ty> = trait_sig
+            .params
+            .iter()
+            .map(|&t| types.subst(t, &trait_generics, &to))
+            .collect();
+        let want_ret = types.subst(trait_sig.ret, &trait_generics, &to);
+        if trait_sig.receiver != impl_sig.receiver
+            || want_params != impl_sig.params
+            || want_ret != impl_sig.ret
+        {
+            let message = format!("`{name}` has a different signature than in `{trait_name}`");
+            self.error(span, message);
+        }
+        if trait_sig.reversible == Reversible::Yes {
+            self.t.fns[g.index()].sig.reversible = Reversible::Yes;
+        }
     }
 
     /// Makes the type parameters of `generics`, written in the current module, reporting
@@ -578,13 +925,18 @@ impl<'a> Checker<'a> {
                         self.error(param.span, message);
                         continue;
                     }
-                    let mut copy = self.copy_bounds(bounds);
+                    let (mut copy, mut traits) = self.bounds_of(bounds);
                     for pred in ast.list(generics.wheres) {
                         if pred.name == param.name {
-                            copy |= self.copy_bounds(pred.bounds);
+                            let (c, t) = self.bounds_of(pred.bounds);
+                            copy |= c;
+                            traits.extend(t);
                         }
                     }
                     let ty = self.t.types.param(param.name, copy);
+                    if !traits.is_empty() {
+                        self.param_bounds.insert(ty, traits);
+                    }
                     params.push((param.name, ty));
                 }
             }
@@ -602,25 +954,45 @@ impl<'a> Checker<'a> {
         params
     }
 
-    /// Whether `bounds` include `Copy`, reporting the bounds not supported yet.
-    fn copy_bounds(&mut self, bounds: List<Bound>) -> bool {
+    /// Whether `bounds` include `Copy`, and the traits they name.
+    fn bounds_of(&mut self, bounds: List<Bound>) -> (bool, Vec<TraitId>) {
         let mut copy = false;
+        let mut traits = Vec::new();
         for bound in self.ast.list(bounds) {
             if let [name] = self.ast.list(bound.path)
                 && self.name(*name) == "Copy"
                 && bound.args.is_empty()
             {
                 copy = true;
-            } else {
-                let message = format!(
-                    "`{}` is a trait bound, and traits are not supported yet",
-                    self.path_text(bound.path)
-                );
-                self.error(bound.span, message).help =
-                    Some("for now the only bound is `Copy`".into());
+            } else if let Some(t) = self.bound_trait(bound) {
+                traits.push(t);
             }
         }
-        copy
+        (copy, traits)
+    }
+
+    /// Whether `ty` implements `trait_id`: a type parameter bound by it, or a type with an
+    /// `impl` of it.
+    fn implements(&self, ty: Ty, trait_id: TraitId) -> bool {
+        if self.t.types.is_wildcard(ty) {
+            return true;
+        }
+        if self.t.types.as_param(ty).is_some() {
+            return self
+                .param_bounds
+                .get(&ty)
+                .is_some_and(|b| b.contains(&trait_id));
+        }
+        // An `impl` for a generic type matches instances whose arguments are parameters too.
+        self.t.impls.iter().any(|i| {
+            if i.trait_id != trait_id {
+                return false;
+            }
+            let mut found = vec![None; i.generics.len()];
+            self.t
+                .types
+                .match_params(i.self_ty, ty, &i.generics, &mut found)
+        })
     }
 
     /// The type the alias `item` names, if it is one (`spec/types.md` §2).
@@ -676,15 +1048,28 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn collect_fn(&mut self, f: FnId, owner: Option<StructId>) {
+    /// Resolves `f`'s signature. A method of `owner` sees its struct's type parameters; a
+    /// trait's or an `impl`'s function sees `prefix` first, and `Self` is `self_ty`.
+    fn collect_fn(
+        &mut self,
+        f: FnId,
+        owner: Option<StructId>,
+        prefix: Vec<(Symbol, Ty)>,
+        self_ty: Option<Ty>,
+    ) {
         let decl = *self.ast.function(f);
-        // A method sees its struct's type parameters, then its own.
         let outer = std::mem::take(&mut self.type_params);
+        let outer_self = self.self_ty;
+        if self_ty.is_some() {
+            self.self_ty = self_ty;
+        }
         let mut scope = owner
             .and_then(|o| self.struct_params.get(&o).cloned())
             .unwrap_or_default();
-        scope.extend(self.generic_params(decl.generics));
+        scope.extend(prefix);
         self.type_params = scope;
+        let own = self.generic_params(decl.generics);
+        self.type_params.extend(own);
         let params = self
             .ast
             .list(decl.params)
@@ -692,7 +1077,7 @@ impl<'a> Checker<'a> {
             .map(|p| self.resolve_type(p.ty))
             .collect();
         let ret = decl.ret.map_or(Ty::UNIT, |ty| self.resolve_type(ty));
-        if decl.receiver.is_some() && owner.is_none() {
+        if decl.receiver.is_some() && owner.is_none() && self_ty.is_none() {
             let span = decl.receiver.map_or(decl.name_span, |r| r.span);
             self.error(
                 span,
@@ -701,9 +1086,14 @@ impl<'a> Checker<'a> {
         }
         let generics = self.type_params.iter().map(|&(_, t)| t).collect();
         self.type_params = outer;
+        self.self_ty = outer_self;
+        // Generic code cannot see an `impl`'s body, so a trait's function is reversible only
+        // if declared so.
+        let in_trait = self.t.fn_traits.contains_key(&f);
         let info = &mut self.t.fns[f.index()];
         info.owner = owner;
         info.generics = generics;
+        info.self_ty = self_ty;
         info.sig = Sig {
             receiver: decl.receiver.map(|r| r.kind),
             params,
@@ -711,6 +1101,8 @@ impl<'a> Checker<'a> {
             is_unsafe: decl.is_unsafe,
             reversible: if decl.is_rev {
                 Reversible::Yes
+            } else if in_trait {
+                Reversible::No
             } else {
                 Reversible::Infer
             },
@@ -861,7 +1253,10 @@ impl<'a> Checker<'a> {
             self.module = self.t.fn_modules[f.index()];
             self.type_params = self.fn_type_params(f);
             let info = self.t.fns[index].clone();
-            self.self_ty = info.owner.map(|id| self.t.types.struct_ty(id));
+            self.self_ty = info
+                .owner
+                .map(|id| self.t.types.struct_ty(id))
+                .or(info.self_ty);
             self.ret = info.sig.ret;
             self.scope.clear();
             self.loops = 0;
@@ -1980,6 +2375,17 @@ impl<'a> Checker<'a> {
                     self.show(arg)
                 );
                 self.error(span, message);
+            }
+            for trait_id in self.param_bounds.get(&p).cloned().unwrap_or_default() {
+                if !self.implements(arg, trait_id) {
+                    let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
+                    let message = format!(
+                        "`{callee}` needs `{}: {trait_name}`, but {} does not implement `{trait_name}`",
+                        self.name(def.name),
+                        self.show(arg)
+                    );
+                    self.error(span, message);
+                }
             }
         }
     }
@@ -3199,12 +3605,33 @@ impl<'a> Checker<'a> {
         if let Some(id) = self.struct_of(ty) {
             // An instance's methods are its generic definition's.
             let id = self.t.types.structs[id.index()].template.unwrap_or(id);
-            let &f = self.methods.get(&(id, name))?;
-            return Some((Callee::Fn(f), self.t.fns[f.index()].sig.clone()));
+            if let Some(&f) = self.methods.get(&(id, name)) {
+                return Some((Callee::Fn(f), self.t.fns[f.index()].sig.clone()));
+            }
         }
         let text = self.ast.name(name);
-        prelude::method(&mut self.t.types, ty, text)
-            .map(|(builtin, sig)| (Callee::Builtin(builtin), sig))
+        if let Some((builtin, sig)) = prelude::method(&mut self.t.types, ty, text) {
+            return Some((Callee::Builtin(builtin), sig));
+        }
+        // A trait's function, for a type that implements the trait.
+        let f = self.trait_fn(ty, name)?;
+        Some((Callee::Fn(f), self.t.fns[f.index()].sig.clone()))
+    }
+
+    /// The function `name` of a trait `ty` implements, if exactly one has it.
+    fn trait_fn(&mut self, ty: Ty, name: Symbol) -> Option<FnId> {
+        let ast = self.ast;
+        let candidates: Vec<FnId> = (0..self.t.traits.len())
+            .filter(|&t| self.implements(ty, TraitId(t as u32)))
+            .filter_map(|t| {
+                self.t.traits[t]
+                    .fns
+                    .iter()
+                    .copied()
+                    .find(|&f| ast.function(f).name == name)
+            })
+            .collect();
+        candidates.first().copied()
     }
 
     fn method_call(
@@ -3267,9 +3694,12 @@ impl<'a> Checker<'a> {
         if generics.is_empty() {
             return self.check_args(sig, receiver, args, span);
         }
-        // The struct's arguments, when `owner` is an instance rather than its definition.
+        // The struct's arguments, when `owner` is an instance rather than its definition;
+        // for a trait's function, `Self` is `owner`.
         let mut known = vec![None; generics.len()];
-        if let Some(s) = self.struct_of(owner) {
+        if self.t.fn_traits.contains_key(&f) {
+            known[0] = Some(owner);
+        } else if let Some(s) = self.struct_of(owner) {
             let def = &self.t.types.structs[s.index()];
             if def.template.is_some() {
                 for (slot, &arg) in known.iter_mut().zip(&def.args) {
@@ -3617,3 +4047,5 @@ mod generics;
 mod modules;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod traits;

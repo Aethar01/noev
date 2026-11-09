@@ -42,3 +42,14 @@ fn amplitudes_in_ctrl() {
     mv a.discard()
     mv b.discard()
 }
+
+// An `impl` of a `rev` trait function is checked as `rev`.
+trait Toggle {
+    rev fn toggle(mut self)
+}
+
+impl Toggle for Qubit {
+    rev fn toggle(mut self) {
+        self.reset()                //~ N013
+    }
+}

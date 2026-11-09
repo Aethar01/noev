@@ -65,7 +65,7 @@ fn copy_bounds() {
     );
     assert_eq!(
         errors("fn f<T: Measure>(x: T) {}"),
-        ["`Measure` is a trait bound, and traits are not supported yet"]
+        ["cannot find the trait `Measure`"]
     );
     assert_eq!(
         errors("fn f<T>(x: T) where U: Copy {}"),

@@ -16,7 +16,7 @@ use noev_syntax::ast::*;
 use noev_syntax::{Diagnostic, FxHashMap, Severity, Span};
 
 use crate::check::{Adjust, Callee, LocalId, Res, Typed};
-use crate::prelude::Builtin;
+use crate::prelude::{Builtin, Reversible};
 use crate::ty::{Kind, Ty, TyKind};
 
 /// What the rule says about every function and `sample` run.
@@ -450,6 +450,8 @@ fn infer_recordable(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<bool> {
                     | ExprKind::Overlap { .. } => false,
                     _ => match typed.callees[e.index()] {
                         Some(Callee::Builtin(Builtin::Print { .. })) => false,
+                        // A trait's function may print in an `impl`, unless it is `rev`.
+                        Some(Callee::Fn(f)) if unknown_body(typed, f) => false,
                         Some(Callee::Fn(f)) => result[f.index()],
                         _ => true,
                     },
@@ -563,7 +565,8 @@ fn is_quantum_op(ast: &Ast, typed: &Typed, quantum: &[bool], e: ExprId) -> bool 
                 | Builtin::Discard
                 | Builtin::Release,
             )) => true,
-            Some(Callee::Fn(f)) => quantum[f.index()],
+            // A trait's function stands for `impl`s not known here.
+            Some(Callee::Fn(f)) => quantum[f.index()] || typed.fn_traits.contains_key(&f),
             _ => false,
         },
         _ => false,
@@ -1397,6 +1400,14 @@ impl<'a> Walker<'a> {
                 }
                 false
             }
+            Some(Callee::Fn(f)) if unknown_body(typed, f) => {
+                let name = ast.name(ast.function(f).name);
+                let what = format!(
+                    "passed to `{name}`, a trait's function not declared `rev fn`, whose `impl`s are not known here"
+                );
+                self.violate(ast.expr(id).span, &what);
+                any
+            }
             Some(Callee::Fn(f)) => {
                 // Given measurement results, the function is checked as if they were its own.
                 let given = self.cx.given[f.index()].as_ref().filter(|_| any);
@@ -1462,4 +1473,10 @@ fn root(ast: &Ast, typed: &Typed, mut id: ExprId) -> Option<LocalId> {
             _ => return None,
         }
     }
+}
+
+/// Whether a call of `f` runs code the analysis cannot see: a trait's function not declared
+/// `rev fn`, whose `impl`s may measure, print or start runs. A `rev` one can do none of these.
+fn unknown_body(typed: &Typed, f: FnId) -> bool {
+    typed.fn_traits.contains_key(&f) && typed.fns[f.index()].sig.reversible != Reversible::Yes
 }

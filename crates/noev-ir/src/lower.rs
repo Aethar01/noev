@@ -129,13 +129,24 @@ pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &SourceMa
 /// from its dependency's name, and its struct's for a method.
 fn fn_name(syntax: &Ast, typed: &Typed, f: ast::FnId) -> String {
     let decl = syntax.function(f);
-    let mut name = match typed.fns[f.index()].owner {
-        Some(s) => format!(
-            "{}::{}",
-            syntax.name(typed.types.structs[s.index()].name),
-            syntax.name(decl.name)
-        ),
-        None => syntax.name(decl.name).to_string(),
+    let own = syntax.name(decl.name);
+    let mut name = if let Some(s) = typed.fns[f.index()].owner {
+        format!(
+            "{}::{own}",
+            syntax.name(typed.types.structs[s.index()].name)
+        )
+    } else if let Some(&index) = typed.fn_impls.get(&f) {
+        // `<Pair<T, T> as Measure>::measure`, as Rust writes it.
+        let i = &typed.impls[index];
+        let trait_name = syntax.name(typed.traits[i.trait_id.index()].name);
+        format!(
+            "<{} as {trait_name}>::{own}",
+            typed.types.display(i.self_ty, syntax)
+        )
+    } else if let Some(&t) = typed.fn_traits.get(&f) {
+        format!("{}::{own}", syntax.name(typed.traits[t.index()].name))
+    } else {
+        own.to_string()
     };
     let module = typed.fn_modules[f.index()];
     let package = syntax.module(module).package;
@@ -485,6 +496,14 @@ impl<'a> Builder<'a> {
         }
         let args: Vec<Ty> = self.typed.type_args.get(&call).cloned().unwrap_or_default();
         let args: Vec<Ty> = args.into_iter().map(|t| self.subst(t)).collect();
+        // A trait's function runs its `impl`'s, or its own default, for this `Self`.
+        let (f, args) = self
+            .typed
+            .dispatch(self.types, f, &args)
+            .unwrap_or((f, args));
+        if self.typed.fns[f.index()].generics.is_empty() {
+            return FuncId(f.index() as u32);
+        }
         if let Some(&id) = self.instances.ids.get(&(f, args.clone())) {
             return id;
         }

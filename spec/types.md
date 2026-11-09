@@ -335,9 +335,10 @@ where it matters: any place a linear value changes hands has an explicit `mv`.
 
 ## 6. Traits and generics
 
-Status: **Implemented** for type parameters of functions, structs and enums, `Copy` bounds,
-inference of type arguments, `::<…>` and monomorphisation. Not implemented yet: size
-parameters, traits and `impl`s (and so bounds other than `Copy`, and `Measure`), and bounds
+Status: **Implemented** for type parameters of functions, structs and enums, bounds (`Copy`
+and traits), inference of type arguments, `::<…>`, traits without type parameters or
+associated types, `impl`s (generic ones too) and monomorphisation. Not implemented yet: size
+parameters, generic traits, associated types (and so `Measure` as a trait), and bounds
 inferred from bodies. The syntax is in [grammar.md](grammar.md) §2.
 
 ### Generic parameters
@@ -471,7 +472,10 @@ results of many runs.
 Generic code is **monomorphised**: compiled once for each combination of type and size
 arguments it is used with. Circuits need concrete sizes, a target's checks need exact qubit
 counts, and native code needs concrete types. Types and ownership are checked once, on the
-generic body; circuits are found, and code is generated, for each copy.
+generic body; circuits are found, and code is generated, for each copy. (For now circuits are
+found once, on the generic body, and a run that calls a trait's function not declared
+`rev fn` runs shot by shot, since what its `impl`s do is not looked at; a `rev` one cannot
+measure, so it keeps a run a circuit.)
 
 ### Not yet
 

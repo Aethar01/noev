@@ -17,7 +17,7 @@ use noev_syntax::{Diagnostic, FxHashMap, Span, Symbol};
 pub enum Binding {
     /// A function.
     Fn(FnId),
-    /// A struct, enum or type alias.
+    /// A struct, enum, type alias or trait.
     Item(ItemId),
     /// A module.
     Module(ModuleId),
@@ -607,7 +607,23 @@ impl Resolver<'_> {
                         };
                         self.insert(id, Ns::Type, name, entry, "the type");
                     }
-                    ItemKind::Trait { fns, .. } | ItemKind::Impl { fns, .. } => {
+                    ItemKind::Trait {
+                        name,
+                        name_span,
+                        fns,
+                        ..
+                    } => {
+                        for &f in ast.list(fns) {
+                            self.scopes.fn_modules[f.index()] = id;
+                        }
+                        let entry = Entry {
+                            binding: Binding::Item(item),
+                            visible,
+                            span: name_span,
+                        };
+                        self.insert(id, Ns::Type, name, entry, "the trait");
+                    }
+                    ItemKind::Impl { fns, .. } => {
                         for &f in ast.list(fns) {
                             self.scopes.fn_modules[f.index()] = id;
                         }

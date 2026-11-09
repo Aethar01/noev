@@ -456,3 +456,29 @@ fn libraries_are_warned_about_undeclared_rev() {
         Vec::<String>::new()
     );
 }
+
+#[test]
+fn impls_belong_to_the_package_of_the_trait_or_the_type() {
+    let qlib = "pub trait Gate { fn apply(mut self) }\npub struct Register { pub q: Qubit }";
+    // The type is this package's, or the trait is.
+    ok(&[
+        (
+            "",
+            "struct Mine { x: Int }\nimpl qlib::Gate for Mine { fn apply(mut self) {} }\n\
+             trait Local { fn f(ref self) }\nimpl Local for qlib::Register { fn f(ref self) {} }\n\
+             fn main() {}",
+        ),
+        ("qlib/", qlib),
+    ]);
+    // Neither is.
+    assert_eq!(
+        errors(&[
+            (
+                "",
+                "impl qlib::Gate for qlib::Register { fn apply(mut self) {} }\nfn main() {}"
+            ),
+            ("qlib/", qlib),
+        ]),
+        ["an `impl` of `Gate` for `Register` must be in the package of `Gate` or of the type"]
+    );
+}

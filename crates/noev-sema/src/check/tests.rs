@@ -207,8 +207,8 @@ fn main_takes_nothing_and_returns_unit() {
 #[test]
 fn reserved_items() {
     assert_eq!(
-        one_error("trait T { fn m(ref self) }"),
-        "traits are not supported yet"
+        one_error("trait T { type A }"),
+        "associated types are not supported yet"
     );
     assert_eq!(
         one_error("fn f() { with { } do { } }"),

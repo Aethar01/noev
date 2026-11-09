@@ -507,6 +507,63 @@ impl Types {
         }
     }
 
+    /// Matches `ty` against `pattern`, which can mention the type parameters `params`,
+    /// recording what each stands for in `found`. Returns whether they match: an `impl` for
+    /// `Pair<T, T>` matches `Pair<Int, Int>` with `T = Int`.
+    pub fn match_params(
+        &self,
+        pattern: Ty,
+        ty: Ty,
+        params: &[Ty],
+        found: &mut [Option<Ty>],
+    ) -> bool {
+        if let Some(i) = params.iter().position(|&p| p == pattern) {
+            return match found[i] {
+                None => {
+                    found[i] = Some(ty);
+                    true
+                }
+                Some(earlier) => earlier == ty,
+            };
+        }
+        if pattern == ty {
+            return true;
+        }
+        match (self.kind(pattern), self.kind(ty)) {
+            (TyKind::Tuple(a), TyKind::Tuple(b)) if a.len() == b.len() => a
+                .iter()
+                .zip(b.iter())
+                .all(|(&p, &t)| self.match_params(p, t, params, found)),
+            (TyKind::Array(p, n), TyKind::Array(t, m)) if n == m => {
+                self.match_params(*p, *t, params, found)
+            }
+            (TyKind::Distribution(p), TyKind::Distribution(t)) => {
+                self.match_params(*p, *t, params, found)
+            }
+            (
+                TyKind::Ref {
+                    mutable: a,
+                    inner: p,
+                },
+                TyKind::Ref {
+                    mutable: b,
+                    inner: t,
+                },
+            ) if a == b => self.match_params(*p, *t, params, found),
+            (TyKind::Struct(a), TyKind::Struct(b)) => {
+                let (da, db) = (&self.structs[a.index()], &self.structs[b.index()]);
+                da.template.unwrap_or(*a) == db.template.unwrap_or(*b)
+                    && da.args.len() == db.args.len()
+                    && da
+                        .args
+                        .iter()
+                        .zip(&db.args)
+                        .all(|(&p, &t)| self.match_params(p, t, params, found))
+            }
+            _ => false,
+        }
+    }
+
     /// Whether `ty` mentions a type parameter.
     pub fn has_params(&self, ty: Ty) -> bool {
         match self.kind(ty) {

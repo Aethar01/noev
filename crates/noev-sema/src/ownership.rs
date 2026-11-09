@@ -410,6 +410,16 @@ fn irreversible_op(
                                 format!("it calls `{name}`, which is not reversible"),
                             )
                         }
+                        // A trait's function not declared `rev`: its `impl`s are not known here.
+                        Callee::Fn(f) if typed.fns[f.index()].sig.reversible == Reversible::No => {
+                            let name = ast.name(ast.function(f).name);
+                            (
+                                expr.span,
+                                format!(
+                                    "it calls `{name}`, which its trait does not declare `rev fn`"
+                                ),
+                            )
+                        }
                         Callee::Fn(f)
                             if typed.fns[f.index()].sig.reversible == Reversible::Infer
                                 && other_package(ast, typed.fn_modules[f.index()], module) =>
@@ -1395,6 +1405,15 @@ impl Owner<'_> {
             return Some(why.clone());
         }
         let decl = self.ast.function(f);
+        if self.typed.fn_traits.contains_key(&f) && !decl.is_rev {
+            return Some(Irreversible {
+                span: decl.name_span,
+                why: format!(
+                    "`{}` is a trait's function not declared `rev fn`: generic code cannot see its `impl`s",
+                    self.ast.name(decl.name)
+                ),
+            });
+        }
         let elsewhere = self.typed.fns[f.index()].sig.reversible == Reversible::Infer
             && other_package(self.ast, self.typed.fn_modules[f.index()], self.module);
         elsewhere.then(|| Irreversible {

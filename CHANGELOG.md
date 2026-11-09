@@ -61,6 +61,12 @@ before 1.0.
   arguments, fields and expected types, or given with `::<…>`; each generic function is
   compiled once per list of type arguments (`unwrap_or<Int>` in the IR). `Option` and
   `Result` are instances of generic definitions like any other.
+- Traits and `impl`s: default functions, generic `impl`s (`impl<T: Shape> Shape for
+  Pair<T>`), calls on concrete types and through bounds (`T: Shape`), and `rev` trait
+  functions, which every `impl` must keep and generic code can invert with `adj`. An `impl`
+  must provide every function without a default, with the trait's signature, be in the
+  package of the trait or the type, and not give a trait twice for one type. A call through a
+  trait function not declared `rev` is irreversible, and runs shot by shot.
 
 ### Tools
 
