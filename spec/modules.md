@@ -107,30 +107,32 @@ together".
 Other modules can only move, lend or destructure the fields they can see. A partial move
 (N011) of a private field is therefore only possible inside the struct's module.
 
-## 5. Reversibility and unsafety across modules
+## 5. Reversibility and unsafety across modules and packages
 
-Reversibility is inferred within a module ([ownership.md](ownership.md) §7). Across modules it
-is part of a function's contract:
+Reversibility is inferred within a package, across all its modules
+([ownership.md](ownership.md) §7). Across packages it is part of a function's contract:
 
-- A function is reversible to other modules **only if it is declared `rev fn`**, whatever
-  its visibility (`pub`, `pub(pkg)`, …). Inside its own module, the inferred answer still
-  applies.
-- So adding a `measure` to a public function's body can never silently break a caller in
-  another module that uses it inside `ctrl` or `adj`. The change is caught at the function,
-  by its `rev` declaration.
+- A function is reversible to other packages **only if it is declared `rev fn`**. Inside its
+  own package, the inferred answer applies, so a package's own code needs no `rev`.
+- So adding a `measure` to a library function's body can never break a program that depends
+  on it and uses it inside `ctrl` or `adj`, which semantic versioning relies on: the change is
+  caught in the library, by its `rev` declaration. And a compiled library can provide the
+  inverse and controlled forms of exactly the functions it declares `rev`.
 - `unsafe fn` works the same in every module.
 - Being a circuit does not work like reversibility: the compiler decides it across modules
   and packages, from the bodies of the functions a run calls ([execution.md](execution.md)
   §4), as it does within one. A change inside a function can therefore switch a run in
-  another module between one circuit and shot by shot, but never what the run computes:
+  another package between one circuit and shot by shot, but never what the run computes:
   `--emit=plan` says why a run is not a circuit, and a backend that takes only circuits
   rejects it when the program is built. `circuit fn` still promises it for one function.
-  When packages are compiled separately, what the compiler found is kept with each.
+  When packages are compiled separately, what the compiler found is kept with each. A
+  `rev fn` cannot measure, so the compiler need not look inside one to know it keeps a run
+  a circuit, unless measurement results are passed to it.
 
-The compiler warns about a function visible outside its module that acts on qubits and is
-reversible but not declared `rev`, since callers elsewhere cannot use it as reversible.
-Functions that do not act on qubits are left alone, so classical helpers need no `rev`
-unless reversible code in other modules calls them.
+The compiler warns about a library's `pub` function that acts on qubits and is reversible
+but not declared `rev`, since packages that depend on it cannot use it as reversible.
+Functions that do not act on qubits are left alone, and so are programs, which have no
+dependents.
 
 ## 6. The prelude
 

@@ -387,55 +387,72 @@ fn fields_and_methods_are_private_to_their_module() {
 }
 
 #[test]
-fn reversible_across_modules_only_if_declared() {
-    // Inside its module, `flip` is inferred reversible.
-    assert_eq!(
-        ownership(&[
-            ("", "fn main() {}"),
-            (
-                "a",
-                "fn flip(q: mut Qubit) { q.x() }\nrev fn twice(q: mut Qubit) { flip(q)\n adj flip(q) }"
-            ),
-        ]),
-        Vec::<String>::new()
-    );
-    // From another module, only `rev fn` is.
-    assert_eq!(
-        ownership(&[
-            (
-                "",
-                "rev fn twice(q: mut Qubit) { a::flip(q) }\nfn undo(q: mut Qubit) { adj a::flip(q) }\nfn main() {}"
-            ),
-            ("a", "pub fn flip(q: mut Qubit) { q.x() }"),
-        ]),
-        [
-            "N013 `flip` is not reversible",
-            "N014 only reversible functions can be inverted with `adj`",
-            "warning `flip` is reversible, but other modules can use it as reversible only if it is declared `rev fn`",
-        ]
-    );
+fn reversible_across_packages_only_if_declared() {
+    // Within a package, across modules, reversibility is inferred.
     assert_eq!(
         ownership(&[
             (
                 "",
                 "rev fn twice(q: mut Qubit) { a::flip(q)\n adj a::flip(q) }\nfn main() {}"
             ),
-            ("a", "pub rev fn flip(q: mut Qubit) { q.x() }"),
+            ("a", "pub fn flip(q: mut Qubit) { q.x() }"),
         ]),
         Vec::<String>::new()
     );
-    // Inference through a function in another module stops there too.
+    // From another package, only `rev fn` is.
     assert_eq!(
         ownership(&[
             (
                 "",
-                "rev fn r(q: mut Qubit) { wrap(q) }\nfn wrap(q: mut Qubit) { a::plain(q) }\nfn main() {}"
+                "rev fn twice(q: mut Qubit) { qlib::flip(q) }\n\
+                 fn undo(q: mut Qubit) { adj qlib::flip(q) }\nfn main() {}"
             ),
-            ("a", "pub fn plain(q: mut Qubit) { q.x() }"),
+            ("qlib/", "pub fn flip(q: mut Qubit) { q.x() }"),
         ]),
         [
-            "N013 `wrap` is not reversible",
-            "warning `plain` is reversible, but other modules can use it as reversible only if it is declared `rev fn`",
+            "N013 `flip` is not reversible",
+            "N014 only reversible functions can be inverted with `adj`",
         ]
+    );
+    assert_eq!(
+        ownership(&[
+            (
+                "",
+                "rev fn twice(q: mut Qubit) { qlib::flip(q)\n adj qlib::flip(q) }\nfn main() {}"
+            ),
+            ("qlib/", "pub rev fn flip(q: mut Qubit) { q.x() }"),
+        ]),
+        Vec::<String>::new()
+    );
+    // Inference through this package's functions stops at the other package's.
+    assert_eq!(
+        ownership(&[
+            (
+                "",
+                "rev fn r(q: mut Qubit) { wrap(q) }\nfn wrap(q: mut Qubit) { qlib::plain(q) }\nfn main() {}"
+            ),
+            ("qlib/", "pub fn plain(q: mut Qubit) { q.x() }"),
+        ]),
+        ["N013 `wrap` is not reversible"]
+    );
+}
+
+#[test]
+fn libraries_are_warned_about_undeclared_rev() {
+    // A library (no `main`): its `pub` functions on qubits that could be `rev fn`.
+    assert_eq!(
+        ownership(&[(
+            "",
+            "pub fn flip(q: mut Qubit) { q.x() }\npub(pkg) fn inner(q: mut Qubit) { q.x() }\n\
+             pub rev fn declared(q: mut Qubit) { q.x() }\npub fn scale() -> Float { 2.0 }"
+        )]),
+        [
+            "warning `flip` is reversible, but other packages can use it as reversible only if it is declared `rev fn`"
+        ]
+    );
+    // A program has no dependents.
+    assert_eq!(
+        ownership(&[("", "pub fn flip(q: mut Qubit) { q.x() }\nfn main() {}")]),
+        Vec::<String>::new()
     );
 }

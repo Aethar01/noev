@@ -48,9 +48,16 @@ pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
             checker.function(FnId::from_index(index), body);
         }
     }
-    // A function that acts on qubits and is reversible only by inference cannot be used as
-    // reversible by the modules it is visible to (`spec/modules.md` §5).
+    // A library's public function that acts on qubits and is reversible only by inference
+    // cannot be used as reversible by the packages that depend on it (`spec/modules.md` §5).
+    // Only the library being compiled is warned about: a program has no dependents, and a
+    // dependency's warnings are its own authors'.
+    let library = typed.main.is_none();
     for (index, decl) in ast.all_fns().iter().enumerate() {
+        let module = typed.fn_modules[index];
+        if !library || ast.module(module).package.index() != 0 {
+            continue;
+        }
         let info = &typed.fns[index];
         let quantum = info
             .sig
@@ -58,7 +65,7 @@ pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
             .iter()
             .chain(&info.receiver_ty)
             .any(|&ty| typed.types.linearity(typed.types.deref(ty)) == Kind::Linear);
-        if decl.vis != Vis::Private
+        if decl.vis == Vis::Pub
             && decl.body.is_some()
             && quantum
             && info.sig.reversible == Reversible::Infer
@@ -66,7 +73,7 @@ pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
         {
             let name = ast.name(decl.name);
             let message = format!(
-                "`{name}` is reversible, but other modules can use it as reversible only if it \
+                "`{name}` is reversible, but other packages can use it as reversible only if it \
                  is declared `rev fn`"
             );
             checker.diagnostics.push(Diagnostic {
@@ -178,14 +185,20 @@ struct Irreversible {
     why: String,
 }
 
-/// Why a function in another module, not declared `rev fn`, is not reversible where it is
+/// Why a function in another package, not declared `rev fn`, is not reversible where it is
 /// called (`spec/modules.md` §5).
 const ELSEWHERE: &str =
-    "which is in another module: there, only a function declared `rev fn` is reversible";
+    "which is in another package: there, only a function declared `rev fn` is reversible";
+
+/// Whether the functions in modules `a` and `b` are in different packages.
+fn other_package(ast: &Ast, a: ModuleId, b: ModuleId) -> bool {
+    ast.module(a).package != ast.module(b).package
+}
 
 struct Owner<'a> {
     ast: &'a Ast,
-    /// The module of the function being checked.
+    /// The module of the function being checked, whose package decides which functions are
+    /// reversible by inference.
     module: ModuleId,
     typed: &'a Typed,
     irreversible: Vec<Option<Irreversible>>,
@@ -399,7 +412,7 @@ fn irreversible_op(
                         }
                         Callee::Fn(f)
                             if typed.fns[f.index()].sig.reversible == Reversible::Infer
-                                && typed.fn_modules[f.index()] != module =>
+                                && other_package(ast, typed.fn_modules[f.index()], module) =>
                         {
                             let name = ast.name(ast.function(f).name);
                             (expr.span, format!("it calls `{name}`, {ELSEWHERE}"))
@@ -1353,14 +1366,14 @@ impl Owner<'_> {
     }
 
     /// Whether calling `f` from the current function counts as reversible: as declared, or as
-    /// inferred from its body when it is in the same module (`spec/modules.md` §5).
+    /// inferred from its body when it is in the same package (`spec/modules.md` §5).
     fn reversible_fn(&self, f: FnId) -> bool {
         match self.typed.fns[f.index()].sig.reversible {
             Reversible::Yes => true,
             Reversible::No => false,
             Reversible::Infer => {
                 self.irreversible[f.index()].is_none()
-                    && self.typed.fn_modules[f.index()] == self.module
+                    && !other_package(self.ast, self.typed.fn_modules[f.index()], self.module)
             }
         }
     }
@@ -1372,7 +1385,7 @@ impl Owner<'_> {
         }
         let decl = self.ast.function(f);
         let elsewhere = self.typed.fns[f.index()].sig.reversible == Reversible::Infer
-            && self.typed.fn_modules[f.index()] != self.module;
+            && other_package(self.ast, self.typed.fn_modules[f.index()], self.module);
         elsewhere.then(|| Irreversible {
             span: decl.name_span,
             why: format!(
