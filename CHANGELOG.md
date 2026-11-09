@@ -14,6 +14,8 @@ before 1.0.
   prelude, so `State`, `amplitudes`, `fft`, `ifft`, `P` and `PX` will need a `use`.
 - C interop follows Rust: arrays by reference, `extern "C" struct` for C layout, and
   `extern "C" fn` callbacks. Host functions can call back into the program.
+- Being a circuit is decided across modules and packages by the compiler, as within one;
+  only reversibility needs a declaration (`rev fn`) to cross a module.
 - Backends are libraries implementing `std::backend::Backend`, in Noev, Rust or C. Every
   backend has a target description with its capabilities, so a program cannot tell a
   simulator from a quantum computer; what used to be "simulators only" is now "backends that

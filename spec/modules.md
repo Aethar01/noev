@@ -1,7 +1,7 @@
 # Modules and packages
 
-Status: **Implemented**, except where a section says otherwise: being a circuit across
-modules (§5), and naming the prelude itself as `std::prelude` (§6).
+Status: **Implemented**, except where a section says otherwise: naming the prelude itself
+as `std::prelude` (§6).
 `noev check`, `build`, `run` and `export` take a `.nv` file or a package directory.
 
 ## 1. Files are modules
@@ -119,10 +119,13 @@ is part of a function's contract:
   another module that uses it inside `ctrl` or `adj`. The change is caught at the function,
   by its `rev` declaration.
 - `unsafe fn` works the same in every module.
-- Being a circuit works like reversibility: a function is a circuit to other modules only if
-  it is declared `circuit fn` ([execution.md](execution.md) §4). (Open: a `circuit fn` takes
-  no qubits, so this would make every run that calls another module's gates run shot by
-  shot. Not implemented until that is settled.)
+- Being a circuit does not work like reversibility: the compiler decides it across modules
+  and packages, from the bodies of the functions a run calls ([execution.md](execution.md)
+  §4), as it does within one. A change inside a function can therefore switch a run in
+  another module between one circuit and shot by shot, but never what the run computes:
+  `--emit=plan` says why a run is not a circuit, and a backend that takes only circuits
+  rejects it when the program is built. `circuit fn` still promises it for one function.
+  When packages are compiled separately, what the compiler found is kept with each.
 
 The compiler warns about a function visible outside its module that acts on qubits and is
 reversible but not declared `rev`, since callers elsewhere cannot use it as reversible.
@@ -204,8 +207,6 @@ path_prefix = ( IDENT | "pkg" | "super" ) { "::" IDENT } ;
 
 ## 10. Open questions
 
-- **Circuits across modules** (§5): what a function from another module must declare for a
-  run that calls it to be a circuit, given that a `circuit fn` takes no qubits.
 - **Package registry**: where packages are published and fetched from, which belongs to the
   tooling as much as the language. Until there is one, dependencies are paths or git URLs,
   as Cargo allows.
