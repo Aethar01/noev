@@ -1,0 +1,1 @@
+both_roots/noev.toml:1:1: error: a package has `src/main.nv` (a program) or `src/lib.nv` (a library), not both

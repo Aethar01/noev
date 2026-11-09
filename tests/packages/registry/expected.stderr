@@ -1,0 +1,1 @@
+registry/noev.toml:5:8: error: packages from a registry are not supported yet; give the dependency's directory, as in `{ path = "../qlib" }`

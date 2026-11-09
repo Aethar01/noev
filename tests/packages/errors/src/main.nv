@@ -1,0 +1,15 @@
+use a::hidden
+use a::missing
+use nowhere::x
+use a::*
+use b::*
+
+fn helper() {}
+fn helper() {}
+
+fn main() {
+    shared()
+    a::hidden()
+    a::inner::deep()
+    a::inner::secret()
+}

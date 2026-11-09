@@ -1,0 +1,5 @@
+[package]
+name = "program_dep"
+
+[dependencies]
+vqe = { path = "../vqe" }

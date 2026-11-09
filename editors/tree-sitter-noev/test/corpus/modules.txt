@@ -20,7 +20,7 @@ pub(self) fn f() {}
 (source_file
   (use_declaration
     (use_list
-      (path
+      (scoped_path
         (identifier)
         (identifier))
       (self)
@@ -31,12 +31,12 @@ pub(self) fn f() {}
   (use_declaration
     (visibility_modifier)
     (use_wildcard
-      (path
+      (scoped_path
         (identifier)
         (identifier))))
   (use_declaration
     (visibility_modifier)
-    (path
+    (scoped_path
       (identifier)
       (identifier)))
   (struct_item
@@ -53,7 +53,7 @@ pub(self) fn f() {}
         (type_identifier)))
     (function_item
       (visibility_modifier
-        (path
+        (scoped_path
           (identifier)
           (identifier)))
       (identifier)

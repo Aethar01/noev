@@ -28,6 +28,18 @@ before 1.0.
   and methods, and `use` trees with braces, `self`, `*` and `as`, flattened into one import
   per name. `pub` on a variant or an `impl` block is an error, as in Rust.
 
+- Packages: `noev check`, `build`, `run` and `export` take a `.nv` file or a package
+  directory (the current one by default). A package has a `noev.toml` and `src/main.nv` or
+  `src/lib.nv`; every `.nv` file under `src/` is a module, and dependencies are other package
+  directories, given by `path`.
+- Names are resolved per module, as in Rust: a module sees its own items, its imports, then
+  its glob imports, then its dependencies, then the prelude. `use` (with globs and
+  re-exports), paths through `pkg`, `super`, `self`, modules and packages, and the
+  visibility of items are checked. Imports resolve in any order, and a chain of re-exports
+  in one pass.
+- Functions outside a package's root module are named by their path in the IR (`ansatz::ry_layer`,
+  `qlib::flip`), and `fn main` is only the one in the root module.
+
 ### Tools
 
 - The tree-sitter grammar and Neovim highlights know visibilities and `use`.

@@ -53,6 +53,34 @@ ids! {
     ItemId;
     /// A function or method.
     FnId;
+    /// A module.
+    ModuleId;
+    /// A package.
+    PackageId;
+}
+
+/// A module: one file of a package, or a directory of them (`spec/modules.md` §1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Module {
+    /// Its name: the file's or directory's, or the package's for its root module.
+    pub name: Symbol,
+    /// The module it is in; `None` for a package's root module.
+    pub parent: Option<ModuleId>,
+    /// The package it belongs to.
+    pub package: PackageId,
+    /// Its items, in order.
+    pub items: List<ItemId>,
+}
+
+/// A package: the main one, or a dependency (`spec/modules.md` §7).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Package {
+    /// Its name.
+    pub name: Symbol,
+    /// Its root module.
+    pub root: ModuleId,
+    /// The packages it depends on, by the name it uses for each.
+    pub deps: Vec<(Symbol, PackageId)>,
 }
 
 /// A contiguous run of `T` in one of the [`Ast`]'s pools.
@@ -204,13 +232,17 @@ pub const STD_NAMES: [&str; 17] = [
     "One", "Plus", "Minus", "PlusI", "MinusI",
 ];
 
-/// A parsed file.
+/// A parsed package and its dependencies: every module of each, in one syntax tree.
 #[derive(Debug, Default)]
 pub struct Ast {
-    /// The file's top-level items, in order.
+    /// Every module's top-level items, in order, module by module.
     pub root: List<ItemId>,
     /// Identifier names.
     pub symbols: Interner,
+    /// Every module. Each package's root comes before its other modules.
+    modules: Vec<Module>,
+    /// Every package; the first is the one being compiled.
+    packages: Vec<Package>,
     exprs: Vec<Expr>,
     stmts: Vec<Stmt>,
     blocks: Vec<Block>,
@@ -281,6 +313,105 @@ impl Ast {
     /// The text of `symbol`.
     pub fn name(&self, symbol: Symbol) -> &str {
         self.symbols.name(symbol)
+    }
+
+    /// An empty syntax tree, with the standard library's names interned, so its types can be
+    /// named in messages even when a program never mentions them.
+    pub fn new() -> Self {
+        let mut ast = Ast::default();
+        for name in STD_NAMES {
+            ast.symbols.intern(name);
+        }
+        ast
+    }
+
+    /// Adds a package named `name`, with an empty root module, and returns it.
+    pub fn add_package(&mut self, name: &str) -> PackageId {
+        let id = PackageId::new(self.packages.len());
+        let name = self.symbols.intern(name);
+        let root = ModuleId::new(self.modules.len());
+        self.modules.push(Module {
+            name,
+            parent: None,
+            package: id,
+            items: List::EMPTY,
+        });
+        self.packages.push(Package {
+            name,
+            root,
+            deps: Vec::new(),
+        });
+        id
+    }
+
+    /// Adds an empty module named `name` inside `parent`, and returns it.
+    pub fn add_module(&mut self, parent: ModuleId, name: &str) -> ModuleId {
+        let id = ModuleId::new(self.modules.len());
+        let name = self.symbols.intern(name);
+        let package = self.module(parent).package;
+        self.modules.push(Module {
+            name,
+            parent: Some(parent),
+            package,
+            items: List::EMPTY,
+        });
+        id
+    }
+
+    /// Records that `package` depends on `dep`, which it calls `name`.
+    pub fn add_dependency(&mut self, package: PackageId, name: &str, dep: PackageId) {
+        let name = self.symbols.intern(name);
+        self.packages[package.index()].deps.push((name, dep));
+    }
+
+    /// The module with this id.
+    pub fn module(&self, id: ModuleId) -> &Module {
+        &self.modules[id.index()]
+    }
+
+    /// Every module.
+    pub fn modules(&self) -> &[Module] {
+        &self.modules
+    }
+
+    /// The package with this id.
+    pub fn package(&self, id: PackageId) -> &Package {
+        &self.packages[id.index()]
+    }
+
+    /// Every package; the first is the one being compiled.
+    pub fn packages(&self) -> &[Package] {
+        &self.packages
+    }
+
+    /// The module's path from its package's root, such as `circuits::ladder`; empty for a
+    /// root module.
+    pub fn module_path(&self, id: ModuleId) -> String {
+        let mut names = Vec::new();
+        let mut module = self.module(id);
+        while let Some(parent) = module.parent {
+            names.push(self.name(module.name));
+            module = self.module(parent);
+        }
+        names.reverse();
+        names.join("::")
+    }
+
+    /// Makes [`Ast::root`] every module's items, after the modules are parsed.
+    pub fn collect_root(&mut self) {
+        let mark = self.mark::<ItemId>();
+        for index in 0..self.modules.len() {
+            let items = self.modules[index].items;
+            for i in 0..items.len() {
+                let item = self.list(items)[i];
+                self.push_to(item);
+            }
+        }
+        self.root = self.finish(mark);
+    }
+
+    pub(crate) fn set_items(&mut self, module: ModuleId, items: List<ItemId>) {
+        self.modules[module.index()].items = items;
     }
 }
 

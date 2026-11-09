@@ -53,7 +53,7 @@ ordinary identifiers, so `let adj = build_graph(edges)` is valid.
 | `with`  | it starts a statement and is directly followed by `{`       |
 | `do`    | it directly follows the closing `}` of a `with` block       |
 | `within` | it directly follows an expectation value (see below)       |
-| `pkg`, `super` | they start a path and are followed by `::` (Reserved; see [modules.md](modules.md)) |
+| `pkg`, `super` | they start a path and are followed by `::` ([modules.md](modules.md)) |
 
 ### Literals
 
@@ -176,7 +176,8 @@ Terminals are quoted. `sep` is a line break (as defined above), `;` or `,` where
 
 ```ebnf
 program     = { item } ;
-item        = struct_def | enum_def | type_alias | fn_def | trait_def | impl_def | extern_def ;
+item        = [ vis ] ( struct_def | enum_def | type_alias | fn_def | trait_def | extern_def )
+            | impl_def | use_decl ;                     (* vis, use_decl: modules.md §9 *)
 
 type_alias  = "type" IDENT "=" type ;
 
@@ -542,5 +543,6 @@ fn main() {
   on single calls.
 - **Closures.** If added, the `|x| …` form can coexist with kets, because a ket contains
   only `0 1 + -` and ends in `>`. Not needed so far.
-- **Modules and imports.** Specified in [modules.md](modules.md); Reserved. Until then, one
-  `.nv` file is one program, and `main` is the entry point when one exists.
+- **Modules and imports.** Specified in [modules.md](modules.md). A `.nv` file on its own is
+  a package of one module, and `main` in a package's root module is the entry point when one
+  exists.

@@ -26,29 +26,34 @@ pub fn parse(source: &str) -> Parsed {
     parse_at(source, 0)
 }
 
-/// Lexes and parses `source`, a file whose offsets start at `base` ([`crate::SourceMap`]).
+/// Lexes and parses `source`, a file whose offsets start at `base` ([`crate::SourceMap`]), as
+/// a package with one module.
 pub fn parse_at(source: &str, base: u32) -> Parsed {
+    let mut ast = Ast::new();
+    let package = ast.add_package("main");
+    let root = ast.package(package).root;
+    let diagnostics = parse_module(&mut ast, root, source, base);
+    ast.collect_root();
+    Parsed { ast, diagnostics }
+}
+
+/// Lexes and parses `source`, a file whose offsets start at `base`, as the items of `module`.
+/// Once every module is parsed, [`Ast::collect_root`] gathers their items.
+pub fn parse_module(ast: &mut Ast, module: ModuleId, source: &str, base: u32) -> Vec<Diagnostic> {
     let lexed = lex_at(source, base);
-    let mut ast = Ast::default();
-    // The standard library's own names, so its types can be named in messages even when a
-    // program never mentions them.
-    for name in crate::ast::STD_NAMES {
-        ast.symbols.intern(name);
-    }
     let mut parser = Parser {
         source,
         base,
         tokens: lexed.tokens,
         pos: 0,
-        ast,
+        ast: std::mem::take(ast),
         diagnostics: lexed.diagnostics,
         no_struct: false,
     };
-    parser.program();
-    Parsed {
-        ast: parser.ast,
-        diagnostics: parser.diagnostics,
-    }
+    let items = parser.program();
+    *ast = parser.ast;
+    ast.set_items(module, items);
+    parser.diagnostics
 }
 
 /// Binding strength of the binary operators between `|` and `*`, from loosest to tightest.
@@ -288,7 +293,7 @@ impl Parser<'_> {
 
 // Items.
 impl Parser<'_> {
-    fn program(&mut self) {
+    fn program(&mut self) -> List<ItemId> {
         let mark = self.ast.mark::<ItemId>();
         loop {
             self.skip_separators();
@@ -303,7 +308,7 @@ impl Parser<'_> {
                 }
             }
         }
-        self.ast.root = self.ast.finish(mark);
+        self.ast.finish(mark)
     }
 
     fn at_fn_start(&self) -> bool {

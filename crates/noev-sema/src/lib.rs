@@ -7,6 +7,7 @@ pub mod circuit;
 pub mod facts;
 pub mod ownership;
 pub mod prelude;
+pub mod resolve;
 pub mod ty;
 
 pub use check::{Typed, check};

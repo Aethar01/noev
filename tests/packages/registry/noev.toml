@@ -1,0 +1,5 @@
+[package]
+name = "registry"
+
+[dependencies]
+qlib = "1.2"

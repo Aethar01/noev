@@ -1,6 +1,7 @@
 //! The `noev` command-line interface.
 
 mod lsp;
+mod package;
 mod report;
 
 use std::path::{Path, PathBuf};
@@ -34,7 +35,8 @@ struct Cli {
 enum Command {
     /// Check a program for type and ownership errors without building it
     Check {
-        /// The `.nv` file to check
+        /// The `.nv` file or package directory to check
+        #[arg(default_value = ".")]
         file: PathBuf,
 
         #[command(flatten)]
@@ -43,7 +45,8 @@ enum Command {
 
     /// Compile a program
     Build {
-        /// The `.nv` file to build
+        /// The `.nv` file or package directory to build
+        #[arg(default_value = ".")]
         file: PathBuf,
 
         /// What to produce
@@ -60,7 +63,8 @@ enum Command {
 
     /// Run a program, with its quantum parts on a backend (the ketrs simulator unless chosen)
     Run {
-        /// The `.nv` file to run
+        /// The `.nv` file or package directory to run
+        #[arg(default_value = ".")]
         file: PathBuf,
 
         /// Seed for the simulator's random numbers, to reproduce a run
@@ -86,7 +90,8 @@ enum Command {
     /// Save a program's circuits without running anything quantum (the same as
     /// `run --backend=export`)
     Export {
-        /// The `.nv` file
+        /// The `.nv` file or package directory
+        #[arg(default_value = ".")]
         file: PathBuf,
 
         /// A directory for the circuits, one file each (default: all on standard output)
@@ -195,33 +200,34 @@ fn main() -> ExitCode {
 /// A program that passed every check.
 struct Checked {
     sources: noev_syntax::SourceMap,
-    parsed: noev_syntax::Parsed,
+    ast: noev_syntax::Ast,
     typed: noev_sema::Typed,
     circuits: noev_sema::Circuits,
 }
 
-/// Reads and checks `file`, printing its diagnostics. Fails with exit status 1 when there
-/// are errors, and 2 when the file could not be read.
+/// Reads and checks the `.nv` file or package at `file`, printing its diagnostics. Fails with
+/// exit status 1 when there are errors, and 2 when nothing could be checked.
 fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
-    let source = match std::fs::read_to_string(file) {
-        Ok(source) => source,
+    let loaded = match package::load(file) {
+        Ok(loaded) => loaded,
         Err(error) => {
-            anstream::eprintln!("noev: cannot read {}: {error}", file.display());
+            anstream::eprintln!("noev: {error}");
             return Err(ExitCode::from(2));
         }
     };
-    let sources = noev_syntax::SourceMap::single(file.display().to_string(), source);
-    let main_file = &sources.files()[0];
-    let parsed = noev_syntax::parse_at(&main_file.text, main_file.start);
-    let (typed, type_errors) = noev_sema::check(&parsed.ast);
-    let mut diagnostics = parsed.diagnostics.clone();
+    let package::Loaded {
+        sources,
+        ast,
+        mut diagnostics,
+    } = loaded;
+    let (typed, type_errors) = noev_sema::check(&ast);
     // Ownership is only meaningful for a well-typed program, and circuits for one that
     // passes ownership checking.
     let mut circuits = noev_sema::Circuits::default();
     if diagnostics.is_empty() && type_errors.is_empty() {
-        diagnostics.extend(noev_sema::check_ownership(&parsed.ast, &typed));
+        diagnostics.extend(noev_sema::check_ownership(&ast, &typed));
         if diagnostics.is_empty() {
-            let (found, warnings) = noev_sema::check_circuits(&parsed.ast, &typed);
+            let (found, warnings) = noev_sema::check_circuits(&ast, &typed);
             circuits = found;
             diagnostics.extend(warnings);
         }
@@ -237,7 +243,7 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
     }
     Ok(Checked {
         sources,
-        parsed,
+        ast,
         typed,
         circuits,
     })
@@ -250,7 +256,7 @@ fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) 
         Err(code) => return code,
     };
     let program = noev_ir::lower(
-        &checked.parsed.ast,
+        &checked.ast,
         &checked.typed,
         &checked.circuits,
         &checked.sources,
@@ -291,7 +297,7 @@ fn export(
     format: MessageFormat,
 ) -> ExitCode {
     let program = &noev_ir::lower(
-        &checked.parsed.ast,
+        &checked.ast,
         &checked.typed,
         &checked.circuits,
         &checked.sources,
@@ -386,7 +392,7 @@ fn run(
         return export(file, &checked, circuits, format);
     }
     let program = noev_ir::lower(
-        &checked.parsed.ast,
+        &checked.ast,
         &checked.typed,
         &checked.circuits,
         &checked.sources,
@@ -436,25 +442,30 @@ fn run(
 /// The text of `--emit=plan`: one line per `sample` run, then one per function with
 /// quantum operations.
 fn plan(checked: &Checked) -> String {
-    let ast = &checked.parsed.ast;
+    let ast = &checked.ast;
     let circuits = &checked.circuits;
-    // One file for now; with modules, each span's line is in its own file.
-    let lines = report::Lines::new(&checked.sources.files()[0]);
-    let line = |span: noev_syntax::Span| lines.line_col(span.start).0;
+    // `line 12` for a program of one file; `src/ansatz.nv:12` when there are several.
+    let several = checked.sources.files().len() > 1;
+    let line = |span: noev_syntax::Span| {
+        let file = checked.sources.lookup(span.start);
+        let line = report::Lines::new(file).line_col(span.start).0;
+        if several {
+            format!("{}:{line}", file.name)
+        } else {
+            format!("line {line}")
+        }
+    };
     // Why a run is not sampled from one simulation, if it is not.
     let why = |info: &noev_sema::CircuitInfo| {
         if let Some((span, what)) = &info.not_circuit {
-            Some(format!(
-                "a measurement result is {what} (line {})",
-                line(*span)
-            ))
+            Some(format!("a measurement result is {what} ({})", line(*span)))
         } else if let Some((span, why)) = &info.feedback_unsupported {
-            Some(format!("{why}, not compiled yet (line {})", line(*span)))
+            Some(format!("{why}, not compiled yet ({})", line(*span)))
         } else if let Some(span) = info.inspects {
-            Some(format!("it reads amplitudes (line {})", line(span)))
+            Some(format!("it reads amplitudes ({})", line(span)))
         } else {
             info.releases
-                .map(|span| format!("the simulator checks its `release` (line {})", line(span)))
+                .map(|span| format!("the simulator checks its `release` ({})", line(span)))
         }
     };
     let run = |info: &noev_sema::CircuitInfo| match why(info) {
@@ -475,7 +486,7 @@ fn plan(checked: &Checked) -> String {
     runs.sort_by_key(|(span, _)| span.start);
     let mut rows: Vec<(String, String)> = runs
         .into_iter()
-        .map(|(span, info)| (format!("sample (line {})", line(span)), run(info)))
+        .map(|(span, info)| (format!("sample ({})", line(span)), run(info)))
         .collect();
     rows.extend(
         ast.all_fns()

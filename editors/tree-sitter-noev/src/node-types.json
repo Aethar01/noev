@@ -7434,6 +7434,36 @@
     }
   },
   {
+    "type": "scoped_path",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "path": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "scoped_path",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "self",
     "named": true,
     "fields": {}
@@ -8141,7 +8171,7 @@
             "named": true
           },
           {
-            "type": "path",
+            "type": "scoped_path",
             "named": true
           },
           {
@@ -8165,7 +8195,7 @@
           "named": true
         },
         {
-          "type": "path",
+          "type": "scoped_path",
           "named": true
         },
         {
@@ -8200,7 +8230,7 @@
           "named": true
         },
         {
-          "type": "path",
+          "type": "scoped_path",
           "named": true
         },
         {
@@ -8235,7 +8265,7 @@
           "named": true
         },
         {
-          "type": "path",
+          "type": "scoped_path",
           "named": true
         }
       ]
@@ -8305,7 +8335,7 @@
           "named": true
         },
         {
-          "type": "path",
+          "type": "scoped_path",
           "named": true
         }
       ]

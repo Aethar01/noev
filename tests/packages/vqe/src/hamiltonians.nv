@@ -1,0 +1,1 @@
+pub(pkg) fn scale() -> Float { 0.5 }

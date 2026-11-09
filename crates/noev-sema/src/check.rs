@@ -9,6 +9,7 @@ use noev_syntax::ast::*;
 use noev_syntax::{Diagnostic, FxHashMap, Span, Symbol};
 
 use crate::prelude::{self, Builtin, Math, Reversible, Sig};
+use crate::resolve::{self, Binding, Entry, Found, Ns, PathError, PathWords, Scopes};
 use crate::ty::{Kind, StructDef, StructId, Ty, TyKind, Types, VariantDef};
 
 /// A local variable: a `let` binding, parameter, `self`, or loop variable.
@@ -126,6 +127,10 @@ pub struct Typed {
     pub fns: Vec<FnInfo>,
     /// Each `sample` expression's run.
     pub runs: FxHashMap<ExprId, Run>,
+    /// The program's `fn main`, in the root module of the package being compiled.
+    pub main: Option<FnId>,
+    /// The module each function is in, methods included, indexed by [`FnId::index`].
+    pub fn_modules: Vec<ModuleId>,
 }
 
 /// The block of a `sample` expression, which is run separately from the code around it.
@@ -175,9 +180,13 @@ impl Expect {
 /// Resolves names and checks types in `ast`.
 pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
     let exprs = ast.all_exprs().len();
+    let (mut scopes, diagnostics) = resolve::resolve(ast);
     let mut checker = Checker {
         ast,
+        words: PathWords::new(ast),
+        module: ModuleId::from_index(0),
         t: Typed {
+            fn_modules: scopes.take_fn_modules(),
             expr_types: vec![Ty::ERROR; exprs],
             res: vec![Res::None; exprs],
             callees: vec![None; exprs],
@@ -188,9 +197,10 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
             pat_variants: vec![None; ast.all_pats().len()],
             ..Typed::default()
         },
-        diagnostics: Vec::new(),
-        fn_names: FxHashMap::default(),
-        struct_names: FxHashMap::default(),
+        scopes,
+        diagnostics,
+        item_structs: vec![None; ast.all_items().len()],
+        std_types: FxHashMap::default(),
         methods: FxHashMap::default(),
         scope: Vec::new(),
         self_ty: None,
@@ -212,9 +222,17 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
 struct Checker<'a> {
     ast: &'a Ast,
     t: Typed,
+    /// What each name means in each module.
+    scopes: Scopes<'a>,
+    /// `pkg`, `super` and `self`, which can start a path.
+    words: PathWords,
+    /// The module of the code being checked.
+    module: ModuleId,
     diagnostics: Vec<Diagnostic>,
-    fn_names: FxHashMap<Symbol, FnId>,
-    struct_names: FxHashMap<Symbol, StructId>,
+    /// The struct or enum each struct or enum item declares, by [`ItemId::index`].
+    item_structs: Vec<Option<StructId>>,
+    /// The standard library's types in the prelude: `Basis` and `State`.
+    std_types: FxHashMap<Symbol, StructId>,
     methods: FxHashMap<(StructId, Symbol), FnId>,
     /// Locals in scope, innermost last.
     scope: Vec<(Symbol, LocalId)>,
@@ -233,15 +251,15 @@ struct Checker<'a> {
     /// The `Option` and `Result` types made so far, by name and type arguments.
     std_enums: FxHashMap<(Symbol, Vec<Ty>), StructId>,
     /// Type aliases: the type each names, and where its name is.
-    aliases: FxHashMap<Symbol, (TypeId, Span)>,
+    aliases: FxHashMap<ItemId, (TypeId, Span)>,
     /// The aliases resolved so far.
-    alias_types: FxHashMap<Symbol, Ty>,
+    alias_types: FxHashMap<ItemId, Ty>,
     /// The aliases being resolved, innermost last, to catch one that names itself.
-    resolving_aliases: Vec<Symbol>,
+    resolving_aliases: Vec<ItemId>,
 }
 
 // Collecting items.
-impl Checker<'_> {
+impl<'a> Checker<'a> {
     fn error(&mut self, span: Span, message: impl Into<String>) -> &mut Diagnostic {
         self.diagnostics.push(Diagnostic::error(span, message));
         self.diagnostics.last_mut().expect("just pushed")
@@ -278,7 +296,7 @@ impl Checker<'_> {
             args: Vec::new(),
             bare: false,
         });
-        self.struct_names.insert(std_name("Basis"), basis);
+        self.std_types.insert(std_name("Basis"), basis);
         let basis_ty = self.t.types.struct_ty(basis);
         self.t.types.basis = Some(basis_ty);
         // `enum State { Zero, One, Plus, Minus, PlusI, MinusI }`, in `state::Label`'s order.
@@ -292,7 +310,7 @@ impl Checker<'_> {
             args: Vec::new(),
             bare: false,
         });
-        self.struct_names.insert(std_name("State"), state);
+        self.std_types.insert(std_name("State"), state);
         let state_ty = self.t.types.struct_ty(state);
         self.t.types.state = Some(state_ty);
         let std_types = self.t.types.structs.len() as u32;
@@ -311,14 +329,8 @@ impl Checker<'_> {
                     let message =
                         format!("`{text}` is a built-in type; an alias needs a name of its own");
                     self.error(name_span, message);
-                } else if self.aliases.insert(name, (ty, name_span)).is_some()
-                    || self
-                        .struct_names
-                        .get(&name)
-                        .is_some_and(|e| e.0 >= std_types)
-                {
-                    let message = format!("the type `{text}` is defined twice");
-                    self.error(name_span, message);
+                } else {
+                    self.aliases.insert(item, (ty, name_span));
                 }
                 continue;
             }
@@ -332,11 +344,7 @@ impl Checker<'_> {
                 _ => continue,
             };
             let id = StructId(self.t.types.structs.len() as u32);
-            let earlier = self.struct_names.insert(name, id);
-            if earlier.is_some_and(|e| e.0 >= std_types) || self.aliases.contains_key(&name) {
-                let message = format!("the type `{}` is defined twice", self.name(name));
-                self.error(name_span, message);
-            }
+            self.item_structs[item.index()] = Some(id);
             self.t.types.structs.push(StructDef {
                 name,
                 span: name_span,
@@ -348,7 +356,7 @@ impl Checker<'_> {
         }
 
         // Every alias, so a broken one is reported even if nothing uses it.
-        let mut aliases: Vec<Symbol> = self.aliases.keys().copied().collect();
+        let mut aliases: Vec<ItemId> = self.aliases.keys().copied().collect();
         aliases.sort_by_key(|a| self.aliases[a].1.start);
         for alias in aliases {
             self.alias_type(alias);
@@ -373,18 +381,16 @@ impl Checker<'_> {
             .collect();
 
         let mut next_struct = std_types;
-        for &item in items {
-            let item = ast.item(item);
+        let main_root = ast.packages().first().map(|p| p.root);
+        for &item_id in items {
+            let item = ast.item(item_id);
+            self.module = self.scopes.item_module(item_id);
             match item.kind {
                 ItemKind::Fn(f) => {
                     let decl = ast.function(f);
-                    if self.fn_names.insert(decl.name, f).is_some() {
-                        let message =
-                            format!("the function `{}` is defined twice", self.name(decl.name));
-                        self.error(decl.name_span, message);
-                    }
                     self.collect_fn(f, None);
-                    if self.name(decl.name) == "main" {
+                    if self.name(decl.name) == "main" && Some(self.module) == main_root {
+                        self.t.main = Some(f);
                         self.check_main(f);
                     }
                 }
@@ -487,37 +493,36 @@ impl Checker<'_> {
                     self.error(item.span, "`impl` blocks are not supported yet")
                         .help = Some("methods go inside the struct".into());
                 }
-                ItemKind::Use(_) => {
-                    self.error(
-                        item.span,
-                        "`use` is not supported yet: every program is one module",
-                    )
-                    .help = Some("see spec/modules.md for what is planned".into());
-                }
-                ItemKind::Type { .. } | ItemKind::Error => {}
+                ItemKind::Use(_) | ItemKind::Type { .. } | ItemKind::Error => {}
             }
         }
     }
 
-    /// The type the alias `name` names, if there is one (`spec/types.md` §2).
-    fn alias_type(&mut self, name: Symbol) -> Option<Ty> {
-        if let Some(&ty) = self.alias_types.get(&name) {
+    /// The type the alias `item` names, if it is one (`spec/types.md` §2).
+    fn alias_type(&mut self, item: ItemId) -> Option<Ty> {
+        if let Some(&ty) = self.alias_types.get(&item) {
             return Some(ty);
         }
-        let &(id, span) = self.aliases.get(&name)?;
-        if self.resolving_aliases.contains(&name) {
+        let &(id, span) = self.aliases.get(&item)?;
+        if self.resolving_aliases.contains(&item) {
+            let ItemKind::Type { name, .. } = self.ast.item(item).kind else {
+                unreachable!("an alias")
+            };
             let message = format!("the alias `{}` names itself", self.name(name));
             self.error(span, message).help = Some(
                 "an alias names another type; for a type that holds itself, use an enum".into(),
             );
-            self.alias_types.insert(name, Ty::ERROR);
+            self.alias_types.insert(item, Ty::ERROR);
             return Some(Ty::ERROR);
         }
-        self.resolving_aliases.push(name);
+        // The alias's type is written in its own module.
+        let module = std::mem::replace(&mut self.module, self.scopes.item_module(item));
+        self.resolving_aliases.push(item);
         let ty = self.resolve_type(id);
         self.resolving_aliases.pop();
+        self.module = module;
         // A cycle through this alias was reported where it closed.
-        let ty = *self.alias_types.entry(name).or_insert(ty);
+        let ty = *self.alias_types.entry(item).or_insert(ty);
         Some(ty)
     }
 
@@ -629,25 +634,19 @@ impl Checker<'_> {
                 }
             }
             TypeKind::Path(segments) => {
-                if let [single] = ast.list(segments) {
+                let Some((at, rest)) = self.qualify(segments, node.span) else {
+                    return Ty::ERROR;
+                };
+                if let [single] = rest {
                     let name = ast.name(*single);
-                    if let Some(ty) = prelude::builtin_type(name) {
-                        return ty;
-                    }
-                    if name == "Self" {
-                        if let Some(ty) = self.self_ty {
-                            return ty;
-                        }
+                    if name == "Self" && at.is_none() && self.self_ty.is_none() {
                         self.error(node.span, "`Self` is only available inside a struct");
                         return Ty::ERROR;
                     }
-                    if let Some(&id) = self.struct_names.get(single) {
-                        return self.t.types.struct_ty(id);
-                    }
-                    if let Some(ty) = self.alias_type(*single) {
+                    if let Some(ty) = self.path_type(at, *single, node.span) {
                         return ty;
                     }
-                    if name == "Option" || name == "Result" {
+                    if at.is_none() && (name == "Option" || name == "Result") {
                         let example = if name == "Option" {
                             "Option<Int>"
                         } else {
@@ -669,12 +668,13 @@ impl Checker<'_> {
 }
 
 // Function bodies and statements.
-impl Checker<'_> {
+impl<'a> Checker<'a> {
     fn check_bodies(&mut self) {
         let ast = self.ast;
         for (index, decl) in ast.all_fns().iter().enumerate() {
             let f = FnId::from_index(index);
             let Some(body) = decl.body else { continue };
+            self.module = self.t.fn_modules[f.index()];
             let info = self.t.fns[index].clone();
             self.self_ty = info.owner.map(|id| self.t.types.struct_ty(id));
             self.ret = info.sig.ret;
@@ -965,10 +965,10 @@ impl Checker<'_> {
     ) {
         let ast = self.ast;
         let span = ast.pat(pat).span;
-        let segments = ast.list(path);
+        let (at, segments) = self.qualify(path, span).unwrap_or((None, &[]));
         let found = match *segments {
-            [enum_name, name] => self.path_type(enum_name).map(|t| (t, name)),
-            [name] => {
+            [enum_name, name] => self.path_type(at, enum_name, span).map(|t| (t, name)),
+            [name] if at.is_none() => {
                 let text = self.name(name).to_string();
                 let bare = match *self.t.types.kind(ty) {
                     TyKind::Struct(s) => self.t.types.structs[s.index()].bare,
@@ -1151,7 +1151,7 @@ impl Checker<'_> {
 }
 
 // Expressions.
-impl Checker<'_> {
+impl<'a> Checker<'a> {
     /// Checks an expression, applying `expect`, and records its type.
     fn expr(&mut self, id: ExprId, expect: Expect) -> Ty {
         let ty = self.expr_kind(id, expect);
@@ -1590,9 +1590,12 @@ impl Checker<'_> {
             return self.t.local(local).ty;
         }
         let text = self.name(name).to_string();
-        let message = if self.fn_names.contains_key(&name) {
+        let message = if self.names(name, Ns::Value) {
             format!("`{text}` is a function; call it with `{text}(…)`")
-        } else if self.struct_names.contains_key(&name) || prelude::builtin_type(&text).is_some() {
+        } else if self.names(name, Ns::Type)
+            || self.std_types.contains_key(&name)
+            || prelude::builtin_type(&text).is_some()
+        {
             format!("`{text}` is a type, not a value")
         } else {
             format!("cannot find `{text}` in this scope")
@@ -1601,28 +1604,156 @@ impl Checker<'_> {
         Ty::ERROR
     }
 
-    /// The type a `Type::` path names, if it is a struct, `Self` or a built-in type.
-    fn path_type(&mut self, name: Symbol) -> Option<Ty> {
-        let text = self.name(name);
-        if let Some(ty) = prelude::builtin_type(text) {
-            return Some(ty);
-        }
-        if text == "Self" {
-            return self.self_ty;
-        }
-        if let Some(&id) = self.struct_names.get(&name) {
+    /// The type `name` names in the module `at`, or as written here when `at` is `None`,
+    /// where it can also be `Self`, a built-in type or one of the prelude's.
+    fn path_type(&mut self, at: Option<ModuleId>, name: Symbol, span: Span) -> Option<Ty> {
+        let found = match at {
+            None => {
+                let text = self.name(name);
+                if let Some(ty) = prelude::builtin_type(text) {
+                    return Some(ty);
+                }
+                if text == "Self" {
+                    return self.self_ty;
+                }
+                self.scopes.lexical(self.module, name, Ns::Type)
+            }
+            Some(module) => self.scopes.qualified(self.module, module, name, Ns::Type),
+        };
+        let Some(binding) = self.found(found, name, span) else {
+            // The prelude's types, which a module's own names take precedence over.
+            let id = *self.std_types.get(&name).filter(|_| at.is_none())?;
             return Some(self.t.types.struct_ty(id));
+        };
+        match binding {
+            Binding::Item(item) => match self.item_structs[item.index()] {
+                Some(id) => Some(self.t.types.struct_ty(id)),
+                None => self.alias_type(item),
+            },
+            Binding::Module(_) | Binding::Fn(_) => None,
         }
-        self.alias_type(name)
+    }
+
+    /// The function `name` names in the module `at`, or as written here when `at` is `None`.
+    /// `Err` if the name is ambiguous, which is reported.
+    fn path_fn(
+        &mut self,
+        at: Option<ModuleId>,
+        name: Symbol,
+        span: Span,
+    ) -> Result<Option<FnId>, ()> {
+        let found = match at {
+            None => self.scopes.lexical(self.module, name, Ns::Value),
+            Some(module) => self.scopes.qualified(self.module, module, name, Ns::Value),
+        };
+        let ambiguous = matches!(found, Some(Found::Ambiguous(..)));
+        match self.found(found, name, span) {
+            Some(Binding::Fn(f)) => Ok(Some(f)),
+            _ if ambiguous => Err(()),
+            _ => Ok(None),
+        }
+    }
+
+    /// What a lookup found, reporting a name that is private or ambiguous.
+    fn found(&mut self, found: Option<Found>, name: Symbol, span: Span) -> Option<Binding> {
+        match found? {
+            Found::Entry(entry) => Some(entry.binding),
+            Found::Private(entry) => {
+                let message = format!("`{}` is private", self.name(name));
+                self.error(span, message);
+                Some(entry.binding)
+            }
+            Found::Ambiguous(a, b) => {
+                let message = format!(
+                    "`{}` is ambiguous: glob imports bring two different items with that name",
+                    self.name(name)
+                );
+                let labels = &mut self.error(span, message).labels;
+                labels.push((a, "one comes from this import".into()));
+                labels.push((b, "another from this one".into()));
+                None
+            }
+        }
+    }
+
+    /// Whether `name`, written here, names something in `ns`, without reporting anything.
+    fn names(&self, name: Symbol, ns: Ns) -> bool {
+        matches!(
+            self.scopes.lexical(self.module, name, ns),
+            Some(Found::Entry(_) | Found::Ambiguous(..))
+        )
+    }
+
+    /// Splits off the modules a path starts with: the module the rest is in (`None` if the
+    /// path does not start with one) and the rest. `None` if the path is broken, which is
+    /// reported.
+    fn qualify(
+        &mut self,
+        segments: List<Symbol>,
+        span: Span,
+    ) -> Option<(Option<ModuleId>, &'a [Symbol])> {
+        let path: &'a [Symbol] = self.ast.list(segments);
+        if path.len() < 2 {
+            return Some((None, path));
+        }
+        let mut module = match self.scopes.path_start(self.words, self.module, path[0]) {
+            None => return Some((None, path)),
+            Some(Ok(module)) => module,
+            Some(Err(error)) => {
+                let message = resolve::path_message(self.ast, path, &error);
+                self.error(span, message);
+                return None;
+            }
+        };
+        let mut at = 1;
+        while at + 1 < path.len() {
+            if self.words.is_super(path[at]) {
+                let Some(parent) = self.scopes.parent(module) else {
+                    let error = PathError::NoParent { at };
+                    let message = resolve::path_message(self.ast, path, &error);
+                    self.error(span, message);
+                    return None;
+                };
+                module = parent;
+            } else {
+                match self
+                    .scopes
+                    .qualified(self.module, module, path[at], Ns::Type)
+                {
+                    Some(Found::Entry(Entry {
+                        binding: Binding::Module(inner),
+                        ..
+                    })) => module = inner,
+                    _ => break,
+                }
+            }
+            at += 1;
+        }
+        Some((Some(module), &path[at..]))
     }
 
     /// A path used as a value: a variant such as `Basis::X`, or a constant such as `Float::PI`.
     fn path_value(&mut self, id: ExprId, segments: List<Symbol>, expect: Expect, span: Span) -> Ty {
-        if let [name] = *self.ast.list(segments) {
-            return self.bare_value(id, name, expect, span);
+        let Some((at, rest)) = self.qualify(segments, span) else {
+            return Ty::ERROR;
+        };
+        if let ([name], None) = (rest, at) {
+            return self.bare_value(id, *name, expect, span);
         }
-        if let [ty_name, name] = *self.ast.list(segments)
-            && let Some(ty) = self.path_type(ty_name)
+        if let ([name], Some(module)) = (rest, at) {
+            let path = self.path_text(segments);
+            let message = if self.path_fn(Some(module), *name, span) != Ok(None) {
+                format!("`{path}` is a function; call it with `{path}(…)`")
+            } else if self.path_type(Some(module), *name, span).is_some() {
+                format!("`{path}` is a type, not a value")
+            } else {
+                format!("cannot find the value `{path}`")
+            };
+            self.error(span, message);
+            return Ty::ERROR;
+        }
+        if let [ty_name, name] = *rest
+            && let Some(ty) = self.path_type(at, ty_name, span)
             && let Some(index) = self.variant_index(ty, name)
         {
             let TyKind::Struct(s) = *self.t.types.kind(ty) else {
@@ -1641,8 +1772,8 @@ impl Checker<'_> {
             }
             return ty;
         }
-        if let [ty_name, name] = *self.ast.list(segments)
-            && let Some(ty) = self.path_type(ty_name)
+        if let [ty_name, name] = *rest
+            && let Some(ty) = self.path_type(at, ty_name, span)
             && let Some(constant) = prelude::constant(ty, self.name(name))
         {
             self.t.res[id.index()] = Res::Builtin(constant);
@@ -1695,10 +1826,19 @@ impl Checker<'_> {
 
     fn struct_lit(&mut self, path: ExprId, inits: List<FieldInit>, span: Span) -> Ty {
         let ast = self.ast;
+        let path_span = ast.expr(path).span;
+        let qualified = match ast.expr(path).kind {
+            ExprKind::Path(segments) => Some(self.qualify(segments, path_span)),
+            _ => None,
+        };
+        if let Some(None) = qualified {
+            self.skip_inits(inits);
+            return Ty::ERROR;
+        }
         // `Enum::Variant { … }`: a variant with named fields.
         if let ExprKind::Path(segments) = ast.expr(path).kind
-            && let [enum_name, name] = *ast.list(segments)
-            && let Some(enum_ty) = self.path_type(enum_name)
+            && let Some(Some((at, &[enum_name, name]))) = qualified
+            && let Some(enum_ty) = self.path_type(at, enum_name, path_span)
             && let Some(index) = self.variant_index(enum_ty, name)
         {
             let TyKind::Struct(s) = *self.t.types.kind(enum_ty) else {
@@ -1732,8 +1872,9 @@ impl Checker<'_> {
             self.field_inits(inits, &fields, enum_ty, span);
             return enum_ty;
         }
-        let struct_ty = match ast.expr(path).kind {
-            ExprKind::Name(name) => self.path_type(name),
+        let struct_ty = match (ast.expr(path).kind, qualified) {
+            (ExprKind::Name(name), _) => self.path_type(None, name, path_span),
+            (_, Some(Some((at, &[name])))) => self.path_type(at, name, path_span),
             _ => None,
         };
         let Some(struct_ty) = struct_ty else {
@@ -2174,7 +2315,7 @@ impl Checker<'_> {
 }
 
 // Calls.
-impl Checker<'_> {
+impl<'a> Checker<'a> {
     fn call(
         &mut self,
         id: ExprId,
@@ -2194,7 +2335,10 @@ impl Checker<'_> {
                     self.error(callee_expr.span, message);
                     return self.skip_args(args);
                 }
-                if let Some(&f) = self.fn_names.get(&name) {
+                let Ok(found) = self.path_fn(None, name, callee_expr.span) else {
+                    return self.skip_args(args);
+                };
+                if let Some(f) = found {
                     let sig = self.t.fns[f.index()].sig.clone();
                     self.t.callees[id.index()] = Some(Callee::Fn(f));
                     return self.check_args(&sig, None, args, span);
@@ -2219,7 +2363,7 @@ impl Checker<'_> {
                     self.t.callees[id.index()] = Some(Callee::Builtin(builtin));
                     return self.check_args(&sig, None, args, span);
                 }
-                let message = if self.struct_names.contains_key(&name) {
+                let message = if self.names(name, Ns::Type) {
                     format!("`{text}` is a struct; create one with `{text} {{ … }}`")
                 } else {
                     format!("cannot find the function `{text}`")
@@ -2228,25 +2372,43 @@ impl Checker<'_> {
                 self.skip_args(args)
             }
             ExprKind::Path(segments) => {
-                if let [name] = *ast.list(segments) {
-                    return self.bare_call(id, name, args, expect, span);
+                let path_span = callee_expr.span;
+                let Some((at, rest)) = self.qualify(segments, path_span) else {
+                    return self.skip_args(args);
+                };
+                if let ([name], None) = (rest, at) {
+                    return self.bare_call(id, *name, args, expect, span);
                 }
-                if let [ty_name, name] = *ast.list(segments)
-                    && let Some(ty) = self.path_type(ty_name)
+                if let ([name], Some(module)) = (rest, at) {
+                    let Ok(found) = self.path_fn(Some(module), *name, path_span) else {
+                        return self.skip_args(args);
+                    };
+                    if let Some(f) = found {
+                        let sig = self.t.fns[f.index()].sig.clone();
+                        self.t.callees[id.index()] = Some(Callee::Fn(f));
+                        return self.check_args(&sig, None, args, span);
+                    }
+                    let message =
+                        format!("cannot find the function `{}`", self.path_text(segments));
+                    self.error(path_span, message);
+                    return self.skip_args(args);
+                }
+                if let [ty_name, name] = *rest
+                    && let Some(ty) = self.path_type(at, ty_name, path_span)
                     && let Some(index) = self.variant_index(ty, name)
                 {
                     let path = self.path_text(segments);
                     return self.variant_call(id, ty, index, &path, args, span);
                 }
-                if let [ty_name, name] = *ast.list(segments)
-                    && let Some(target) = self.path_type(ty_name)
+                if let [ty_name, name] = *rest
+                    && let Some(target) = self.path_type(at, ty_name, path_span)
                     && target.width().is_some()
                     && self.name(name) == "try_from"
                 {
                     return self.try_conversion(id, target, args, span);
                 }
-                if let [ty_name, name] = *ast.list(segments)
-                    && let Some(ty) = self.path_type(ty_name)
+                if let [ty_name, name] = *rest
+                    && let Some(ty) = self.path_type(at, ty_name, path_span)
                 {
                     if let Some((callee_kind, sig)) = self.lookup_method(ty, name) {
                         self.t.callees[id.index()] = Some(callee_kind);
@@ -2827,5 +2989,7 @@ impl DiagnosticExt for Diagnostic {
 
 mod coverage;
 
+#[cfg(test)]
+mod modules;
 #[cfg(test)]
 mod tests;

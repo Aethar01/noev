@@ -15,7 +15,7 @@ pub mod token;
 pub use ast::Ast;
 pub use diagnostic::{Diagnostic, Severity};
 pub use lexer::{Lexed, lex, lex_at};
-pub use parser::{Parsed, parse, parse_at};
+pub use parser::{Parsed, parse, parse_at, parse_module};
 pub use source::{FileId, SourceFile, SourceMap, TooLarge};
 pub use span::Span;
 pub use symbol::{FxHashMap, Interner, Symbol};

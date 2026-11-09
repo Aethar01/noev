@@ -1,0 +1,2 @@
+fn hidden() {}
+pub fn shared() {}

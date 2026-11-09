@@ -1,8 +1,8 @@
 # Modules and packages
 
-Status: **Reserved.** For now, the compiler takes one file at a time. The design is fixed now because it
-shapes name resolution, visibility, and the rules for reversibility across modules. The
-keywords are reserved already, so no program can start using them as names.
+Status: **Implemented**, except where a section says otherwise: the visibility of fields and
+methods (§4), reversibility across modules (§5), and the prelude as a module of its own (§6).
+`noev check`, `build`, `run` and `export` take a `.nv` file or a package directory.
 
 ## 1. Files are modules
 
@@ -172,7 +172,8 @@ qlib = "1.2"
 
 ## 8. Compilation
 
-Each file is lexed and parsed on its own, so files are processed in parallel. Spans keep
+Each file is lexed and parsed on its own, so files can be processed in parallel (for now
+they are parsed one after another, into one syntax tree for the package). Spans keep
 their 8-byte size: each file gets its own range of `u32` byte offsets, and the file is found
 from the offset (the technique rustc uses). Name resolution then runs over all of a package's
 modules together, and type and ownership checking run per function as they do now.

@@ -69,11 +69,11 @@ pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &SourceMa
     let mut functions = Vec::with_capacity(syntax.all_fns().len());
     // `sample` runs become functions of their own, numbered after the program's.
     let mut runs = Vec::new();
-    let mut main = None;
+    let main = typed.main.map(|f| FuncId(f.index() as u32));
     for (index, decl) in syntax.all_fns().iter().enumerate() {
         let f = ast::FnId::from_index(index);
         let owner = typed.fns[index].owner;
-        let name = match owner {
+        let mut name = match owner {
             Some(s) => format!(
                 "{}::{}",
                 syntax.name(typed.types.structs[s.index()].name),
@@ -81,8 +81,19 @@ pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &SourceMa
             ),
             None => syntax.name(decl.name).to_string(),
         };
-        if owner.is_none() && name == "main" {
-            main = Some(FuncId(index as u32));
+        // Functions are named by their module's path, from the root of the package being
+        // compiled, or from the dependency's name.
+        let module = typed.fn_modules[index];
+        let package = syntax.module(module).package;
+        let mut path = Vec::new();
+        if package.index() != 0 {
+            path.push(syntax.name(syntax.package(package).name).to_string());
+        }
+        if syntax.module(module).parent.is_some() {
+            path.push(syntax.module_path(module));
+        }
+        if !path.is_empty() {
+            name = format!("{}::{name}", path.join("::"));
         }
         let shared = Shared {
             types: &mut types,

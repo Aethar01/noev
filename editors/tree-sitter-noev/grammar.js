@@ -70,26 +70,29 @@ module.exports = grammar({
     visibility_modifier: ($) =>
       seq(
         'pub',
-        optional(
-          seq('(', choice('pkg', 'super', 'self', seq('in', $._module_path)), ')'),
-        ),
+        optional(seq('(', choice('pkg', 'super', 'self', seq('in', $._use_path)), ')')),
       ),
 
-    _module_path: ($) => choice($.identifier, $.path),
+    // Paths in `use` and `pub(in …)`, left-recursive so that after `a::` one token decides
+    // between a name, `*` and `{`.
+    _use_path: ($) => choice($.identifier, $.scoped_path),
+
+    scoped_path: ($) =>
+      seq(field('path', $._use_path), '::', field('name', $.identifier)),
 
     // `use a::b as c`, `use a::*`, `use a::{self, b, c::*}`.
     use_declaration: ($) => seq(optional($.visibility_modifier), 'use', $._use_tree),
 
-    _use_tree: ($) => choice($._module_path, $.use_as_clause, $.use_wildcard, $.use_list),
+    _use_tree: ($) => choice($._use_path, $.use_as_clause, $.use_wildcard, $.use_list),
 
     use_as_clause: ($) =>
-      seq(field('path', choice($._module_path, $.self)), 'as', field('alias', $.identifier)),
+      seq(field('path', choice($._use_path, $.self)), 'as', field('alias', $.identifier)),
 
-    use_wildcard: ($) => seq($._module_path, '::', '*'),
+    use_wildcard: ($) => seq($._use_path, '::', '*'),
 
     use_list: ($) =>
       seq(
-        optional(seq($._module_path, '::')),
+        optional(seq($._use_path, '::')),
         '{',
         sepBy(',', choice($._use_tree, $.self)),
         '}',
