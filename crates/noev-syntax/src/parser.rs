@@ -7,7 +7,7 @@
 
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
-use crate::lexer::{lex, lex_range, scan_interpolation, scan_string};
+use crate::lexer::{lex_at, scan_interpolation, scan_string};
 use crate::span::Span;
 use crate::symbol::Symbol;
 use crate::token::{Token, TokenKind};
@@ -21,9 +21,14 @@ pub struct Parsed {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Lexes and parses `source`.
+/// Lexes and parses `source`, a file whose offsets start at 0.
 pub fn parse(source: &str) -> Parsed {
-    let lexed = lex(source);
+    parse_at(source, 0)
+}
+
+/// Lexes and parses `source`, a file whose offsets start at `base` ([`crate::SourceMap`]).
+pub fn parse_at(source: &str, base: u32) -> Parsed {
+    let lexed = lex_at(source, base);
     let mut ast = Ast::default();
     // The standard library's own names, so its types can be named in messages even when a
     // program never mentions them.
@@ -32,6 +37,7 @@ pub fn parse(source: &str) -> Parsed {
     }
     let mut parser = Parser {
         source,
+        base,
         tokens: lexed.tokens,
         pos: 0,
         ast,
@@ -103,6 +109,9 @@ fn assign_op(kind: TokenKind) -> Option<AssignOp> {
 
 struct Parser<'a> {
     source: &'a str,
+    /// The offset of `source`'s first byte: spans are offsets, and `source` is indexed by
+    /// positions, which [`Parser::pos_of`] and [`Parser::offset_of`] convert between.
+    base: u32,
     tokens: Vec<Token>,
     pos: usize,
     ast: Ast,
@@ -112,7 +121,7 @@ struct Parser<'a> {
 }
 
 // Token access.
-impl Parser<'_> {
+impl<'a> Parser<'a> {
     fn nth(&self, n: usize) -> Token {
         self.tokens[(self.pos + n).min(self.tokens.len() - 1)]
     }
@@ -149,8 +158,18 @@ impl Parser<'_> {
         found
     }
 
-    fn text(&self, span: Span) -> &str {
-        span.text(self.source)
+    fn text(&self, span: Span) -> &'a str {
+        &self.source[self.pos_of(span.start)..self.pos_of(span.end)]
+    }
+
+    /// The position in `source` of the offset `offset`.
+    fn pos_of(&self, offset: u32) -> usize {
+        (offset - self.base) as usize
+    }
+
+    /// The offset of the position `index` in `source`.
+    fn offset_of(&self, index: usize) -> u32 {
+        index as u32 + self.base
     }
 
     /// Whether the token `n` ahead is the identifier `word` (for contextual keywords).
@@ -180,7 +199,8 @@ impl Parser<'_> {
     }
 
     fn intern(&mut self, span: Span) -> Symbol {
-        self.ast.symbols.intern(span.text(self.source))
+        let text = self.text(span);
+        self.ast.symbols.intern(text)
     }
 }
 
@@ -1715,7 +1735,7 @@ impl Parser<'_> {
     fn bra(&mut self) -> ExprId {
         let bra = self.bump().span;
         // `<0|+>`: a ket's labels straight after, so an amplitude.
-        if let Some(end) = self.ket_rest(bra.end as usize) {
+        if let Some(end) = self.ket_rest(bra.end) {
             let ket_span = Span::new(bra.end - 1, end);
             self.skip_to(end);
             let bra_prep = self.state_prep(bra);
@@ -1750,7 +1770,7 @@ impl Parser<'_> {
             );
         }
         // `<0| H |prep()>`: a transition value to a preparation.
-        if self.ket_rest(self.span().end as usize).is_none() {
+        if self.ket_rest(self.span().end).is_none() {
             self.bump();
             let ket = self.postfix();
             self.expect(TokenKind::Gt, "`>` to close the transition value");
@@ -1758,11 +1778,10 @@ impl Parser<'_> {
             return self.overlap(bra_prep, ket, Some(operand), bra);
         }
         let ket = self.closing_ket();
-        let source = self.source;
-        let bra_state = &source[bra.start as usize + 1..bra.end as usize - 1];
+        let bra_state = &self.text(bra)[1..bra.len() as usize - 1];
         // `<0| H |1>`: a transition value.
         if let Some(ket) = ket {
-            let ket_state = &source[ket.start as usize + 1..ket.end as usize - 1];
+            let ket_state = &self.text(ket)[1..ket.len() as usize - 1];
             if bra_state != ket_state {
                 let bra_prep = self.state_prep(bra);
                 let ket_prep = self.state_prep(ket);
@@ -1819,12 +1838,13 @@ impl Parser<'_> {
         )
     }
 
-    /// The end of a ket's labels and `>` starting at byte `start`, if the source has them
+    /// The end of a ket's labels and `>` starting at offset `start`, if the source has them
     /// there: what closes `<φ|` in `<φ|00>`.
-    fn ket_rest(&self, start: usize) -> Option<u32> {
+    fn ket_rest(&self, start: u32) -> Option<u32> {
         let bytes = self.source.as_bytes();
+        let start = self.pos_of(start);
         let len = crate::state::scan(bytes.get(start..)?);
-        (len > 0 && bytes.get(start + len) == Some(&b'>')).then_some((start + len + 1) as u32)
+        (len > 0 && bytes.get(start + len) == Some(&b'>')).then(|| self.offset_of(start + len + 1))
     }
 
     /// Skips the tokens before byte `end`, which a ket read from the source covers.
@@ -1869,8 +1889,8 @@ impl Parser<'_> {
         }
         let mark = self.ast.mark::<KetPart>();
         let bytes = self.source.as_bytes();
-        let mut pos = span.start as usize + 1;
-        let end = span.end as usize - 1;
+        let mut pos = self.pos_of(span.start) + 1;
+        let end = self.pos_of(span.end) - 1;
         while pos < end {
             if let Some((label, len)) = crate::state::label(&bytes[pos..end]) {
                 self.ast.push_to(KetPart::Label(label));
@@ -1880,7 +1900,7 @@ impl Parser<'_> {
             let close = crate::lexer::scan_interpolation(bytes, pos)
                 .unwrap_or(end)
                 .min(end);
-            let expr = self.sub_expr(pos as u32 + 1, close as u32 - 1);
+            let expr = self.sub_expr(self.offset_of(pos) + 1, self.offset_of(close) - 1);
             self.ast.push_to(KetPart::Value(expr));
             pos = close;
         }
@@ -1893,15 +1913,16 @@ impl Parser<'_> {
     fn closing_ket(&mut self) -> Option<Span> {
         let pipe = self.bump().span;
         let bytes = self.source.as_bytes();
-        let end = pipe.end as usize + crate::state::scan(&bytes[pipe.end as usize..]);
-        if end == pipe.end as usize || bytes.get(end) != Some(&b'>') {
+        let from = self.pos_of(pipe.end);
+        let end = from + crate::state::scan(&bytes[from..]);
+        if end == from || bytes.get(end) != Some(&b'>') {
             self.error(
                 pipe,
                 "expected the closing ket, such as `|0>`, after the observable",
             );
             return None;
         }
-        let end = end as u32 + 1;
+        let end = self.offset_of(end) + 1;
         while self.span().start < end && !self.at(TokenKind::Eof) {
             self.bump();
         }
@@ -1919,7 +1940,7 @@ impl Parser<'_> {
         let bra_end = self.pos;
         // `<bell()|00>`: an amplitude, with the ket's labels read from the source.
         if self.at(TokenKind::Pipe)
-            && let Some(end) = self.ket_rest(self.span().end as usize)
+            && let Some(end) = self.ket_rest(self.span().end)
         {
             let ket_span = Span::new(self.span().start, end);
             self.skip_to(end);
@@ -1986,8 +2007,8 @@ impl Parser<'_> {
     fn string_parts(&mut self, span: Span) -> List<StrPart> {
         let mark = self.ast.mark::<StrPart>();
         let bytes = self.source.as_bytes();
-        let start = span.start as usize + 1;
-        let end = (span.end as usize).saturating_sub(1).max(start);
+        let start = self.pos_of(span.start) + 1;
+        let end = self.pos_of(span.end).saturating_sub(1).max(start);
         let mut text = String::new();
         let mut pos = start;
         while pos < end {
@@ -2054,10 +2075,10 @@ impl Parser<'_> {
                     }
                     _ => {
                         let end = close.map_or(pos + 2, |c| c + 1);
-                        self.error(Span::new(pos as u32, end as u32), "invalid Unicode escape")
-                            .with_help_mut(
-                                "write it as `\\u{1F600}`, with 1 to 6 hexadecimal digits",
-                            );
+                        let at = Span::new(self.offset_of(pos), self.offset_of(end));
+                        self.error(at, "invalid Unicode escape").with_help_mut(
+                            "write it as `\\u{1F600}`, with 1 to 6 hexadecimal digits",
+                        );
                         return end;
                     }
                 }
@@ -2067,7 +2088,7 @@ impl Parser<'_> {
                     .chars()
                     .next()
                     .map_or(0, char::len_utf8);
-                let at = Span::new(pos as u32, (pos + 1 + len) as u32);
+                let at = Span::new(self.offset_of(pos), self.offset_of(pos + 1 + len));
                 self.error(at, "unknown escape")
                     .with_help_mut("the escapes are \\n, \\t, \\r, \\0, \\\\, \\\" and \\u{…}");
                 return pos + 1 + len;
@@ -2081,7 +2102,7 @@ impl Parser<'_> {
     /// optional format spec after a top-level `:`.
     fn interpolation(&mut self, start: usize, end: usize) -> Option<StrPart> {
         let bytes = self.source.as_bytes();
-        let span = Span::new(start as u32 - 1, end as u32 + 1);
+        let span = Span::new(self.offset_of(start) - 1, self.offset_of(end) + 1);
         // The spec starts at the first `:` outside brackets and nested strings that is not
         // part of `::`.
         let mut depth = 0usize;
@@ -2113,14 +2134,15 @@ impl Parser<'_> {
                 .with_help_mut("write `{{` for a literal brace");
             return None;
         }
-        let expr = self.sub_expr(start as u32, expr_end as u32);
+        let expr = self.sub_expr(self.offset_of(start), self.offset_of(expr_end));
         let spec = colon.and_then(|c| self.format_spec(c + 1, end));
         Some(StrPart::Value { expr, spec })
     }
 
-    /// Parses the source from `start` to `end` as one expression.
+    /// Parses the source from offset `start` to offset `end` as one expression.
     fn sub_expr(&mut self, start: u32, end: u32) -> ExprId {
-        let mut lexed = lex_range(self.source, start, end);
+        let text = &self.source[self.pos_of(start)..self.pos_of(end)];
+        let mut lexed = lex_at(text, start);
         lexed.tokens.retain(|t| t.kind != TokenKind::Newline);
         self.diagnostics.extend(lexed.diagnostics);
         let saved_tokens = std::mem::replace(&mut self.tokens, lexed.tokens);
@@ -2139,7 +2161,7 @@ impl Parser<'_> {
     /// `[[fill] align] ["+"] ["0"] [width] ["." precision] [type]`.
     fn format_spec(&mut self, start: usize, end: usize) -> Option<FormatSpec> {
         let text = &self.source[start..end];
-        let span = Span::new(start as u32, end as u32);
+        let span = Span::new(self.offset_of(start), self.offset_of(end));
         let mut chars = text.chars().peekable();
         let align_of = |c: char| match c {
             '<' => Some(Align::Left),

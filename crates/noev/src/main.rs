@@ -194,7 +194,7 @@ fn main() -> ExitCode {
 
 /// A program that passed every check.
 struct Checked {
-    source: String,
+    sources: noev_syntax::SourceMap,
     parsed: noev_syntax::Parsed,
     typed: noev_sema::Typed,
     circuits: noev_sema::Circuits,
@@ -210,7 +210,9 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
             return Err(ExitCode::from(2));
         }
     };
-    let parsed = noev_syntax::parse(&source);
+    let sources = noev_syntax::SourceMap::single(file.display().to_string(), source);
+    let main_file = &sources.files()[0];
+    let parsed = noev_syntax::parse_at(&main_file.text, main_file.start);
     let (typed, type_errors) = noev_sema::check(&parsed.ast);
     let mut diagnostics = parsed.diagnostics.clone();
     // Ownership is only meaningful for a well-typed program, and circuits for one that
@@ -226,7 +228,7 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
     }
     diagnostics.extend(type_errors);
     diagnostics.sort_by_key(|d| d.span.start);
-    report::print(&file.display().to_string(), &source, &diagnostics, format);
+    report::print(&sources, &diagnostics, format);
     let failed = diagnostics
         .iter()
         .any(|d| d.severity == noev_syntax::Severity::Error);
@@ -234,7 +236,7 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
         return Err(ExitCode::from(1));
     }
     Ok(Checked {
-        source,
+        sources,
         parsed,
         typed,
         circuits,
@@ -251,7 +253,7 @@ fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) 
         &checked.parsed.ast,
         &checked.typed,
         &checked.circuits,
-        &checked.source,
+        &checked.sources,
     );
     let text = match emit {
         Emit::Ir => program.to_string(),
@@ -292,7 +294,7 @@ fn export(
         &checked.parsed.ast,
         &checked.typed,
         &checked.circuits,
-        &checked.source,
+        &checked.sources,
     );
     let exporter = noev_runtime::backend::Exporter::default();
     // What the program prints depends on results that are not known, so it is dropped.
@@ -336,7 +338,7 @@ fn export(
             ExitCode::SUCCESS
         }
         Err(error) => {
-            report_runtime_error(file, checked, error, format);
+            report_runtime_error(checked, error, format);
             ExitCode::from(1)
         }
     }
@@ -354,7 +356,6 @@ fn circuit_header(file: &Path, index: usize, shots: usize) -> [String; 2] {
 }
 
 fn report_runtime_error(
-    file: &Path,
     checked: &Checked,
     error: noev_runtime::RuntimeError,
     format: MessageFormat,
@@ -362,12 +363,7 @@ fn report_runtime_error(
     match error.span {
         Some(span) => {
             let diagnostic = noev_syntax::Diagnostic::error(span, error.message);
-            report::print(
-                &file.display().to_string(),
-                &checked.source,
-                &[diagnostic],
-                format,
-            );
+            report::print(&checked.sources, &[diagnostic], format);
         }
         None => anstream::eprintln!("{ERROR}error:{ERROR:#} {}", error.message),
     }
@@ -393,7 +389,7 @@ fn run(
         &checked.parsed.ast,
         &checked.typed,
         &checked.circuits,
-        &checked.source,
+        &checked.sources,
     );
     let seed = seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
@@ -430,7 +426,7 @@ fn run(
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            report_runtime_error(file, &checked, error, format);
+            report_runtime_error(&checked, error, format);
             anstream::eprintln!("{NOTE}note:{NOTE:#} to reproduce this run, use --seed {seed}");
             ExitCode::from(1)
         }
@@ -442,7 +438,8 @@ fn run(
 fn plan(checked: &Checked) -> String {
     let ast = &checked.parsed.ast;
     let circuits = &checked.circuits;
-    let lines = report::Lines::new(&checked.source);
+    // One file for now; with modules, each span's line is in its own file.
+    let lines = report::Lines::new(&checked.sources.files()[0]);
     let line = |span: noev_syntax::Span| lines.line_col(span.start).0;
     // Why a run is not sampled from one simulation, if it is not.
     let why = |info: &noev_sema::CircuitInfo| {

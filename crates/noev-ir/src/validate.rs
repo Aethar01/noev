@@ -232,7 +232,12 @@ mod tests {
         let errors = noev_sema::check_ownership(&parsed.ast, &typed);
         assert!(errors.is_empty(), "{errors:?}");
         let (circuits, _) = noev_sema::check_circuits(&parsed.ast, &typed);
-        lower(&parsed.ast, &typed, &circuits, source)
+        lower(
+            &parsed.ast,
+            &typed,
+            &circuits,
+            &noev_syntax::SourceMap::single("test.nv", source),
+        )
     }
 
     #[test]

@@ -425,7 +425,7 @@ gets a compile-fail test under `tests/ui/`.
 
 | #  | Step                          | Description                                                          | Status  |
 | -- | ----------------------------- | -------------------------------------------------------------------- | ------- |
-| 1  | Per-file span offsets         | Spans address a source map of several files, so diagnostics name the file; needed by modules | ☐ |
+| 1  | Per-file span offsets         | Spans address a source map of several files, so diagnostics name the file; needed by modules | ☑ Done: `noev_syntax::SourceMap`; the CLI still reads one file |
 | 2  | Modules and packages          | Files are modules, `use` imports, `pub` visibility, the prelude, `noev.toml` packages (`spec/modules.md`) | ☐ |
 | 3  | Traits and generics           | `trait`, `impl Trait for Type`, generic functions and types; generic code assumes values may be linear; `Copy`, `Discard`, `Measure`, `From`; `Option` and `Result` become ordinary generic enums (`spec/types.md` §6) | ☐ |
 | 4  | Quantum integers              | Registers with reversible arithmetic, on generics and operator traits | ☐ |

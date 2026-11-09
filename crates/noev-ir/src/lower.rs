@@ -11,13 +11,13 @@ use noev_sema::prelude::{Builtin, Gate};
 use noev_sema::{Circuits, Ty, TyKind, Typed, Types};
 use noev_syntax::ast::{self as ast, ExprId, ExprKind, OwnKind, StmtKind};
 use noev_syntax::state::{Label, labels};
-use noev_syntax::{Ast, Span};
+use noev_syntax::{Ast, SourceMap, Span};
 
 use crate::ir::*;
 
 /// Lowers every function of a checked program, given which of its runs are circuits
 /// ([`noev_sema::check_circuits`]). `source` supplies the text of kets and bras.
-pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &str) -> Program {
+pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &SourceMap) -> Program {
     let struct_names = typed
         .types
         .structs
@@ -130,7 +130,7 @@ struct Builder<'a> {
     circuits: &'a Circuits,
     runs: &'a mut Vec<Function>,
     first_run: u32,
-    source: &'a str,
+    source: &'a SourceMap,
     body: Option<ast::BlockId>,
     function: Function,
     current: Block,
@@ -147,7 +147,7 @@ impl<'a> Builder<'a> {
         syntax: &'a Ast,
         typed: &'a Typed,
         shared: Shared<'a>,
-        source: &'a str,
+        source: &'a SourceMap,
         f: ast::FnId,
         name: String,
     ) -> Self {
@@ -183,7 +183,7 @@ impl<'a> Builder<'a> {
         syntax: &'a Ast,
         typed: &'a Typed,
         shared: Shared<'a>,
-        source: &'a str,
+        source: &'a SourceMap,
         name: String,
         body: Option<ast::BlockId>,
         ret: Ty,
@@ -375,8 +375,7 @@ impl<'a> Builder<'a> {
     }
 
     fn text(&self, span: Span) -> &'a str {
-        let source: &'a str = self.source;
-        &source[span.start as usize..span.end as usize]
+        self.source.text_of(span)
     }
 }
 

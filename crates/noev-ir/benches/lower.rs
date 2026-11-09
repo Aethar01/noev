@@ -20,7 +20,8 @@ fn main() {
             let parsed = noev_syntax::parse(s);
             let (typed, _) = noev_sema::check(&parsed.ast);
             let (circuits, _) = noev_sema::check_circuits(&parsed.ast, &typed);
-            (s, parsed, typed, circuits)
+            let source = noev_syntax::SourceMap::single("bench.nv", s.as_str());
+            (source, parsed, typed, circuits)
         })
         .collect();
     let repeats = 500;

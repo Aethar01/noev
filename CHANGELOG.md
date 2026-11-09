@@ -19,6 +19,12 @@ before 1.0.
   simulator from a quantum computer; what used to be "simulators only" is now "backends that
   can read the state".
 
+### Compiler
+
+- Spans are offsets into a source map in which each file has its own range, so diagnostics
+  find their file and can point into several files (`spec/modules.md` §8). The lexer, parser
+  and lowering take a file's starting offset (`lex_at`, `parse_at`).
+
 ## [0.4.2] - 2026-11-08
 
 ### Spec

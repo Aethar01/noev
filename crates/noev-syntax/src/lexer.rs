@@ -18,20 +18,22 @@ pub struct Lexed {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Lexes the part of `source` from `start` to `end`, with spans in `source`'s offsets. Used
-/// for the expressions interpolated into string literals.
-pub fn lex_range(source: &str, start: u32, end: u32) -> Lexed {
-    let mut lexed = lex(&source[start as usize..end as usize]);
-    for token in &mut lexed.tokens {
-        token.span = Span::new(token.span.start + start, token.span.end + start);
-    }
-    for diagnostic in &mut lexed.diagnostics {
-        diagnostic.span = Span::new(diagnostic.span.start + start, diagnostic.span.end + start);
+/// Lexes `source`, a file whose offsets start at `base` ([`crate::SourceMap`]).
+pub fn lex_at(source: &str, base: u32) -> Lexed {
+    let mut lexed = lex(source);
+    if base != 0 {
+        let shift = |span: Span| Span::new(span.start + base, span.end + base);
+        for token in &mut lexed.tokens {
+            token.span = shift(token.span);
+        }
+        for diagnostic in &mut lexed.diagnostics {
+            diagnostic.span = shift(diagnostic.span);
+        }
     }
     lexed
 }
 
-/// Lexes `source`.
+/// Lexes `source`, a file whose offsets start at 0.
 pub fn lex(source: &str) -> Lexed {
     let mut lexer = Lexer {
         bytes: source.as_bytes(),

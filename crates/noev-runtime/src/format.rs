@@ -318,7 +318,12 @@ mod tests {
         let parsed = noev_syntax::parse("");
         let (typed, _) = noev_sema::check(&parsed.ast);
         let (circuits, _) = noev_sema::check_circuits(&parsed.ast, &typed);
-        noev_ir::lower(&parsed.ast, &typed, &circuits, "")
+        noev_ir::lower(
+            &parsed.ast,
+            &typed,
+            &circuits,
+            &noev_syntax::SourceMap::single("test.nv", ""),
+        )
     }
 
     #[test]

@@ -15,7 +15,8 @@ fn compile(source: &str) -> noev_ir::Program {
     let errors = noev_sema::check_ownership(&parsed.ast, &typed);
     assert!(errors.is_empty(), "{errors:?}");
     let (circuits, _) = noev_sema::check_circuits(&parsed.ast, &typed);
-    let program = noev_ir::lower(&parsed.ast, &typed, &circuits, source);
+    let source = noev_syntax::SourceMap::single("test.nv", source);
+    let program = noev_ir::lower(&parsed.ast, &typed, &circuits, &source);
     assert!(noev_ir::validate(&program).is_empty());
     program
 }
