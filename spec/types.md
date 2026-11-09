@@ -333,37 +333,146 @@ can be lent for changing without writing `mut` (see [ownership.md](ownership.md)
 Linearity is a property of the type, not something the programmer declares. Readers see it
 where it matters: any place a linear value changes hands has an explicit `mv`.
 
-## 6. Traits and generics (Reserved)
+## 6. Traits and generics
 
-Traits and generics are not implemented yet, but two decisions are made now because they shape the
-type checker.
+Status: specified for 0.5; not implemented yet. The syntax is in [grammar.md](grammar.md) §2.
 
-**Generic code assumes values may be linear.** Rust assumes every value can be dropped, and
-cannot change that without breaking existing code; it is why a Rust `Vec` of qubits would
-break the must-consume guarantee. Noev takes the opposite default: a generic `T` must be
-consumed like a qubit unless the code requires a trait that says otherwise:
+### Generic parameters
 
-- `T: Copy`: values can be copied (and dropped).
-- `T: Discard`: values can be dropped without being consumed.
+Functions, structs, enums and traits can take **type parameters** and **size parameters**:
 
-Containers and generic algorithms therefore work with qubits from the start, and generic
-code that would silently drop a value is rejected where it is written, not where it is used.
+```noev
+fn swap<T>(pair: (T, T)) -> (T, T) {
+    let (a, b) = mv pair
+    (mv b, mv a)
+}
 
-**Measurement is a trait.** `Measure` pairs a quantum type with its classical result type:
+fn qft<const N: Int>(r: mut [Qubit; N]) { … }      // a register of any size
+
+struct Pair<T, U> {
+    first: T
+    second: U
+}
+```
+
+- A size parameter, `const N: Int`, is a non-negative `Int` known when the program is
+  compiled, so `[T; N]` is an array of fixed length. Sizes are only names for now: arithmetic
+  such as `[Qubit; N + 1]` is not allowed yet.
+- Type and size arguments are inferred where the function is called, or given after `::`:
+  `swap::<Int>((1, 2))`, `qft::<8>(mut r)`.
+
+### What generic code can do with a value
+
+A type parameter with no bound accepts **any** type, classical or quantum: `swap((1, 2))` and
+`swap((|0>, |1>))` both work. The body is checked once for every type it may be given, so it
+treats a value of type `T` as it would a qubit: it moves it with `mv` and consumes it, and
+never copies or drops it (N001, N003). For a classical value, that costs nothing.
+
+**`T: Classical`** is the one bound about values themselves: `T` is copyable (§5), so the body
+can copy and drop its values:
+
+```noev
+fn twice<T: Classical>(x: T) -> (T, T) { (x, x) }
+```
+
+No function can copy "a classical value or a qubit", since an unknown quantum state cannot be
+copied, so the bound marks exactly what a body cannot do for qubits. An exclusive reference
+`mut T` can be dropped but not copied; given as a `T`, it is treated like a qubit: passed on or
+returned, never dropped. There is no bound for "can be dropped but not copied" yet; one can be
+added without breaking anything.
+
+There is no bound saying a type holds qubits: it would let a body do nothing new. What a
+body does with a quantum value is a trait of its own, such as `Measure`.
+
+### Bounds
+
+A bound is any trait, the standard library's or the program's: `T: Measure`, `T: Oracle`.
+Several are joined with `+` (`T: Classical + Add`), and long ones move to `where`:
+
+```noev
+fn zip<T, U, const N: Int>(a: [T; N], b: [U; N]) -> [(T, U); N]
+where
+    T: Classical,
+    U: Classical,
+{ … }
+```
+
+A bound can fix a trait's associated type: `T: Measure<Result = Bit>` is something that
+measures to one bit.
+
+### Bounds are inferred within a package
+
+As with reversibility ([modules.md](modules.md) §5), the compiler works out what a generic
+function needs from its body, within its package: a body that copies or drops a `T` needs
+`T: Classical`, and one that calls `x.measure()` on a `T` needs `T: Measure`. A call that
+gives a type without what the function needs is an error at the call, naming the line that
+needs it. Writing a bound is always allowed; it turns the inference into a promise, checked
+in the body.
+
+A generic function visible to other packages states its bounds: they are part of its
+signature, so a library's update cannot break a program by changing a body, and a compiled
+library's signatures are fixed.
+
+### Traits
+
+```noev
+trait Oracle<const N: Int> {
+    rev fn apply(ref self, r: mut [Qubit; N])
+    fn name(ref self) -> String { "oracle" }        // a default
+}
+
+impl Oracle<4> for Parity {
+    rev fn apply(ref self, r: mut [Qubit; 4]) { … }
+}
+```
+
+- A trait declares functions, with or without default bodies, and associated types
+  (`type Result`). An `impl` provides them for a type, and can itself be generic:
+  `impl<T: Measure> Measure for Pair<T, T>`.
+- Methods are written inside structs and enums, so `impl` is only for traits.
+- **Coherence**, as in Rust: an `impl` must be in the package of the trait or of the type, so
+  two packages can never provide the same one.
+- A trait function declared `rev fn` is reversible in every `impl`, which is checked there.
+  Generic code cannot see an `impl`'s body, so this is how `adj oracle.apply(r)` and
+  `ctrl c { oracle.apply(r) }` work on any `T: Oracle<N>`.
+- There are no trait objects (`dyn Trait`): generic code is compiled for each type it is
+  used with, so qubit counts are always known.
+
+### `Measure`
+
+Measurement is a trait, pairing a quantum type with its classical result type:
 
 ```noev
 trait Measure {
-    type Result
+    type Result: Classical
     fn measure(mv self) -> Self::Result
 }
 ```
 
-`Qubit` measures to `Bit` and `[Qubit; N]` to `[Bit; N]`, and a user's struct can measure to
-a classical struct of its own, such as `Experiment` to `ExperimentResult`. Until then,
-`measure` is a built-in overload on `Qubit` and `[Qubit; N]`.
+`Qubit` measures to `Bit`, `[T; N]` to `[T::Result; N]` and a tuple to the tuple of its
+elements' results. A struct measures by an `impl` of its own, such as `Experiment` to a
+classical `ExperimentResult`. The free function `measure(x)` is `measure<T: Measure>(x: T)
+-> T::Result`.
 
-Other planned traits: `From` (conversions), `Copy`, `Discard`, and quantum interfaces such
-as `Oracle`, `Ansatz` and `Observable`.
+### Built-in generic types
+
+`Option<T>` and `Result<T, E>` are ordinary generic enums in the prelude, with their variants
+also usable bare (`Some`, `None`, `Ok`, `Err`). They can hold qubits: an `Option<Qubit>` must be
+consumed, with `match mv`. `Distribution<T>` is built in, with `T: Classical`: it holds the
+results of many runs.
+
+### Compilation
+
+Generic code is **monomorphised**: compiled once for each combination of type and size
+arguments it is used with. Circuits need concrete sizes, a target's checks need exact qubit
+counts, and native code needs concrete types. Types and ownership are checked once, on the
+generic body; circuits are found, and code is generated, for each copy.
+
+### Not yet
+
+Arithmetic in sizes; `From` beyond the built-in conversions; `impl Trait` arguments;
+closures; the quantum interfaces `Oracle`, `Ansatz` and `Observable` in the standard library.
+Operator traits (`std::ops`: `Add`, `Sub`, `Mul`, `Neg`, …) arrive with quantum integers.
 
 ## 7. Printing and formatting
 

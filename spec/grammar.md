@@ -54,6 +54,8 @@ ordinary identifiers, so `let adj = build_graph(edges)` is valid.
 | `do`    | it directly follows the closing `}` of a `with` block       |
 | `within` | it directly follows an expectation value (see below)       |
 | `pkg`, `super` | they start a path and are followed by `::` ([modules.md](modules.md)) |
+| `const` | it starts a generic parameter, after `<` or `,` ([types.md](types.md) §6) |
+| `where` | it follows a signature, before its body or `{`          |
 
 ### Literals
 
@@ -181,24 +183,33 @@ item        = [ vis ] ( struct_def | enum_def | type_alias | fn_def | trait_def 
 
 type_alias  = "type" IDENT "=" type ;
 
-struct_def  = "struct" IDENT "{" { member ( sep | "," ) } "}" ;
+generics    = "<" generic { "," generic } [ "," ] ">" ;
+generic     = IDENT [ ":" bounds ]                      (* a type parameter *)
+            | "const" IDENT ":" type ;                  (* a size parameter: `const N: Int` *)
+bounds      = bound { "+" bound } ;
+bound       = path [ "<" bound_arg { "," bound_arg } [ "," ] ">" ] ;
+bound_arg   = type_arg | IDENT "=" type ;               (* `Measure<Result = Bit>` *)
+where_clause = "where" IDENT ":" bounds { "," IDENT ":" bounds } [ "," ] ;
+
+struct_def  = "struct" IDENT [ generics ] "{" { member ( sep | "," ) } "}" ;
 member      = field | fn_def ;
 field       = IDENT ":" type ;
 
-enum_def    = "enum" IDENT "{" { variant ( sep | "," ) } { fn_def sep } "}" ;
+enum_def    = "enum" IDENT [ generics ] "{" { variant ( sep | "," ) } { fn_def sep } "}" ;
 variant     = IDENT
             | IDENT "(" type { "," type } [ "," ] ")"            (* values *)
             | IDENT "{" field { ( sep | "," ) field } [ "," ] "}" ;  (* named fields *)
 
-fn_def      = [ "unsafe" ] [ "rev" ] [ "circuit" ] "fn" IDENT "(" [ params ] ")" [ "->" type ] block ;
+fn_def      = fn_sig block ;
 params      = ( receiver | param ) { "," param } [ "," ] ;
 receiver    = ( "mv" | "ref" | "mut" ) "self" ;
 param       = IDENT ":" type ;
 
-trait_def   = "trait" IDENT "{" { trait_item sep } "}" ;              (* Reserved *)
-trait_item  = fn_sig | fn_def | "type" IDENT ;
-fn_sig      = [ "unsafe" ] [ "rev" ] [ "circuit" ] "fn" IDENT "(" [ params ] ")" [ "->" type ] ;
-impl_def    = "impl" path "for" type "{" { impl_item sep } "}" ;     (* Reserved *)
+trait_def   = "trait" IDENT [ generics ] "{" { trait_item sep } "}" ;
+trait_item  = fn_sig | fn_def | "type" IDENT [ ":" bounds ] ;
+fn_sig      = [ "unsafe" ] [ "rev" ] [ "circuit" ] "fn" IDENT [ generics ]
+              "(" [ params ] ")" [ "->" type ] [ where_clause ] ;
+impl_def    = "impl" [ generics ] bound "for" type [ where_clause ] "{" { impl_item sep } "}" ;
 impl_item   = fn_def | "type" IDENT "=" type ;
 extern_def  = "extern" fn_sig | "extern" STRING "{" { fn_sig sep } "}" ;   (* Reserved *)
 ```
@@ -221,19 +232,21 @@ without one are **associated functions**, called as `Type::name(…)`.
 The receiver states how the method takes the value, using the same words as call sites:
 `mv self` takes ownership, `ref self` borrows to read, `mut self` borrows to change.
 
-`extern` declares host and C functions; see [interop.md](interop.md). Traits and
-`impl … for …` blocks are Reserved: their syntax is specified so that it can be
-parsed, but they need generics, which are not implemented yet. See [types.md](types.md) §6.
+`extern` declares host and C functions; see [interop.md](interop.md). Generics, traits and
+`impl … for …` blocks are described in [types.md](types.md) §6; they are specified for 0.5
+and not implemented yet.
 
 ### Types
 
 ```ebnf
-type        = path [ "<" type { "," type } [ "," ] ">" ]   (* Int, Float, Bool, Bit, Qubit, String, Self, struct name, Distribution<T> *)
+type        = path [ "<" type_arg { "," type_arg } [ "," ] ">" ]   (* Int, Float, Bool, Bit, Qubit, String, Self, struct name, Distribution<T>, Pair<T, U> *)
             | "ref" type                          (* shared reference *)
             | "mut" type                          (* exclusive reference *)
             | "(" ")"                             (* unit *)
             | "(" type "," [ type { "," type } [ "," ] ] ")"   (* tuple *)
-            | "[" type ";" INT "]" ;              (* array of fixed length *)
+            | "[" type ";" size "]" ;             (* array of fixed length *)
+size        = INT | IDENT ;                       (* a length, or a size parameter *)
+type_arg    = type | INT ;                        (* `Register<8>` gives a size *)
 ```
 
 ### Statements and blocks
@@ -343,7 +356,8 @@ expectation = ( "<" prep "|" observable "|" prep ">"
               [ "within" unary ] ;                  (* the precision *)
 prep        = postfix ;                             (* a call or a ket *)
 observable  = binary ;                              (* without `|` or comparisons at top level *)
-path        = ( IDENT | "self" | "Self" ) { "::" IDENT } ;
+path        = ( IDENT | "self" | "Self" ) { "::" IDENT } [ "::" "<" type_arg { "," type_arg } [ "," ] ">" ] ;
+                                                  (* `swap::<Int>`: arguments given, not inferred *)
 field_init  = IDENT [ ":" expr ] ;                  (* `angle` is short for `angle: angle` *)
 
 place       = ( IDENT | "self" ) { "." IDENT | "." INT | "[" expr "]" } ;

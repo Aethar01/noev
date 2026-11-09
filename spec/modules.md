@@ -118,6 +118,8 @@ Reversibility is inferred within a package, across all its modules
   on it and uses it inside `ctrl` or `adj`, which semantic versioning relies on: the change is
   caught in the library, by its `rev` declaration. And a compiled library can provide the
   inverse and controlled forms of exactly the functions it declares `rev`.
+- A generic function's bounds work the same way: inferred from its body within its package,
+  written in its signature when other packages can call it ([types.md](types.md) §6).
 - `unsafe fn` works the same in every module.
 - Being a circuit does not work like reversibility: the compiler decides it across modules
   and packages, from the bodies of the functions a run calls ([execution.md](execution.md)
@@ -147,7 +149,7 @@ The prelude holds what almost every program uses, as Rust's does:
   observables, maths;
 - `discard`, `Basis` and `measure_in`, `print` and `eprint` ([std.md](std.md));
 - the built-in types and `Option` and `Result` with their variants ([types.md](types.md));
-- once traits exist, `Copy`, `Discard`, `Measure` and `From`.
+- once traits exist, `Classical` and `Measure` ([types.md](types.md) §6).
 
 The other standard-library items live in modules of their own:
 
