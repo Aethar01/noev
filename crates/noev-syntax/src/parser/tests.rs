@@ -622,3 +622,134 @@ fn enums() {
     assert_eq!(kinds, ["Success(1)", "Retry{1}", "Failed"]);
     assert_eq!(methods.len(), 1);
 }
+
+/// A generic parameter list as text: `T: A + B<X = Y>` and `const N` for each.
+fn generics_text(ast: &Ast, generics: Generics) -> String {
+    let bound_text = |b: &Bound| {
+        let path: Vec<&str> = ast.list(b.path).iter().map(|&s| ast.name(s)).collect();
+        let args: Vec<String> = ast
+            .list(b.args)
+            .iter()
+            .map(|a| match *a {
+                BoundArg::Type(t) => format!("{:?}", ast.ty(t).kind).chars().take(4).collect(),
+                BoundArg::Assoc { name, .. } => format!("{} = _", ast.name(name)),
+            })
+            .collect();
+        if args.is_empty() {
+            path.join("::")
+        } else {
+            format!("{}<{}>", path.join("::"), args.join(", "))
+        }
+    };
+    let bounds_text = |l: List<Bound>| {
+        ast.list(l)
+            .iter()
+            .map(bound_text)
+            .collect::<Vec<_>>()
+            .join(" + ")
+    };
+    let mut parts: Vec<String> = ast
+        .list(generics.params)
+        .iter()
+        .map(|p| match p.kind {
+            GenericKind::Size { .. } => format!("const {}", ast.name(p.name)),
+            GenericKind::Type { bounds } if bounds.is_empty() => ast.name(p.name).to_string(),
+            GenericKind::Type { bounds } => {
+                format!("{}: {}", ast.name(p.name), bounds_text(bounds))
+            }
+        })
+        .collect();
+    for w in ast.list(generics.wheres) {
+        parts.push(format!(
+            "where {}: {}",
+            ast.name(w.name),
+            bounds_text(w.bounds)
+        ));
+    }
+    parts.join(", ")
+}
+
+#[test]
+fn generic_items() {
+    let parsed = parse(
+        "fn zip<T, U: Classical + Measure<Result = Bit>, const N: Int>(a: [T; N]) -> [T; N]\n\
+         where\n T: Classical,\n{ mv a }\n\
+         struct Pair<T, U> { a: T, b: U }\n\
+         enum Option<T> { Some(T), None }\n\
+         trait Oracle<const N: Int> {\n type Result: Classical\n rev fn apply(ref self, r: mut [Qubit; N])\n}\n\
+         impl<T: Measure> Oracle<4> for Pair<T, T> where T: Classical {}",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ast = &parsed.ast;
+    let items: Vec<&Item> = ast.list(ast.root).iter().map(|&i| ast.item(i)).collect();
+    let ItemKind::Fn(f) = items[0].kind else {
+        panic!()
+    };
+    assert_eq!(
+        generics_text(ast, ast.function(f).generics),
+        "T, U: Classical + Measure<Result = _>, const N, where T: Classical"
+    );
+    let ItemKind::Struct { generics, .. } = items[1].kind else {
+        panic!()
+    };
+    assert_eq!(generics_text(ast, generics), "T, U");
+    let ItemKind::Enum { generics, .. } = items[2].kind else {
+        panic!()
+    };
+    assert_eq!(generics_text(ast, generics), "T");
+    let ItemKind::Trait {
+        generics, types, ..
+    } = items[3].kind
+    else {
+        panic!()
+    };
+    assert_eq!(generics_text(ast, generics), "const N");
+    assert_eq!(ast.name(ast.list(types)[0].name), "Result");
+    let ItemKind::Impl {
+        generics,
+        bound,
+        ty,
+        ..
+    } = items[4].kind
+    else {
+        panic!()
+    };
+    assert_eq!(
+        generics_text(ast, generics),
+        "T: Measure, where T: Classical"
+    );
+    assert_eq!(ast.list(bound.args).len(), 1);
+    assert!(matches!(ast.ty(ty).kind, TypeKind::Generic { .. }));
+}
+
+#[test]
+fn sizes_and_type_arguments() {
+    let parsed = parse("fn f(r: [Qubit; N], g: Register<8>) { swap::<Int>((1, 2))\n qft::<8>(r) }");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ast = &parsed.ast;
+    let lens: Vec<Len> = ast
+        .all_types()
+        .iter()
+        .filter_map(|t| match t.kind {
+            TypeKind::Array { len, .. } => Some(len),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(lens[..], [Len::Param(n)] if ast.name(n) == "N"));
+    assert!(ast.all_types().iter().any(|t| t.kind == TypeKind::Size(8)));
+    let mut given: Vec<(String, usize)> = ast
+        .all_path_args()
+        .map(|(e, args)| match ast.expr(e).kind {
+            ExprKind::Path(p) => (ast.name(ast.list(p)[0]).to_string(), args.len()),
+            _ => panic!("not a path"),
+        })
+        .collect();
+    given.sort();
+    assert_eq!(given, [("qft".to_string(), 1), ("swap".to_string(), 1)]);
+    // `const` and `where` are still names elsewhere.
+    assert!(
+        parse("fn f() { let const = 1\n let where = const }")
+            .diagnostics
+            .is_empty()
+    );
+}

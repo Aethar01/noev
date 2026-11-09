@@ -51,9 +51,15 @@ before 1.0.
 - Functions outside a package's root module are named by their path in the IR (`ansatz::ry_layer`,
   `qlib::flip`), and `fn main` is only the one in the root module.
 
+- Generics are parsed: type and size parameters (`<T: Classical, const N: Int>`) on
+  functions, structs, enums and traits, `where` clauses, generic `impl`s with bounds such as
+  `Measure<Result = Bit>`, size parameters as array lengths, sizes as type arguments
+  (`Register<8>`) and `swap::<Int>`. The checker still reports them as not supported.
+
 ### Tools
 
-- The tree-sitter grammar and Neovim highlights know visibilities and `use`.
+- The tree-sitter grammar and Neovim highlights know visibilities, `use` and generics; an
+  `impl` of a trait named by one identifier parses again.
 - The language server checks a file in a package with the rest of the package, reading open
   documents from the editor; it rechecks the package's other open files when one changes, and
   go to definition and diagnostic notes can point into other files.

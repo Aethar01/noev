@@ -117,6 +117,14 @@
 
 "use" @keyword.import
 
+[
+  "where"
+  "const"
+] @keyword
+
+(type_parameter
+  name: (type_identifier) @type)
+
 "as" @keyword.operator
 
 (visibility_modifier) @keyword.modifier

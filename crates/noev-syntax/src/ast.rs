@@ -218,6 +218,11 @@ pools! {
     field_pats: FieldPat,
     ket_parts: KetPart,
     imports: Import,
+    generic_params: GenericParam,
+    bounds: Bound,
+    bound_args: BoundArg,
+    where_preds: WherePred,
+    assoc_types: AssocType,
 }
 
 /// The variants of `Option` and `Result`, named without their enum: alone, each is a path
@@ -249,6 +254,8 @@ pub struct Ast {
     packages: Vec<Package>,
     /// The standard library's package, added with [`Ast::collect_root`] when it is used.
     std: Option<PackageId>,
+    /// The type and size arguments a path is given with `::<…>`, by the path's expression.
+    path_args: crate::FxHashMap<ExprId, List<TypeId>>,
     exprs: Vec<Expr>,
     stmts: Vec<Stmt>,
     blocks: Vec<Block>,
@@ -368,6 +375,20 @@ impl Ast {
     pub fn add_dependency(&mut self, package: PackageId, name: &str, dep: PackageId) {
         let name = self.symbols.intern(name);
         self.packages[package.index()].deps.push((name, dep));
+    }
+
+    /// The type and size arguments the path `expr` is given with `::<…>`, if any.
+    pub fn path_args(&self, expr: ExprId) -> List<TypeId> {
+        self.path_args.get(&expr).copied().unwrap_or_default()
+    }
+
+    /// Every path given arguments with `::<…>`, with its arguments.
+    pub fn all_path_args(&self) -> impl Iterator<Item = (ExprId, List<TypeId>)> + '_ {
+        self.path_args.iter().map(|(&e, &a)| (e, a))
+    }
+
+    pub(crate) fn set_path_args(&mut self, expr: ExprId, args: List<TypeId>) {
+        self.path_args.insert(expr, args);
     }
 
     /// The module with this id.
@@ -1033,8 +1054,19 @@ pub enum TypeKind {
         /// The element type.
         elem: TypeId,
         /// The length.
-        len: u64,
+        len: Len,
     },
+    /// A size given as a type argument, as in `Register<8>`.
+    Size(u64),
+}
+
+/// An array's length: a number, or a size parameter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Len {
+    /// A fixed length.
+    Int(u64),
+    /// A size parameter: `N` in `[Qubit; N]`.
+    Param(Symbol),
 }
 
 /// A top-level item and where it is.
@@ -1100,6 +1132,8 @@ pub enum ItemKind {
         name: Symbol,
         /// Where the name is.
         name_span: Span,
+        /// Its generic parameters.
+        generics: Generics,
         /// The fields, in declaration order.
         fields: List<FieldDecl>,
         /// Methods and associated functions.
@@ -1111,6 +1145,8 @@ pub enum ItemKind {
         name: Symbol,
         /// Where the name is.
         name_span: Span,
+        /// Its generic parameters.
+        generics: Generics,
         /// The variants, in declaration order.
         variants: List<VariantDecl>,
         /// Methods and associated functions.
@@ -1125,19 +1161,25 @@ pub enum ItemKind {
         /// The type it names.
         ty: TypeId,
     },
-    /// `trait Name { … }` (Reserved).
+    /// `trait Name { … }`.
     Trait {
         /// The trait's name.
         name: Symbol,
+        /// Where the name is.
+        name_span: Span,
+        /// Its generic parameters.
+        generics: Generics,
         /// Required and provided functions.
         fns: List<FnId>,
-        /// Associated type names.
-        types: List<Symbol>,
+        /// Associated types.
+        types: List<AssocType>,
     },
-    /// `impl Trait for Type { … }` (Reserved).
+    /// `impl Trait for Type { … }`.
     Impl {
-        /// The trait's path.
-        trait_path: List<Symbol>,
+        /// Its generic parameters: `impl<T: Measure> Measure for Pair<T, T>`.
+        generics: Generics,
+        /// The trait, with its arguments.
+        bound: Bound,
         /// The type it is implemented for.
         ty: TypeId,
         /// The functions.
@@ -1147,6 +1189,93 @@ pub enum ItemKind {
     },
 }
 
+/// Generic parameters and `where` bounds (`spec/types.md` §6).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Generics {
+    /// The parameters, in order.
+    pub params: List<GenericParam>,
+    /// `where T: Bound, …`: more bounds on parameters, by name.
+    pub wheres: List<WherePred>,
+}
+
+impl Generics {
+    /// Whether there are no parameters.
+    pub fn is_empty(&self) -> bool {
+        self.params.is_empty()
+    }
+}
+
+/// A generic parameter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GenericParam {
+    /// Its name.
+    pub name: Symbol,
+    /// A type or a size.
+    pub kind: GenericKind,
+    /// Where it is.
+    pub span: Span,
+}
+
+/// What a generic parameter stands for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GenericKind {
+    /// A type, with the bounds written on it: `T: Measure`.
+    Type {
+        /// Its bounds.
+        bounds: List<Bound>,
+    },
+    /// A size: `const N: Int`.
+    Size {
+        /// Its type, `Int`.
+        ty: TypeId,
+    },
+}
+
+/// A bound: a trait, with its arguments, such as `Measure<Result = Bit>` or `Oracle<4>`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bound {
+    /// The trait's path.
+    pub path: List<Symbol>,
+    /// Its arguments.
+    pub args: List<BoundArg>,
+    /// Where it is.
+    pub span: Span,
+}
+
+/// An argument of a bound.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BoundArg {
+    /// A type or a size, by position.
+    Type(TypeId),
+    /// `Name = Type`: an associated type, fixed.
+    Assoc {
+        /// The associated type's name.
+        name: Symbol,
+        /// The type it must be.
+        ty: TypeId,
+    },
+}
+
+/// `T: Bound + …` in a `where` clause.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WherePred {
+    /// The parameter.
+    pub name: Symbol,
+    /// Its bounds.
+    pub bounds: List<Bound>,
+    /// Where it is.
+    pub span: Span,
+}
+
+/// `type Name: Bound` in a trait.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AssocType {
+    /// Its name.
+    pub name: Symbol,
+    /// What every `impl`'s type must satisfy.
+    pub bounds: List<Bound>,
+}
+
 /// A function or method declaration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FnDecl {
@@ -1154,6 +1283,8 @@ pub struct FnDecl {
     pub name: Symbol,
     /// Where the name is.
     pub name_span: Span,
+    /// Its generic parameters and `where` bounds.
+    pub generics: Generics,
     /// Where it can be used from. For a function item, the item's visibility.
     pub vis: Vis,
     /// Whether it is `unsafe fn`.

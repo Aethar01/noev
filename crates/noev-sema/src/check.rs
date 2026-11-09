@@ -392,6 +392,31 @@ impl<'a> Checker<'a> {
             })
             .collect();
 
+        // Generics are parsed, but not checked yet.
+        let generic = |g: &Generics| !g.params.is_empty() || !g.wheres.is_empty();
+        for &item in items {
+            let span = match ast.item(item).kind {
+                ItemKind::Fn(f) if generic(&ast.function(f).generics) => ast.function(f).name_span,
+                ItemKind::Struct {
+                    generics,
+                    name_span,
+                    ..
+                }
+                | ItemKind::Enum {
+                    generics,
+                    name_span,
+                    ..
+                } if generic(&generics) => name_span,
+                _ => continue,
+            };
+            self.error(span, "generics are not supported yet").help =
+                Some("see spec/types.md §6 for what is planned".into());
+        }
+        let mut turbofish: Vec<Span> = ast.all_path_args().map(|(e, _)| ast.expr(e).span).collect();
+        turbofish.sort_by_key(|s| s.start);
+        for span in turbofish {
+            self.error(span, "type arguments with `::<…>` are not supported yet");
+        }
         let mut next_struct = std_types;
         let main_root = ast.packages().first().map(|p| p.root);
         for &item_id in items {
@@ -607,7 +632,18 @@ impl<'a> Checker<'a> {
             }
             TypeKind::Array { elem, len } => {
                 let elem = self.resolve_type(elem);
-                self.t.types.array(elem, len)
+                match len {
+                    Len::Int(len) => self.t.types.array(elem, len),
+                    Len::Param(_) => {
+                        self.error(node.span, "size parameters are not supported yet")
+                            .help = Some("see spec/types.md §6 for what is planned".into());
+                        Ty::ERROR
+                    }
+                }
+            }
+            TypeKind::Size(_) => {
+                self.error(node.span, "a size is not a type");
+                Ty::ERROR
             }
             TypeKind::Generic { path, args } => {
                 let args: Vec<Ty> = ast

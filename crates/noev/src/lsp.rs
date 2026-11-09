@@ -1289,6 +1289,7 @@ impl Document {
                         name_span,
                         variants,
                         methods,
+                        ..
                     } => {
                         let mut children: Vec<DocumentSymbol> = ast
                             .list(variants)
@@ -1323,6 +1324,7 @@ impl Document {
                         name_span,
                         fields,
                         methods,
+                        ..
                     } => {
                         let mut children: Vec<DocumentSymbol> = ast
                             .list(fields)

@@ -566,6 +566,7 @@ impl Parser<'_> {
         }
         self.expect(TokenKind::Fn, "`fn`");
         let (name, name_span) = self.name("a function name");
+        let mut generics = self.generics();
 
         let mut receiver = None;
         let mark = self.ast.mark::<Param>();
@@ -591,6 +592,7 @@ impl Parser<'_> {
             self.skip_newlines();
             self.ty()
         });
+        generics.wheres = self.where_clause();
         let body = if needs_body || self.at(TokenKind::LBrace) {
             self.skip_newlines();
             Some(self.block())
@@ -601,6 +603,7 @@ impl Parser<'_> {
         self.ast.push_fn(FnDecl {
             name,
             name_span,
+            generics,
             vis,
             is_unsafe,
             is_rev,
@@ -655,6 +658,7 @@ impl Parser<'_> {
     fn struct_def(&mut self) -> ItemKind {
         self.bump();
         let (name, name_span) = self.name("a struct name");
+        let generics = self.generics();
         let field_mark = self.ast.mark::<FieldDecl>();
         let method_mark = self.ast.mark::<FnId>();
         self.skip_newlines();
@@ -695,6 +699,7 @@ impl Parser<'_> {
         ItemKind::Struct {
             name,
             name_span,
+            generics,
             fields: self.ast.finish(field_mark),
             methods: self.ast.finish(method_mark),
         }
@@ -703,6 +708,7 @@ impl Parser<'_> {
     fn enum_def(&mut self) -> ItemKind {
         self.bump();
         let (name, name_span) = self.name("an enum name");
+        let generics = self.generics();
         let variant_mark = self.ast.mark::<VariantDecl>();
         let method_mark = self.ast.mark::<FnId>();
         self.skip_newlines();
@@ -740,6 +746,7 @@ impl Parser<'_> {
         ItemKind::Enum {
             name,
             name_span,
+            generics,
             variants: self.ast.finish(variant_mark),
             methods: self.ast.finish(method_mark),
         }
@@ -800,9 +807,10 @@ impl Parser<'_> {
 
     fn trait_def(&mut self) -> ItemKind {
         self.bump();
-        let (name, _) = self.name("a trait name");
+        let (name, name_span) = self.name("a trait name");
+        let generics = self.generics();
         let fn_mark = self.ast.mark::<FnId>();
-        let type_mark = self.ast.mark::<Symbol>();
+        let type_mark = self.ast.mark::<AssocType>();
         self.skip_newlines();
         if self.expect(TokenKind::LBrace, "`{`") {
             loop {
@@ -815,7 +823,12 @@ impl Parser<'_> {
                     self.ast.push_to(f);
                 } else if self.eat(TokenKind::Type) {
                     let (name, _) = self.name("an associated type name");
-                    self.ast.push_to(name);
+                    let bounds = if self.eat(TokenKind::Colon) {
+                        self.bounds()
+                    } else {
+                        List::default()
+                    };
+                    self.ast.push_to(AssocType { name, bounds });
                 } else {
                     self.expected("`fn` or `type`");
                     self.recover_member();
@@ -825,6 +838,8 @@ impl Parser<'_> {
         }
         ItemKind::Trait {
             name,
+            name_span,
+            generics,
             fns: self.ast.finish(fn_mark),
             types: self.ast.finish(type_mark),
         }
@@ -832,9 +847,11 @@ impl Parser<'_> {
 
     fn impl_def(&mut self) -> ItemKind {
         self.bump();
-        let trait_path = self.path_segments();
+        let mut generics = self.generics();
+        let bound = self.bound();
         self.expect(TokenKind::For, "`for`");
         let ty = self.ty();
+        generics.wheres = self.where_clause();
         let fn_mark = self.ast.mark::<FnId>();
         let alias_mark = self.ast.mark::<TypeAlias>();
         self.skip_newlines();
@@ -860,7 +877,8 @@ impl Parser<'_> {
             self.expect(TokenKind::RBrace, "`}`");
         }
         ItemKind::Impl {
-            trait_path,
+            generics,
+            bound,
             ty,
             fns: self.ast.finish(fn_mark),
             types: self.ast.finish(alias_mark),
@@ -883,7 +901,148 @@ impl Parser<'_> {
                 self.expected("a name");
                 break;
             }
+            // `swap::<Int>`: the arguments are not a segment.
+            if self.at(TokenKind::ColonColon) && self.nth(1).kind == TokenKind::Lt {
+                break;
+            }
             if !self.eat(TokenKind::ColonColon) {
+                break;
+            }
+        }
+        self.ast.finish(mark)
+    }
+
+    /// `<T: Bound, const N: Int>` after a name, if there is one.
+    fn generics(&mut self) -> Generics {
+        use TokenKind::*;
+        if !self.eat(Lt) {
+            return Generics::default();
+        }
+        let mark = self.ast.mark::<GenericParam>();
+        while !matches!(self.kind(), Gt | Shr | Eof) {
+            let start = self.span();
+            let param = if self.nth_is_word(0, "const") && self.nth(1).kind == Ident {
+                self.bump();
+                let (name, _) = self.name("a size parameter's name");
+                self.expect(Colon, "`:` and the size's type, `Int`");
+                let ty = self.ty();
+                GenericParam {
+                    name,
+                    kind: GenericKind::Size { ty },
+                    span: start.to(self.prev_span()),
+                }
+            } else {
+                let (name, _) = self.name("a type parameter's name");
+                let bounds = if self.eat(Colon) {
+                    self.bounds()
+                } else {
+                    List::default()
+                };
+                GenericParam {
+                    name,
+                    kind: GenericKind::Type { bounds },
+                    span: start.to(self.prev_span()),
+                }
+            };
+            self.ast.push_to(param);
+            if !self.eat(Comma) {
+                break;
+            }
+        }
+        self.close_angle();
+        Generics {
+            params: self.ast.finish(mark),
+            wheres: List::default(),
+        }
+    }
+
+    /// `Bound + Bound + …`.
+    fn bounds(&mut self) -> List<Bound> {
+        let mark = self.ast.mark::<Bound>();
+        loop {
+            let bound = self.bound();
+            self.ast.push_to(bound);
+            if !self.eat(TokenKind::Plus) {
+                break;
+            }
+        }
+        self.ast.finish(mark)
+    }
+
+    /// A trait and its arguments: `Measure`, `Oracle<4>`, `Measure<Result = Bit>`.
+    fn bound(&mut self) -> Bound {
+        use TokenKind::*;
+        let start = self.span();
+        let path = self.path_segments();
+        let mark = self.ast.mark::<BoundArg>();
+        if self.eat(Lt) {
+            while !matches!(self.kind(), Gt | Shr | Eof) {
+                let arg = if self.at(Ident) && self.nth(1).kind == Eq {
+                    let (name, _) = self.name("an associated type's name");
+                    self.bump();
+                    BoundArg::Assoc {
+                        name,
+                        ty: self.ty(),
+                    }
+                } else {
+                    BoundArg::Type(self.type_arg())
+                };
+                self.ast.push_to(arg);
+                if !self.eat(Comma) {
+                    break;
+                }
+            }
+            self.close_angle();
+        }
+        Bound {
+            path,
+            args: self.ast.finish(mark),
+            span: start.to(self.prev_span()),
+        }
+    }
+
+    /// A type, or a size given as a number: the `8` of `Register<8>`.
+    fn type_arg(&mut self) -> TypeId {
+        let start = self.span();
+        if self.at(TokenKind::Int) {
+            self.bump();
+            let len = self.int_value(start).unwrap_or(0);
+            return self.ast.push_type(TypeExpr {
+                kind: TypeKind::Size(len),
+                span: start,
+            });
+        }
+        self.ty()
+    }
+
+    /// `where T: Bound, U: Bound` after a signature, if there is one, on the same line or
+    /// the next.
+    fn where_clause(&mut self) -> List<WherePred> {
+        use TokenKind::*;
+        let next_line = self.at(Newline) && self.nth_is_word(1, "where");
+        if !next_line && !self.nth_is_word(0, "where") {
+            return List::default();
+        }
+        if next_line {
+            self.bump();
+        }
+        self.bump();
+        let mark = self.ast.mark::<WherePred>();
+        loop {
+            self.skip_newlines();
+            if !self.at(Ident) {
+                break;
+            }
+            let start = self.span();
+            let (name, _) = self.name("a parameter's name");
+            self.expect(Colon, "`:` and its bounds");
+            let bounds = self.bounds();
+            self.ast.push_to(WherePred {
+                name,
+                bounds,
+                span: start.to(self.prev_span()),
+            });
+            if !self.eat(Comma) {
                 break;
             }
         }
@@ -928,10 +1087,12 @@ impl Parser<'_> {
                 self.expect(Semi, "`;` and the array's length");
                 let len_span = self.span();
                 let len = if self.eat(Int) {
-                    self.int_value(len_span).unwrap_or(0)
+                    Len::Int(self.int_value(len_span).unwrap_or(0))
+                } else if self.at(Ident) {
+                    Len::Param(self.name("a size").0)
                 } else {
                     self.expected("the array's length");
-                    0
+                    Len::Int(0)
                 };
                 self.expect(RBracket, "`]`");
                 TypeKind::Array { elem, len }
@@ -942,7 +1103,7 @@ impl Parser<'_> {
                     self.bump();
                     let mark = self.ast.mark::<TypeId>();
                     while !matches!(self.kind(), Gt | Shr | Eof) {
-                        let arg = self.ty();
+                        let arg = self.type_arg();
                         self.ast.push_to(arg);
                         if !self.eat(Comma) {
                             break;
@@ -1667,15 +1828,39 @@ impl Parser<'_> {
     }
 
     fn path_expr(&mut self) -> ExprId {
+        use TokenKind::*;
         let start = self.span();
         let segments = self.path_segments();
+        // `swap::<Int>`: arguments given, not inferred.
+        let mut args = None;
+        if self.at(ColonColon) && self.nth(1).kind == Lt {
+            self.bump();
+            self.bump();
+            let mark = self.ast.mark::<TypeId>();
+            while !matches!(self.kind(), Gt | Shr | Eof) {
+                let arg = self.type_arg();
+                self.ast.push_to(arg);
+                if !self.eat(Comma) {
+                    break;
+                }
+            }
+            self.close_angle();
+            args = Some(self.ast.finish(mark));
+        }
         let kind = match self.ast.list(segments) {
-            [single] if !crate::ast::BARE_VARIANTS.contains(&self.ast.name(*single)) => {
+            [single]
+                if args.is_none()
+                    && !crate::ast::BARE_VARIANTS.contains(&self.ast.name(*single)) =>
+            {
                 ExprKind::Name(*single)
             }
             _ => ExprKind::Path(segments),
         };
-        self.push(kind, start)
+        let expr = self.push(kind, start);
+        if let Some(args) = args {
+            self.ast.set_path_args(expr, args);
+        }
+        expr
     }
 
     fn struct_lit(&mut self, path: ExprId) -> ExprId {

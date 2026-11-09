@@ -98,6 +98,34 @@ module.exports = grammar({
         '}',
       ),
 
+    // `<T: Classical + Measure<Result = Bit>, const N: Int>` (spec/types.md §6).
+    type_parameters: ($) =>
+      seq('<', sepBy(',', choice($.type_parameter, $.size_parameter)), '>'),
+
+    type_parameter: ($) =>
+      seq(field('name', alias($.identifier, $.type_identifier)), optional(seq(':', $.bounds))),
+
+    size_parameter: ($) => seq('const', field('name', $.identifier), ':', field('type', $._type)),
+
+    bounds: ($) => seq($.bound, repeat(seq('+', $.bound))),
+
+    bound: ($) =>
+      seq(
+        field('trait', choice(alias($.identifier, $.type_identifier), $.scoped_path)),
+        optional(seq('<', sepBy(',', choice($._type_argument, $.associated_binding)), '>')),
+      ),
+
+    associated_binding: ($) =>
+      seq(field('name', alias($.identifier, $.type_identifier)), '=', field('type', $._type)),
+
+    where_clause: ($) =>
+      seq('where', $.where_predicate, repeat(seq(',', $.where_predicate)), optional(',')),
+
+    where_predicate: ($) =>
+      seq(field('name', alias($.identifier, $.type_identifier)), ':', $.bounds),
+
+    _type_argument: ($) => choice($._type, $.integer),
+
     // `type Byte = [Bit; 8]`.
     type_item: ($) =>
       seq(
@@ -113,6 +141,7 @@ module.exports = grammar({
         optional($.visibility_modifier),
         'struct',
         field('name', alias($.identifier, $.type_identifier)),
+        optional(field('type_parameters', $.type_parameters)),
         '{',
         repeat(choice($.field_declaration, $.function_item, ',')),
         '}',
@@ -123,6 +152,7 @@ module.exports = grammar({
         optional($.visibility_modifier),
         'enum',
         field('name', alias($.identifier, $.type_identifier)),
+        optional(field('type_parameters', $.type_parameters)),
         '{',
         repeat(choice($.enum_variant, $.function_item, ',')),
         '}',
@@ -157,8 +187,10 @@ module.exports = grammar({
         optional(alias('circuit', $.modifier)),
         'fn',
         field('name', $.identifier),
+        optional(field('type_parameters', $.type_parameters)),
         field('parameters', $.parameters),
         optional(seq('->', field('return_type', $._type))),
+        optional($.where_clause),
       ),
 
     function_signature_item: ($) => $._function_signature,
@@ -174,17 +206,27 @@ module.exports = grammar({
         optional($.visibility_modifier),
         'trait',
         field('name', alias($.identifier, $.type_identifier)),
+        optional(field('type_parameters', $.type_parameters)),
         '{',
-        repeat(choice($.function_item, $.function_signature_item, seq('type', $.identifier), ';')),
+        repeat(
+          choice(
+            $.function_item,
+            $.function_signature_item,
+            seq('type', $.identifier, optional(seq(':', $.bounds))),
+            ';',
+          ),
+        ),
         '}',
       ),
 
     impl_item: ($) =>
       seq(
         'impl',
-        field('trait', $.path),
+        optional(field('type_parameters', $.type_parameters)),
+        field('trait', $.bound),
         'for',
         field('type', $._type),
+        optional($.where_clause),
         '{',
         repeat(choice($.function_item, seq('type', $.identifier, '=', $._type), ';')),
         '}',
@@ -212,7 +254,7 @@ module.exports = grammar({
         ),
       ),
 
-    generic_type: ($) => seq($.type_path, '<', sepBy(',', $._type), '>'),
+    generic_type: ($) => seq($.type_path, '<', sepBy(',', $._type_argument), '>'),
 
     reference_type: ($) => prec.right(seq(choice('ref', 'mut'), $._type)),
 
@@ -220,7 +262,7 @@ module.exports = grammar({
 
     tuple_type: ($) => seq('(', $._type, ',', sepBy(',', $._type), ')'),
 
-    array_type: ($) => seq('[', $._type, ';', $.integer, ']'),
+    array_type: ($) => seq('[', $._type, ';', choice($.integer, $.identifier), ']'),
 
     // Statements
 
@@ -423,6 +465,7 @@ module.exports = grammar({
         $.identifier,
         $._contextual_name,
         $.path,
+        $.generic_function,
         $.self,
         $.struct_expression,
         $.parenthesized_expression,
@@ -442,6 +485,16 @@ module.exports = grammar({
         $.with_expression,
         $.unsafe_block,
         $.block,
+      ),
+
+    // `swap::<Int>`: a function given its type arguments.
+    generic_function: ($) =>
+      seq(
+        field('function', choice($.identifier, $.path)),
+        // One token, so that after `a::b` the next `::` needs no second token to decide.
+        '::<',
+        sepBy(',', $._type_argument),
+        '>',
       ),
 
     path: ($) =>
