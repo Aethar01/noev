@@ -73,18 +73,48 @@ shot, so the same table applies.
 A backend that accepts both levels, as ketrs does, takes circuits where it can, since that is
 faster.
 
-### What only simulators can do
+### Capabilities
 
-Some things are possible only when the backend can see the state, and a backend says
-whether it can do each:
+Some things are possible only when the backend can see the state. Each is a **capability**
+that a backend's target description declares (§5); the language never asks whether a backend
+is a simulator, so a quantum computer that could see its state would declare them too:
 
+- **Read the state**: give a register's amplitudes (`std::debug::amplitudes`,
+  [std.md](std.md)). A program that reads the state is rejected for a target without this
+  capability.
 - **Check `release`**: confirm that a released qubit is in \|0⟩ ([ownership.md](ownership.md)
   §11). Other backends trust the claim.
-- **Exact expectation values**: compute `<ψ| H |ψ>` from the state. Other backends estimate
-  it by measuring each group of terms in its basis, as one circuit when the preparation is a
-  circuit ([types.md](types.md) §3), and `noev export` saves those circuits.
+- **Exact expectation values and amplitudes**: compute `<ψ| H |ψ>` and `<φ|ψ>` from the
+  state. Other backends estimate them `within ε`, by measuring each group of terms in its
+  basis, as one circuit when the preparation is a circuit ([types.md](types.md) §3), and
+  `noev export` saves those circuits.
 - **Sample a state without measuring it**: when a run returns qubits and measures nothing,
   simulate it once and draw every shot from the final state.
+
+### Backends are libraries
+
+A backend is an implementation of the trait `std::backend::Backend`, at one or both levels:
+written in Noev, or in Rust or C through the plug-in interface (§4). ketrs is one written in
+Rust. Writing a backend in Noev needs traits, so its exact signatures arrive with them; in
+outline:
+
+```noev
+trait Backend {
+    fn target(ref self) -> Target                                    // §5
+    fn run(mut self, circuit: ref Circuit, shots: Int) -> Result<Shots, BackendError>
+    fn session(mut self) -> Result<Session, BackendError>            // gate level
+}
+```
+
+A `Circuit` is a classical value that describes a circuit: its qubits, its gates with their
+angles and controls, its measurements, and its classical control. It holds no qubits, so a
+backend can copy it, store it or send it over a network. A backend never holds a qubit, and
+code that implements a backend cannot create one: running it would need a backend of its
+own. That is a compile error.
+
+A backend's package can offer anything else of its own: jobs, queues, credentials, device
+calibration. A program that runs on that backend sees none of it. Its meaning, and with the
+same seed its results on a simulator, do not depend on the backend.
 
 ### Circuits are built while the program runs
 
@@ -126,6 +156,10 @@ functions. The groups of functions:
 The runtime implements runs on top of the backend: it records circuits for circuit-level
 backends, and calls the run's code once per shot for gate-level ones.
 
+Backends plug into the runtime through a C ABI too, in the other direction: the runtime calls
+the backend's functions for the `Backend` trait (§3). A backend written in Noev is compiled
+to the same functions, so ketrs, a backend in C and a backend in Noev are interchangeable.
+
 ### QIR
 
 QIR is LLVM IR that calls a standard set of quantum functions (`__quantum__qis__h__body`,
@@ -140,16 +174,39 @@ QIR is LLVM IR that calls a standard set of quantum functions (`__quantum__qis__
 
 ## 5. Targets
 
-A **target** is a code generator's machine (`x86_64-linux`, …) plus a quantum backend. The
-compiler checks a program against its target's quantum backend and rejects, at compile
-time, what the backend cannot run: a run that is not a circuit on a circuit-level-only
-backend, more qubits than the backend has, or a gate it does not support and cannot be
-decomposed into ones it does. The error points at the line that makes the run need gate-level
-control, as `--emit=plan` does.
+A **target** is a code generator's machine (`x86_64-linux`, …) plus a quantum backend. Every
+backend, simulator or quantum computer, has a **target description**:
 
-The backend is chosen when the program is built (`noev build --backend=ketrs`), and a
-program can be built for a dynamic backend, loaded when it starts, so one binary can run on
-a simulator or on hardware.
+- the levels it accepts (circuit, gate, or both);
+- its number of qubits, its gates and which qubits they can join;
+- its capabilities (§3);
+- for gate-level backends, whether foreign calls can run while qubits are alive
+  ([interop.md](interop.md) §5).
+
+The compiler checks a program against its target's description and rejects, at compile
+time, what the backend cannot run: a run that is not a circuit on a circuit-level-only
+backend, more qubits than the backend has, a gate it does not support and cannot be
+decomposed into ones it does, or a capability it lacks. The error points at the line that
+needs it, as `--emit=plan` does for gate-level control.
+
+The backend is chosen with `--backend=NAME[:DEVICE]`, on `noev build` and on `noev run`; a
+package can name a default in its `noev.toml`:
+
+```toml
+[target]
+backend = "ketrs"
+```
+
+Built-in backends such as ketrs come with their descriptions. Others, such as a remote
+device, are fetched once and cached, so building needs no network:
+`noev target fetch NAME[:DEVICE]`. Credentials are never part of a package or a binary: a
+backend reads its own when the program starts, from the environment or the user's
+configuration.
+
+A program can also be built for a dynamic backend, loaded when it starts, so one binary can
+run on a simulator or on hardware. It is then checked against the loaded backend's
+description when it starts, as host functions are checked when it is loaded
+([interop.md](interop.md) §2), and refuses to run if it needs what the backend lacks.
 
 ## 6. The interpreter
 
@@ -204,11 +261,7 @@ runs are circuits.
 
 ## 8. Open questions
 
-- **Backend options**: how a program or its user chooses a hardware backend, its device and
-  its credentials, without baking them into the binary.
-- **Result output**: how a `Distribution` from a hardware job reports its metadata (device,
-  calibration, time), if the language exposes it at all.
-- **Dynamic backends**: a plug-in ABI with versioning, so backends can be built separately
-  from Noev.
+- **Plug-in interface**: its versioning, so backends built separately from Noev keep working
+  across releases.
 - **Real-time limits**: a gate-level quantum computer will bound how long classical code may
   run between operations; the compiler would need to check those bounds for a target.

@@ -485,9 +485,9 @@ memory sense. What it risks is a wrong quantum computation.
 can prove a qubit is back in \|0⟩ (§9), it releases it without being asked; `release` covers
 the cases it cannot prove yet.
 
-**Simulators check unsafe claims.** When running on a simulator, `release` checks that the
-qubit really is in \|0⟩ and reports an error if not. On hardware the claim is trusted. So
-unsafe code can be tested.
+**Backends that can, check unsafe claims.** On a backend that can check it, such as a simulator
+([runtime.md](runtime.md) §3), `release` checks that the qubit really is in \|0⟩ and reports
+an error if not. Other backends trust the claim. So unsafe code can be tested.
 
 ### What `unsafe` never allows
 

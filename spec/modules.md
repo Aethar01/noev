@@ -29,7 +29,8 @@ vqe/
 ```
 
 A single file still works on its own: `noev run file.nv` treats it as a package with one
-module, so every existing program stays valid.
+module. A program written before modules stays valid, except that standard-library items
+outside the prelude (§6) now need a `use`; the error for such a name suggests the import.
 
 Rust's `mod` declarations were left out deliberately: they repeat what the file tree
 already says.
@@ -59,13 +60,17 @@ use pkg::ansatz::ry_layer
 use qlib::qft::qft as fourier
 ```
 
-- Braces import several items from one module.
-- `as` renames an import.
-- There are no glob imports (`use m::*`) at first: every name in a module can then be traced
-  to one line, and name resolution stays simple and fast. They can be added later without
-  breaking anything.
-- Imports are private: `pub use` re-exports an item, which is how a package presents a tidy
-  public interface.
+- Braces import several items from one module; `self` in braces imports the module itself
+  (`use std::observables::{self, P}`).
+- `as` renames an import; `as _` imports a trait's methods without its name.
+- `use m::*` (a **glob import**) imports every item of `m` visible here. Names declared in
+  the module and names imported explicitly take precedence over glob-imported ones. Two
+  glob imports that bring the same name are an error only where that name is used.
+- Imports are private unless marked: `pub use` re-exports an item, and `pub use m::*` every
+  item of `m` visible to the re-export's users, which is how a package presents a tidy public
+  interface.
+
+These are Rust's rules.
 
 ## 4. Visibility
 
@@ -81,6 +86,19 @@ pub struct Register {
 }
 ```
 
+Between private and `pub`, as in Rust, an item can be visible to part of the package:
+
+| Visibility        | Visible in                                                  |
+| ----------------- | ----------------------------------------------------------- |
+| (none)            | its own module and the modules inside it                    |
+| `pub(super)`      | its parent module and the modules inside it                 |
+| `pub(in path)`    | the named module, which must contain this one, and the modules inside it |
+| `pub(pkg)`        | the whole package (Rust's `pub(crate)`)                     |
+| `pub`             | everywhere                                                  |
+
+`pub(self)` is the same as no marker. A visible item whose signature names a less visible
+type gets a warning, as with Rust's `private_interfaces` lint.
+
 Field privacy matters more in Noev than in most languages. A struct with private qubit fields
 controls exactly how its qubits are acted on and consumed. Other modules can only use its
 `pub` methods, so it can guarantee invariants such as "these qubits are always measured
@@ -94,24 +112,44 @@ Other modules can only move, lend or destructure the fields they can see. A part
 Reversibility is inferred within a module ([ownership.md](ownership.md) §7). Across modules it
 is part of a function's contract:
 
-- A `pub fn` is reversible to other modules **only if it is declared `rev fn`**. Inside its
-  own module, the inferred answer still applies.
+- A function is reversible to other modules **only if it is declared `rev fn`**, whatever
+  its visibility (`pub`, `pub(pkg)`, …). Inside its own module, the inferred answer still
+  applies.
 - So adding a `measure` to a public function's body can never silently break a caller in
   another module that uses it inside `ctrl` or `adj`. The change is caught at the function,
   by its `rev` declaration.
 - `unsafe fn` works the same in every module.
-- Being a circuit works like reversibility: a `pub fn` is a circuit to other modules only if
+- Being a circuit works like reversibility: a function is a circuit to other modules only if
   it is declared `circuit fn` ([execution.md](execution.md) §4).
 
-The compiler warns about a `pub fn` that is reversible but not declared `rev`, since callers
-elsewhere cannot use it as reversible.
+The compiler warns about a function visible outside its module that is reversible but not
+declared `rev`, since callers elsewhere cannot use it as reversible.
 
 ## 6. The prelude
 
-Every module automatically imports the **prelude**: core ([core.md](core.md)) and the
-standard library's most common items ([std.md](std.md)). A module's own items and imports take
-precedence over prelude names. The rest of the standard library is imported with
+Every module automatically imports the **prelude**, the module `std::prelude`, as Rust does.
+Its names have the lowest precedence: a module's own items, its explicit imports and its glob
+imports all take precedence over them. The rest of the standard library is imported with
 `use std::…`.
+
+The prelude holds what almost every program uses, as Rust's does:
+
+- every intrinsic in [core.md](core.md): gates, `measure`, `reset`, measurement tests,
+  observables, maths;
+- `discard`, `Basis` and `measure_in`, `print` and `eprint` ([std.md](std.md));
+- the built-in types and `Option` and `Result` with their variants ([types.md](types.md));
+- once traits exist, `Copy`, `Discard`, `Measure` and `From`.
+
+The other standard-library items live in modules of their own:
+
+| Item                  | Module              |
+| --------------------- | ------------------- |
+| `State`               | `std::state`        |
+| `amplitudes`          | `std::debug`        |
+| `fft`, `ifft`         | `std::fourier`      |
+| `P`, `PX`             | `std::observables`  |
+
+A name used without its import is an error whose fix-it is the `use` line.
 
 ## 7. Packages and dependencies
 
@@ -129,6 +167,8 @@ qlib = "1.2"
 - Modules within a package may refer to each other freely, including in cycles.
 - Packages may not depend on each other in a cycle.
 - `std` and `core` are always available and are not listed.
+- Versions follow semantic versioning, and requirements mean what they mean in Cargo:
+  `"1.2"` accepts `1.2.0` up to, not including, `2.0.0`.
 
 ## 8. Compilation
 
@@ -140,24 +180,24 @@ modules together, and type and ownership checking run per function as they do no
 ## 9. Grammar
 
 ```ebnf
-item        = [ "pub" ] ( struct_def | fn_def | trait_def | extern_def )
+item        = [ vis ] ( struct_def | fn_def | trait_def | extern_def )
             | impl_def
             | use_decl ;
-field       = [ "pub" ] IDENT ":" type ;
-member      = field | [ "pub" ] fn_def ;
-use_decl    = [ "pub" ] "use" use_tree ;
-use_tree    = path_prefix [ "::" ( IDENT [ "as" IDENT ] | "{" use_tree { "," use_tree } [ "," ] "}" ) ]
-            | IDENT [ "as" IDENT ] ;
+vis         = "pub" [ "(" ( "pkg" | "super" | "self" | "in" path_prefix ) ")" ] ;
+field       = [ vis ] IDENT ":" type ;
+member      = field | [ vis ] fn_def ;
+use_decl    = [ vis ] "use" use_tree ;
+use_tree    = path_prefix [ "::" ( use_leaf | "*" | "{" use_tree { "," use_tree } [ "," ] "}" ) ]
+            | use_leaf ;
+use_leaf    = ( IDENT | "self" ) [ "as" ( IDENT | "_" ) ] ;
 path_prefix = ( IDENT | "pkg" | "super" ) { "::" IDENT } ;
 ```
 
-`pub`, `use` and `as` become reserved keywords; `pkg` and `super` are contextual.
+`pub`, `use` and `as` become reserved keywords; `pkg` and `super` are contextual. After
+`pub`, a `(` always starts a visibility, as in Rust.
 
 ## 10. Open questions
 
-- **Glob imports**, and whether the prelude itself is one.
-- **Visibility levels between private and `pub`**, such as visible within the package only.
-- **Package registry and versioning rules**, which belong to the tooling as much as the
-  language.
-- **Re-export of std items through the prelude**: which standard-library items are common
-  enough to be imported automatically.
+- **Package registry**: where packages are published and fetched from, which belongs to the
+  tooling as much as the language. Until there is one, dependencies are paths or git URLs,
+  as Cargo allows.

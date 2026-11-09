@@ -7,6 +7,18 @@ before 1.0.
 
 ## [Unreleased]
 
+### Spec
+
+- 0.5 is planned in `docs/PLAN.md`: modules, generics, native code, interop and backends.
+- Modules follow Rust: glob imports, `pub(pkg)`, `pub(super)` and `pub(in path)`, and a small
+  prelude, so `State`, `amplitudes`, `fft`, `ifft`, `P` and `PX` will need a `use`.
+- C interop follows Rust: arrays by reference, `extern "C" struct` for C layout, and
+  `extern "C" fn` callbacks. Host functions can call back into the program.
+- Backends are libraries implementing `std::backend::Backend`, in Noev, Rust or C. Every
+  backend has a target description with its capabilities, so a program cannot tell a
+  simulator from a quantum computer; what used to be "simulators only" is now "backends that
+  can read the state".
+
 ## [0.4.2] - 2026-11-08
 
 ### Spec

@@ -234,15 +234,16 @@ pure quantum. Pauli indices refer to the qubits of `ψ`'s value in order: for a 
 fields in declaration order; for arrays and tuples, their elements. An index outside that
 range is a compile error.
 
-The value is ⟨ψ|H|ψ⟩. A simulator computes it exactly when `ψ` contains no measurement;
-otherwise, and on hardware, it is estimated by averaging over repeated runs of `ψ`.
+The value is ⟨ψ|H|ψ⟩. A backend that can compute it exactly, such as a simulator
+([runtime.md](runtime.md) §3), does so when `ψ` contains no measurement; otherwise it is
+estimated by averaging over repeated runs of `ψ`.
 
 `<ψ| H |ψ> within ε` says how precise an estimate must be: its standard error is at most `ε`,
 a positive `Float`. Without `within`, `ε` is 0.01. The precision says what is wanted, not how:
 the runtime chooses the runs. When `H = Σ cᵢ Pᵢ`, terms whose Pauli products agree on every
 qubit's basis are measured together, and a group whose coefficients sum to `S_g` (in absolute
 value) gets `S_g · S / ε²` runs, where `S` sums them over all groups; then the variances add up
-to at most `ε²`. An exact value is within any precision, so a simulator ignores `ε` when it
+to at most `ε²`. An exact value is within any precision, so a backend ignores `ε` when it
 computes the value exactly.
 
 ### How the two forms relate
@@ -274,7 +275,8 @@ fixed labels, or calls to functions that are reversible apart from creating thei
 for a bra of a preparation ([ownership.md](ownership.md) §12, N023). If φ = U_φ\|0…0⟩ and
 ψ = U_ψ\|0…0⟩, the amplitude is ⟨0…0\|U_φ†U_ψ\|0…0⟩, so it depends on the gates the
 preparations apply, global phases included, as Noev's gates define them
-([core.md](core.md)). A simulator computes it exactly. Elsewhere it is estimated with
+([core.md](core.md)). A backend that can, such as a simulator, computes it exactly.
+Elsewhere it is estimated with
 Hadamard tests: one circuit for the real part and one for the imaginary part, each running
 the preparations controlled by an extra qubit, and `within ε` bounds each part's standard
 error. A transition value sums its terms' amplitudes ⟨φ\|Pᵢ\|ψ⟩, with each term's runs in

@@ -117,7 +117,7 @@ q.x()                  // ERROR N002: use after move (q consumed by measure)
 Also: borrow errors (`swap(a, a)`, `ctrl a { a.x() }`, references outliving their value),
 qubits that go out of scope without being consumed (measured, discarded, or returned),
 irreversible operations in reversible code, and classical changes not written out. The full
-list, with error codes N001–N020, is in
+list, with error codes N001–N023, is in
 [`spec/ownership.md`](../spec/ownership.md).
 
 Later goal: safe automatic uncomputation, where the compiler proves temporary quantum data
@@ -133,7 +133,7 @@ circuit generation.
 | -- | ---------------------------- | ------------------------------------------------------------------------------------------ | ------- |
 | 1  | Parser                       | Read `.nv` files, build an AST                                                             | ☑ Done |
 | 2  | Basic types                  | `Int`, `Float`, `Bool`, `Bit`, `Qubit`, tuples, arrays, structs                            | ☑ Done |
-| 3  | Ownership checker            | Rules N001–N022 in `spec/ownership.md` (`with`/`do` reserved)                              | ☑ Done |
+| 3  | Ownership checker            | Rules N001–N023 in `spec/ownership.md` (`with`/`do` reserved)                              | ☑ Done |
 | 4  | Quantum IR                   | Allocation, gates, measurement, classical dependencies                                     | ☑ Done |
 | 5  | Circuits                     | Closed runs that are circuits (`spec/execution.md`) compiled to ketrs circuits and OpenQASM 3 | ☑ Done |
 | 6  | Execution                    | Interpreter on ketrs, circuits sampled through ketrs, `noev run` | ☑ Done |
@@ -151,16 +151,16 @@ resource operations gives the project its technical identity from day one.
 | Compiler implementation | Rust                                  |
 | Source extension        | `.nv` (provisional)                   |
 | Lexer / parser          | Hand-written (recursive descent, Pratt for expressions) |
-| Diagnostics             | `ariadne` (source-annotated errors)   |
+| Diagnostics             | Own renderer with source excerpts, coloured with `anstyle` (`crates/noev/src/report.rs`) |
 | Type system             | Static, with linear quantum ownership |
 | Export                  | OpenQASM 3; QIR later                 |
-| Execution               | [`ketrs`](../../ketrs) (own simulator, path dependency), behind the runtime's backend interface |
+| Execution               | [`ketrs`](https://crates.io/crates/ketrs) (own simulator, source in `../ketrs`), an optional crates.io dependency behind the `ketrs` feature (on by default), behind the runtime's backend interface; Noev builds without it (`--no-default-features`) |
 | Native code (after v0.1) | Cranelift and LLVM, behind one code-generation interface (`spec/runtime.md`) |
 | CLI                     | `noev`, arguments parsed with `clap`  |
 
 - **Parser:** hand-written, for speed, full control over error recovery (report several
   errors per file, not just the first), and Noev's context-sensitive lexing (kets, line
-  breaks). `ariadne` renders diagnostics; it only runs when there are errors, so it costs
+  breaks). Noev's own renderer prints diagnostics; it only runs when there are errors, so it costs
   nothing on the fast path. Ownership errors are the product, so error quality matters from
   day one.
 - **Performance is a feature.** The compiler must stay fast as it grows:
@@ -208,7 +208,8 @@ noev/
 │   ├── noev-sema/             # name resolution, type checker, ownership checker
 │   ├── noev-ir/               # quantum IR, lowering from AST
 │   ├── noev-runtime/          # interpreter, backend interface (ketrs), OpenQASM 3 output
-│   └── noev/                  # CLI binary: check / build / run, diagnostics rendering
+│   └── noev/                  # CLI binary: check / build / run, diagnostics rendering, language server
+├── editors/                   # tree-sitter-noev grammar, nvim support
 ├── examples/                  # bell, hybrid, energy, qft, teleport
 ├── tests/
 │   ├── ui/                    # .nv programs + expected diagnostics (compile-fail and pass)
@@ -217,8 +218,8 @@ noev/
 ```
 
 Later, not v0.1: `std/` (the standard library as Noev source; until then it is implemented
-natively, see `spec/std.md`), `editors/` (tree-sitter grammar,
-VS Code syntax), `noev-lsp`.
+natively, see `spec/std.md`), VS Code support in `editors/`, and the language server
+(now `noev`'s `lsp` module) as its own `noev-lsp` crate.
 
 Long-term goal: a self-hosting compiler written in Noev. The Rust implementation is the
 bootstrap compiler, so keep the spec and the `tests/` suite as the authority on behaviour,
@@ -269,12 +270,13 @@ contribution should not just be quantum variables or a borrow checker. Research 
 ## 9. Explicitly out of scope for now
 
 - Automatic CPU/GPU/QPU placement
-- Complex automatic uncomputation
-- Real QPU integrations
+- Complex automatic uncomputation (0.5 adds `with`/`do` and release of qubits proven to be in \|0⟩ only)
 - Hardware-specific optimisers
-- Explicit lifetimes, generics and references in struct fields (v0.1 borrow-checks references with elided lifetimes only)
-- A general-purpose standard library
-- Interop with other languages (planned in §11)
+- A general-purpose standard library (0.5 adds only the classical parts that backends written
+  in Noev need)
+
+Real QPU backends, generics, explicit lifetimes, references in structs, and interop with
+other languages were out of scope for v0.1; they are planned for 0.5 (§11).
 
 ## 10. Design decisions
 
@@ -283,7 +285,7 @@ program never breaks existing code; the reverse does.
 
 | Decision            | Choice                                                    | Status   |
 | ------------------- | --------------------------------------------------------- | -------- |
-| Parser              | Hand-written lexer and parser, diagnostics with `ariadne` | Decided  |
+| Parser              | Hand-written lexer and parser, diagnostics with an own renderer | Decided  |
 | Simulator           | `ketrs`, driven directly from IR                          | Decided  |
 | Project structure   | Language project: `spec/` + Cargo workspace (§6)          | Decided  |
 | Standalone language | Own compiler and syntax; not a Rust superset or rustc fork (below) | Decided  |
@@ -302,8 +304,11 @@ program never breaks existing code; the reverse does.
 | Classical control   | `if`s and `while`s on measurement results become classical control in the circuit, with changed `Bit`/`Bool` variables in classical bits (ketrs `Assign`); what cannot (printing, early exits, other outside variables) runs shot by shot, reported | Decided  |
 | Enums               | Variants with data, `match` that must cover every variant, ownership by moving (`match mv`) or lending; `Option` and `Result` built in until generics (0.2) | Decided  |
 | Measurement bases   | `measure` is Z; `measure_in(Basis::X)` in the standard library, 0 for the +1 eigenstate; bras are its shortcut | Decided  |
-| Expectation precision | `<ψ\| H \|ψ> within ε`: a standard error, default 0.01; the runtime picks the runs; exact simulators ignore it | Decided  |
+| Expectation precision | `<ψ\| H \|ψ> within ε`: a standard error, default 0.01; the runtime picks the runs; backends that compute it exactly ignore it | Decided  |
 | Quantum backends    | One interface, two levels: circuit (jobs) and gate (operation by operation); ketrs first | Decided  |
+| Backends as libraries | A backend implements `std::backend::Backend`, in Noev, Rust or C; programs see only the capabilities its target declares, never whether it is a simulator (`spec/runtime.md` §3) | Decided  |
+| Modules             | Rust's rules: glob imports, `pub(pkg)`/`pub(super)`/`pub(in path)`, a small prelude (`spec/modules.md`) | Decided  |
+| C interop           | Rust's rules: arrays by reference, `extern "C" struct`, `extern "C" fn` callbacks (`spec/interop.md` §3) | Decided  |
 | Unconsumed qubits   | Compile error now; goal is implicit free when provably \|0⟩ | Decided  |
 | Numbers             | `Int` of any size and `Float` a 64-bit float, as Python's `int` and `float`; sized `i8`…`i64`, `u8`…`u64`, `f32`, with `f64` another name for `Float`; no implicit conversions (0.3) | Decided  |
 | Complex numbers     | `Complex` (two `Float`s), with `c64` another name for it, and `c32` (two `f32`s), as `Float`/`f64` and `f32`; imaginary literals with an `i` suffix (`2.0i`, `3i`); no implicit conversions, except that literals take the type expected (0.4) | Decided  |
@@ -374,7 +379,7 @@ don't set it have no toolchain, so set `RUSTUP_HOME` when running cargo from bas
 
 ## 11. After v0.1
 
-Planned once milestones 1–7 are done, roughly in this order.
+Releases after the v0.1 milestones (§5), in order.
 
 ### 0.2: enums
 
@@ -398,8 +403,8 @@ Planned once milestones 1–7 are done, roughly in this order.
 | 6  | Bras of preparations          | `<bell()| mv pair`: a measurement test against any reversible preparation | ☑ Done |
 | 7  | Computed labels               | `|0{b}>`, `<{bits}| mv r`: a `Bit`, `[Bit; N]` or `State` value as labels | ☑ Done |
 
-Later: quantum integers (registers with reversible arithmetic, like Silq's `uint[n]`), which
-need generics and operator traits.
+Quantum integers (registers with reversible arithmetic, like Silq's `uint[n]`) need generics
+and operator traits; they are 0.5 step 4.
 
 ### 0.4: complex numbers and amplitudes
 
@@ -411,39 +416,51 @@ need generics and operator traits.
 | 4  | State inspection              | A simulator's amplitudes for a register, for debugging; an error on backends that cannot see the state | ☑ Done |
 | 5  | Classical post-processing     | Standard-library routines on `[Complex; N]`, starting with the Fourier transform used after phase estimation | ☑ Done: `fft` and `ifft` |
 
-### Compilation (`spec/runtime.md`)
+### 0.5: modules, generics, native code, interop and hardware
 
-1. **Runtime C ABI**, shaped like QIR's, with the interpreter moved onto it.
-2. **Cranelift code generator** and `noev build --emit=binary|object`; compiled programs
-   tested against the interpreter.
-3. **QIR export** (`--emit=qir`): base profile for circuits, adaptive profile for classical
-   control.
-4. **LLVM code generator**, optionally emitting QIR calls so programs link to QIR runtimes.
-5. **Hardware backends** at circuit level, and compile-time checks against a target.
+The rest of the plan in one release. The language comes first, so the runtime ABI and the
+interop APIs are shaped once, after generics; each step needs only the steps above it. As in
+every release, the spec changes before the compiler (`AGENTS.md`), and every new error code
+gets a compile-fail test under `tests/ui/`.
 
-### Interop (`spec/interop.md`)
+| #  | Step                          | Description                                                          | Status  |
+| -- | ----------------------------- | -------------------------------------------------------------------- | ------- |
+| 1  | Per-file span offsets         | Spans address a source map of several files, so diagnostics name the file; needed by modules | ☐ |
+| 2  | Modules and packages          | Files are modules, `use` imports, `pub` visibility, the prelude, `noev.toml` packages (`spec/modules.md`) | ☐ |
+| 3  | Traits and generics           | `trait`, `impl Trait for Type`, generic functions and types; generic code assumes values may be linear; `Copy`, `Discard`, `Measure`, `From`; `Option` and `Result` become ordinary generic enums (`spec/types.md` §6) | ☐ |
+| 4  | Quantum integers              | Registers with reversible arithmetic, on generics and operator traits | ☐ |
+| 5  | `with`/`do` and release       | Compute–use–uncompute blocks, and automatic release of qubits proven to be in \|0⟩ (`spec/ownership.md` §9) | ☐ |
+| 6  | Lifetimes                     | Non-lexical lifetimes, explicit lifetimes, references in structs     | ☐ |
+| 7  | Runtime C ABI                 | Shaped like QIR's, with the interpreter moved onto it (`spec/runtime.md` §4) | ☐ |
+| 8  | Cranelift code generator      | `noev build --emit=binary\|object`; compiled programs tested against the interpreter | ☐ |
+| 9  | QIR export                    | `--emit=qir`: base profile for circuits, adaptive profile for classical control | ☐ |
+| 10 | LLVM code generator           | Behind the same code-generation interface, optionally emitting QIR calls so programs link to QIR runtimes | ☐ |
+| 11 | Rust embedding API            | A Rust program loads a Noev program, calls its functions and provides `extern fn`s, checked when the program is loaded; host functions can call back into the program; safe, so no `unsafe` (`spec/interop.md` §2) | ☐ |
+| 12 | Python bindings               | On the Rust API, with PyO3 as in `ketrs-py`: Python optimisers driving Noev expectation values | ☐ |
+| 13 | C, both ways                  | `extern "C"` imports called inside `unsafe`, arrays by reference, `extern "C" struct`, `extern "C" fn` callbacks, and a `noev.h` API for C and C++ hosts (`spec/interop.md` §3); imports use native code generation | ☐ |
+| 14 | Inline OpenQASM               | Hardware-specific gates, inside `unsafe`                              | ☐ |
+| 15 | Larger matrix gates           | Gates from unitary matrices on three or more qubits, decomposed as for two | ☐ |
+| 16 | Standard library for backends | `Vec<T>`, string handling, `std::io`, `std::env`, `std::fs`: only what a backend written in Noev needs (`spec/std.md` §6) | ☐ |
+| 17 | Targets and backends          | The `Backend` trait and `Circuit` in `std::backend`; target descriptions for every backend, ketrs included; capability checks; `--backend` on `build` and `run`; `noev target fetch`; the plug-in C ABI for backends (`spec/runtime.md` §3–5) | ☐ |
 
-Only classical values cross the boundary; the host never holds a qubit.
+A backend for a real quantum computer is a package of its own, written in Noev on steps 16
+and 17, not part of the compiler or the language: its jobs, queues and credentials are its
+own API, which programs running on it never see.
 
-1. **Rust embedding API with host functions.** A Rust program loads a Noev program, calls its
-   functions, and provides `extern fn`s, checked against their declarations when the program
-   is loaded. Small, because the runtime is already a Rust library, and safe, so no `unsafe`.
-2. **Python bindings** on top of it (PyO3, as in `ketrs-py`). Reaches most of the quantum
-   audience: Python optimisers driving Noev expectation values.
-3. **C, both ways:** `extern "C"` imports called inside `unsafe`, and a `noev.h` API for C and
-   C++ hosts. Imports need native compilation or `libffi`; easiest after native code
-   generation.
-4. **Inline OpenQASM** for hardware-specific gates (`unsafe`).
+Decisions each step needs first, from the open questions in the spec:
 
-Hardware targets will need a rule for foreign calls made while qubits are alive (they run on
-control electronics with tight latency limits); see `spec/interop.md` §5.
+- Step 2: decided on 2026-11-09 to follow Rust: glob imports, `pub(pkg)`/`pub(super)`/`pub(in
+  path)`, and a small prelude, so `fft`, `P`, `amplitudes` and `State` need a `use`
+  (`spec/modules.md` §3, §4, §6). The package registry can wait.
+- Step 13: decided on 2026-11-09 to follow Rust: arrays by reference, C layout only for
+  `extern "C" struct`, callbacks as `extern "C" fn` that capture nothing (`spec/interop.md` §3).
+- Step 16: networking, still open. Proposed: `std::net` with sockets only, as Rust's, and
+  HTTPS from a package that binds a maintained C library, so Noev never maintains TLS.
+- Step 17: decided on 2026-11-09. Backends are libraries, written in Noev, Rust or C; the
+  language cannot tell a simulator from a quantum computer, only which capabilities a target
+  declares; job details stay in the backend's package (`spec/runtime.md` §3, §5).
 
-### Language
-
-- Modules and packages (`spec/modules.md`): files are modules, `use` imports, `pub`
-  visibility, `noev.toml` packages. Needs per-file span offsets first.
-- Traits and generics (`spec/types.md` §6), with generic code assuming values may be linear.
-- `with`/`do` compute–use–uncompute blocks, and automatic release of qubits proven to be in
-  \|0⟩ (`spec/ownership.md` §9).
-- Non-lexical lifetimes, explicit lifetimes, and references in structs.
+Only classical values cross an interop boundary; the host never holds a qubit. Cranelift
+and LLVM are optional dependencies behind features, as ketrs is, so the default build stays
+fast and Noev builds without them.
 

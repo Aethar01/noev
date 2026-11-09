@@ -14,9 +14,10 @@ results. An item can therefore move to Noev source later without any program not
 Until Noev has modules, every item in [core.md](core.md) and in this document is in scope in every program,
 without imports. A program's own function with the same name takes precedence.
 
-Once Noev has modules ([modules.md](modules.md)), the standard library becomes modules under
-`std::`, and the **prelude** becomes the set of names imported into every module
-automatically.
+Once Noev has modules, the standard library becomes modules under `std::`, and the
+**prelude** becomes the set of names imported into every module automatically. Which items
+are in the prelude, and the module of each one that is not, is in
+[modules.md](modules.md) §6.
 
 ## 2. Qubits
 
@@ -79,9 +80,11 @@ enum State { Zero, One, Plus, Minus, PlusI, MinusI }
 As with `Basis`, a program's own type called `State` takes the name, and kets still accept
 the standard one.
 
-### `amplitudes` (simulators only)
+### `amplitudes` (backends that can read the state)
 
-For debugging: the amplitudes of a register's state, as a simulator holds them.
+For debugging: the amplitudes of a register's state, on a backend with the capability to
+read it, such as a simulator ([runtime.md](runtime.md) §3). A program that calls it is
+rejected for a target without that capability.
 
 ```noev
 let r = |+0>
@@ -92,8 +95,7 @@ print(amplitudes(r))     // [0.7071…+0.0i, 0.0+0.0i, 0.0+0.0i, 0.7071…+0.0i]
 `amplitudes(r)` lends `r`, a `Qubit` or `[Qubit; N]` with N at most 20, and gives a
 `[Complex; 2^N]` over its basis states in the order kets read them: \|00⟩, \|01⟩, \|10⟩,
 \|11⟩, with `r[0]` the left label. It changes nothing. A register entangled with other qubits
-has no state of its own, so asking for one is a runtime error, as it is on a backend that
-cannot see the state. The overall phase is chosen so that the first amplitude that is not zero
+has no state of its own, so asking for one is a runtime error. The overall phase is chosen so that the first amplitude that is not zero
 is real and positive; only the relative phases between amplitudes mean anything physically.
 
 It is not reversible, since under `adj` a function's gates are collected rather than run, and
@@ -196,3 +198,8 @@ Most of the standard library needs generics, so that one definition works for an
 size: the quantum Fourier transform, Grover iterations, arithmetic circuits, state
 preparation, and common observables such as Ising and Heisenberg Hamiltonians. These arrive
 with generics (`docs/PLAN.md` §11).
+
+Backends can be written in Noev ([runtime.md](runtime.md) §3), so the standard library also
+grows the classical parts they need, and no more for now: `std::backend` (the `Backend` trait,
+`Circuit`, `Target`), growable collections (`Vec<T>`), string handling, and `std::io`,
+`std::env` and `std::fs` for output, configuration and credentials.
