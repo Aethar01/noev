@@ -107,6 +107,8 @@ pub struct TraitInfo {
     pub self_param: Ty,
     /// Its functions, with or without default bodies.
     pub fns: Vec<FnId>,
+    /// Its associated types, each with whether it must be `Copy`.
+    pub assoc: Vec<(Symbol, bool)>,
 }
 
 /// An `impl` of a trait for a type.
@@ -120,8 +122,62 @@ pub struct ImplInfo {
     pub generics: Vec<Ty>,
     /// The functions it provides; the trait's defaults stand for the others.
     pub fns: Vec<FnId>,
+    /// What it says each associated type is: `type Result = Bit`.
+    pub assoc: Vec<(Symbol, Ty)>,
     /// Where it is.
     pub span: Span,
+}
+
+/// `ty` with each associated type whose base has an `impl` replaced by what the `impl` says
+/// it is, as `<Qubit as Measure>::Result` is `Bit` (`spec/types.md` §6).
+pub fn normalize(impls: &[ImplInfo], types: &mut Types, ty: Ty) -> Ty {
+    match types.kind(ty).clone() {
+        TyKind::Assoc {
+            base,
+            trait_index,
+            name,
+            copy,
+        } => {
+            let base = normalize(impls, types, base);
+            let found = impls.iter().find_map(|i| {
+                if i.trait_id.0 != trait_index {
+                    return None;
+                }
+                let mut found = vec![None; i.generics.len()];
+                if !types.match_params(i.self_ty, base, &i.generics, &mut found) {
+                    return None;
+                }
+                let args = found.into_iter().collect::<Option<Vec<Ty>>>()?;
+                let &(_, given) = i.assoc.iter().find(|(n, _)| *n == name)?;
+                Some((given, i.generics.clone(), args))
+            });
+            match found {
+                Some((given, from, to)) => {
+                    let given = types.subst(given, &from, &to);
+                    normalize(impls, types, given)
+                }
+                None => types.intern(TyKind::Assoc {
+                    base,
+                    trait_index,
+                    name,
+                    copy,
+                }),
+            }
+        }
+        TyKind::Tuple(elems) => {
+            let elems: Box<[Ty]> = elems.iter().map(|&t| normalize(impls, types, t)).collect();
+            types.intern(TyKind::Tuple(elems))
+        }
+        TyKind::Array(elem, len) => {
+            let elem = normalize(impls, types, elem);
+            types.array(elem, len)
+        }
+        TyKind::Ref { mutable, inner } => {
+            let inner = normalize(impls, types, inner);
+            types.reference(mutable, inner)
+        }
+        _ => ty,
+    }
 }
 
 /// A function's resolved signature and where it lives.
@@ -331,6 +387,8 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         inference: Vec::new(),
         item_traits: FxHashMap::default(),
         param_bounds: FxHashMap::default(),
+        param_assoc: FxHashMap::default(),
+        impl_assoc: Vec::new(),
     };
     checker.collect();
     checker.check_bodies();
@@ -386,7 +444,16 @@ struct Checker<'a> {
     item_traits: FxHashMap<ItemId, TraitId>,
     /// The traits each type parameter is bound by.
     param_bounds: FxHashMap<Ty, Vec<TraitId>>,
+    /// The associated types bounds fix, as `T: Measure<Result = Bit>`, by parameter, trait
+    /// and name.
+    param_assoc: FxHashMap<(Ty, TraitId, Symbol), Ty>,
+    /// While `impl`s are collected, what each says its associated types are, so their
+    /// signatures can name them through `Self`.
+    impl_assoc: Vec<ImplAssoc>,
 }
+
+/// An `impl`'s type, trait and associated types, while `impl`s are collected.
+type ImplAssoc = (Ty, TraitId, Vec<(Symbol, Ty)>);
 
 /// The type parameters of a generic call or literal, and what each is found to be so far.
 struct Inference {
@@ -469,24 +536,36 @@ impl<'a> Checker<'a> {
                 self.error(ast.item(item).span, "generic traits are not supported yet")
                     .help = Some("see spec/types.md §6 for what is planned".into());
             }
-            if !types.is_empty() {
-                self.error(
-                    ast.item(item).span,
-                    "associated types are not supported yet",
-                )
-                .help = Some("see spec/types.md §6 for what is planned".into());
-            }
             let id = TraitId(self.t.traits.len() as u32);
             // `Self` in the trait's functions: a type parameter bound by the trait.
             let self_name = ast.symbols.get("Self").unwrap_or(name);
             let self_param = self.t.types.param(self_name, false);
             self.param_bounds.insert(self_param, vec![id]);
             self.item_traits.insert(item, id);
+            self.module = self.scopes.item_module(item);
+            let assoc = ast
+                .list(types)
+                .iter()
+                .map(|a| {
+                    let copy = ast
+                        .list(a.bounds)
+                        .iter()
+                        .any(|b| matches!(ast.list(b.path), [n] if ast.name(*n) == "Copy"));
+                    if ast.list(a.bounds).len() > usize::from(copy) {
+                        self.error(
+                            ast.item(item).span,
+                            "bounds on associated types other than `Copy` are not supported yet",
+                        );
+                    }
+                    (a.name, copy)
+                })
+                .collect();
             self.t.traits.push(TraitInfo {
                 name,
                 item,
                 self_param,
                 fns: ast.list(fns).to_vec(),
+                assoc,
             });
             for &f in ast.list(fns) {
                 self.t.fn_traits.insert(f, id);
@@ -712,9 +791,16 @@ impl<'a> Checker<'a> {
                     let trait_id = self.bound_trait(&bound);
                     let self_ty = self.resolve_type(ty);
                     self.type_params.clear();
-                    if !types.is_empty() {
-                        self.error(item.span, "associated types are not supported yet")
-                            .help = Some("see spec/types.md §6 for what is planned".into());
+                    self.type_params = params.clone();
+                    let assoc: Vec<(Symbol, Ty)> = ast
+                        .list(types)
+                        .iter()
+                        .map(|a| (a.name, self.resolve_type(a.ty)))
+                        .collect();
+                    self.type_params.clear();
+                    if let Some(trait_id) = trait_id {
+                        // Signatures can name the associated types, through `Self`.
+                        self.impl_assoc.push((self_ty, trait_id, assoc.clone()));
                     }
                     for &f in ast.list(fns) {
                         self.collect_fn(f, None, params.clone(), Some(self_ty));
@@ -730,6 +816,7 @@ impl<'a> Checker<'a> {
                             self_ty,
                             generics: params.iter().map(|&(_, t)| t).collect(),
                             fns: ast.list(fns).to_vec(),
+                            assoc,
                             span: item.span,
                         });
                     }
@@ -740,6 +827,7 @@ impl<'a> Checker<'a> {
         }
         // Instances made while fields were being resolved may have missed some.
         self.t.types.refill_instances();
+        self.impl_assoc.clear();
         for index in 0..self.t.impls.len() {
             self.check_impl(index);
         }
@@ -767,11 +855,43 @@ impl<'a> Checker<'a> {
             self.error(span, message);
             return None;
         };
-        if !bound.args.is_empty() {
-            self.error(span, "trait arguments are not supported yet")
+        if self
+            .ast
+            .list(bound.args)
+            .iter()
+            .any(|a| matches!(a, BoundArg::Type(_)))
+        {
+            self.error(span, "generic traits are not supported yet")
                 .help = Some("see spec/types.md §6 for what is planned".into());
         }
         Some(trait_id)
+    }
+
+    /// The associated types `bound` fixes, as `Measure<Result = Bit>`, reporting names the
+    /// trait does not have.
+    fn bound_assoc(&mut self, bound: &Bound, trait_id: TraitId) -> Vec<(Symbol, Ty)> {
+        let mut fixed = Vec::new();
+        for arg in self.ast.list(bound.args) {
+            let BoundArg::Assoc { name, ty } = *arg else {
+                continue;
+            };
+            let known = self.t.traits[trait_id.index()]
+                .assoc
+                .iter()
+                .any(|(n, _)| *n == name);
+            if !known {
+                let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
+                let message = format!(
+                    "`{}` is not an associated type of `{trait_name}`",
+                    self.name(name)
+                );
+                self.error(bound.span, message);
+                continue;
+            }
+            let ty = self.resolve_type(ty);
+            fixed.push((name, ty));
+        }
+        fixed
     }
 
     /// Checks an `impl` against its trait: every function the trait has no default for is
@@ -795,6 +915,35 @@ impl<'a> Checker<'a> {
                 continue;
             };
             self.check_impl_fn(f, g, &info, &trait_name);
+        }
+        for &(name, copy) in &trait_info.assoc {
+            match info.assoc.iter().find(|(n, _)| *n == name) {
+                None => {
+                    let message = format!(
+                        "this `impl` of `{trait_name}` for {shown} lacks `type {}`",
+                        self.name(name)
+                    );
+                    self.error(info.span, message);
+                }
+                Some(&(_, ty)) if copy && self.t.types.linearity(ty) != Kind::Copyable => {
+                    let message = format!(
+                        "`{trait_name}` needs `{}` to be `Copy`, but {} is not",
+                        self.name(name),
+                        self.show(ty)
+                    );
+                    self.error(info.span, message);
+                }
+                Some(_) => {}
+            }
+        }
+        for &(name, _) in &info.assoc {
+            if !trait_info.assoc.iter().any(|(n, _)| *n == name) {
+                let message = format!(
+                    "`{}` is not an associated type of `{trait_name}`",
+                    self.name(name)
+                );
+                self.error(info.span, message);
+            }
         }
         for &f in &trait_info.fns {
             let decl = ast.function(f);
@@ -886,13 +1035,18 @@ impl<'a> Checker<'a> {
         }
         let mut to = vec![info.self_ty];
         to.extend_from_slice(own);
+        let impls = std::slice::from_ref(info);
         let types = &mut self.t.types;
         let want_params: Vec<Ty> = trait_sig
             .params
             .iter()
-            .map(|&t| types.subst(t, &trait_generics, &to))
+            .map(|&t| {
+                let t = types.subst(t, &trait_generics, &to);
+                normalize(impls, types, t)
+            })
             .collect();
         let want_ret = types.subst(trait_sig.ret, &trait_generics, &to);
+        let want_ret = normalize(impls, types, want_ret);
         if trait_sig.receiver != impl_sig.receiver
             || want_params != impl_sig.params
             || want_ret != impl_sig.ret
@@ -926,16 +1080,29 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     let (mut copy, mut traits) = self.bounds_of(bounds);
+                    let mut lists = vec![bounds];
                     for pred in ast.list(generics.wheres) {
                         if pred.name == param.name {
                             let (c, t) = self.bounds_of(pred.bounds);
                             copy |= c;
                             traits.extend(t);
+                            lists.push(pred.bounds);
                         }
                     }
                     let ty = self.t.types.param(param.name, copy);
                     if !traits.is_empty() {
                         self.param_bounds.insert(ty, traits);
+                    }
+                    // `T: Measure<Result = Bit>`: the associated types the bounds fix.
+                    for list in lists {
+                        for bound in ast.list(list) {
+                            let Some(trait_id) = self.trait_named(bound) else {
+                                continue;
+                            };
+                            for (name, fixed) in self.bound_assoc(bound, trait_id) {
+                                self.param_assoc.insert((ty, trait_id, name), fixed);
+                            }
+                        }
                     }
                     params.push((param.name, ty));
                 }
@@ -969,6 +1136,78 @@ impl<'a> Checker<'a> {
             }
         }
         (copy, traits)
+    }
+
+    /// The trait `bound` names, quietly: `None` for `Copy`, or a name already reported.
+    fn trait_named(&mut self, bound: &Bound) -> Option<TraitId> {
+        let ast = self.ast;
+        let [name] = *ast.list(bound.path) else {
+            return None;
+        };
+        if ast.name(name) == "Copy" {
+            return None;
+        }
+        match self.scopes.lexical(self.module, name, Ns::Type)? {
+            Found::Entry(Entry {
+                binding: Binding::Item(item),
+                ..
+            }) => self.item_traits.get(&item).copied(),
+            _ => None,
+        }
+    }
+
+    /// Resolves associated types in `ty` that are known: through an `impl`, a bound that
+    /// fixes one (`T: Measure<Result = Bit>`), or an `impl` being collected.
+    fn resolve_assoc(&mut self, ty: Ty) -> Ty {
+        let ty = normalize(&self.t.impls, &mut self.t.types, ty);
+        let TyKind::Assoc {
+            base,
+            trait_index,
+            name,
+            ..
+        } = *self.t.types.kind(ty)
+        else {
+            return ty;
+        };
+        if let Some(&fixed) = self.param_assoc.get(&(base, TraitId(trait_index), name)) {
+            return fixed;
+        }
+        let found = self.impl_assoc.iter().find_map(|(self_ty, t, assoc)| {
+            (*self_ty == base && t.0 == trait_index)
+                .then(|| assoc.iter().find(|(n, _)| *n == name).map(|&(_, t)| t))
+                .flatten()
+        });
+        found.unwrap_or(ty)
+    }
+
+    /// The associated type `name` of `base`, through the traits it implements.
+    fn assoc_type(&mut self, base: Ty, name: Symbol, span: Span) -> Ty {
+        let found = (0..self.t.traits.len())
+            .map(|t| TraitId(t as u32))
+            .filter(|&t| self.implements(base, t))
+            .find_map(|t| {
+                let &(_, copy) = self.t.traits[t.index()]
+                    .assoc
+                    .iter()
+                    .find(|(n, _)| *n == name)?;
+                Some((t, copy))
+            });
+        let Some((trait_id, copy)) = found else {
+            let message = format!(
+                "{} has no associated type `{}`",
+                self.show(base),
+                self.name(name)
+            );
+            self.error(span, message);
+            return Ty::ERROR;
+        };
+        let ty = self.t.types.intern(TyKind::Assoc {
+            base,
+            trait_index: trait_id.0,
+            name,
+            copy,
+        });
+        self.resolve_assoc(ty)
     }
 
     /// Whether `ty` implements `trait_id`: a type parameter bound by it, or a type with an
@@ -1232,6 +1471,13 @@ impl<'a> Checker<'a> {
                         self.error(node.span, message);
                         return Ty::ERROR;
                     }
+                }
+                // `T::Result`, `Self::Result`: an associated type.
+                if at.is_none()
+                    && let [base, name] = *rest
+                    && let Some(base_ty) = self.path_type(None, base, node.span)
+                {
+                    return self.assoc_type(base_ty, name, node.span);
                 }
                 let text = self.path_text(segments);
                 let message = format!("cannot find the type `{text}`");
@@ -2318,7 +2564,8 @@ impl<'a> Checker<'a> {
             .zip(&inference.found)
             .filter_map(|(&p, f)| Some((p, (*f)?)))
             .unzip();
-        self.t.types.subst(ty, &from, &to)
+        let ty = self.t.types.subst(ty, &from, &to);
+        self.resolve_assoc(ty)
     }
 
     /// Runs `check` with `params` being inferred, starting from `given`, and returns what
@@ -2377,6 +2624,31 @@ impl<'a> Checker<'a> {
                 self.error(span, message);
             }
             for trait_id in self.param_bounds.get(&p).cloned().unwrap_or_default() {
+                let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
+                let fixed: Vec<(Symbol, Ty)> = self
+                    .param_assoc
+                    .iter()
+                    .filter(|((q, t, _), _)| *q == p && *t == trait_id)
+                    .map(|((_, _, n), &ty)| (*n, ty))
+                    .collect();
+                for (name, want) in fixed {
+                    if !self.implements(arg, trait_id) {
+                        break;
+                    }
+                    let want = self.t.types.subst(want, params, args);
+                    let found = self.assoc_type(arg, name, span);
+                    if found != want && !self.t.types.is_wildcard(found) {
+                        let message = format!(
+                            "`{callee}` needs `{}::{}` to be {}, but it is {}",
+                            self.show(arg).trim_matches('`'),
+                            self.name(name),
+                            self.show(want),
+                            self.show(found)
+                        );
+                        self.error(span, message);
+                    }
+                }
+                let _ = &trait_name;
                 if !self.implements(arg, trait_id) {
                     let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
                     let message = format!(
@@ -3208,6 +3480,7 @@ impl<'a> Checker<'a> {
         let type_args = self.settle(&generics, found, "call", self.ast.expr(callee).span);
         self.check_bounds(&generics, &type_args, &name, span);
         let ret = self.t.types.subst(sig.ret, &generics, &type_args);
+        let ret = self.resolve_assoc(ret);
         self.t.type_args.insert(id, type_args);
         ret
     }
@@ -3714,6 +3987,7 @@ impl<'a> Checker<'a> {
         let type_args = self.settle(&generics, found, "call", span);
         self.check_bounds(&generics, &type_args, &name, span);
         let ret = self.t.types.subst(sig.ret, &generics, &type_args);
+        let ret = self.resolve_assoc(ret);
         self.t.type_args.insert(id, type_args);
         ret
     }

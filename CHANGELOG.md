@@ -67,6 +67,9 @@ before 1.0.
   must provide every function without a default, with the trait's signature, be in the
   package of the trait or the type, and not give a trait twice for one type. A call through a
   trait function not declared `rev` is irreversible, and runs shot by shot.
+- Associated types: `type Result: Copy` in a trait, `type Result = Bit` in each `impl`,
+  `T::Result` and `Self::Result` in signatures, and bounds that fix one
+  (`T: Readout<Result = Bit>`), checked at each call.
 
 ### Tools
 

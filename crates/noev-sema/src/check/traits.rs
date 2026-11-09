@@ -141,3 +141,52 @@ fn reversible_trait_functions() {
         ["N013 `plain` is not reversible"]
     );
 }
+
+const READOUT: &str = "trait Readout {\n type Result: Copy\n fn read(mv self) -> Self::Result\n}\n\
+                       impl Readout for Qubit {\n type Result = Bit\n fn read(mv self) -> Bit { mv self.measure() }\n}\n";
+
+#[test]
+fn associated_types() {
+    ok(&format!(
+        "{READOUT}fn f<T: Readout>(x: T) -> T::Result {{ mv x.read() }}"
+    ));
+    // Known through the `impl`, or through a bound that fixes it.
+    ok(&format!("{READOUT}fn f(q: Qubit) -> Bit {{ mv q.read() }}"));
+    ok(&format!(
+        "{READOUT}fn f<T: Readout<Result = Bit>>(x: T) -> Bit {{ mv x.read() }}"
+    ));
+    // A `Copy` associated type can be copied in generic code.
+    ok(&format!(
+        "{READOUT}fn f<T: Readout>(x: T) -> (T::Result, T::Result) {{ let r = mv x.read()\n (r, r) }}"
+    ));
+    assert_eq!(
+        errors(&format!(
+            "{READOUT}fn f<T: Readout>(x: T) -> T::Nope {{ mv x.read() }}"
+        )),
+        ["`T` has no associated type `Nope`"]
+    );
+    assert_eq!(
+        errors(&format!(
+            "{READOUT}struct Two {{ q: Qubit }}\nimpl Readout for Two {{ fn read(mv self) -> Bit {{ mv self.q.measure() }} }}"
+        )),
+        [
+            "`read` has a different signature than in `Readout`",
+            "this `impl` of `Readout` for `Two` lacks `type Result`"
+        ]
+    );
+    assert_eq!(
+        errors(&format!(
+            "{READOUT}struct Boxed {{ q: Qubit }}\nimpl Readout for Boxed {{ type Result = Qubit\n fn read(mv self) -> Qubit {{ mv self.q }} }}"
+        )),
+        ["`Readout` needs `Result` to be `Copy`, but `Qubit` is not"]
+    );
+    assert_eq!(
+        errors(&format!(
+            "{READOUT}struct Two {{ a: Qubit, b: Qubit }}\n\
+             impl Readout for Two {{ type Result = (Bit, Bit)\n fn read(mv self) -> (Bit, Bit) {{ (mv self.a.measure(), mv self.b.measure()) }} }}\n\
+             fn one<T: Readout<Result = Bit>>(x: T) -> Bit {{ mv x.read() }}\n\
+             fn f() -> Bit {{ one(Two {{ a: |0>, b: |0> }}) }}"
+        )),
+        ["`one` needs `Two::Result` to be `Bit`, but it is `(Bit, Bit)`"]
+    );
+}

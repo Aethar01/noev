@@ -494,8 +494,9 @@ impl Program {
                     self.type_name(*inner)
                 )
             }
-            // Lowering replaces every type parameter; this is only reached by a bug.
-            TyKind::Param(_) => "{parameter}".into(),
+            // Lowering replaces every type parameter and resolves every associated type; this
+            // is only reached by a bug.
+            TyKind::Param(_) | TyKind::Assoc { .. } => "{parameter}".into(),
         }
     }
 }

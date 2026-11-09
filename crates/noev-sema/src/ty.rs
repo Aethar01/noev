@@ -87,6 +87,18 @@ pub enum TyKind {
     /// A type parameter, inside generic code: any type its bounds allow (`spec/types.md`
     /// §6).
     Param(ParamId),
+    /// A trait's associated type of a type that is not known yet, such as `T::Result` for
+    /// `T: Measure`. Once `base` is known, its `impl` says what it is.
+    Assoc {
+        /// The type whose associated type it is.
+        base: Ty,
+        /// The trait, by its position in the checker's table of traits.
+        trait_index: u32,
+        /// The associated type's name.
+        name: Symbol,
+        /// Whether the trait requires it to be `Copy`.
+        copy: bool,
+    },
 }
 
 /// A type parameter of a generic function, struct or enum.
@@ -473,6 +485,20 @@ impl Types {
                 let inner = self.subst(inner, from, to);
                 self.reference(mutable, inner)
             }
+            TyKind::Assoc {
+                base,
+                trait_index,
+                name,
+                copy,
+            } => {
+                let base = self.subst(base, from, to);
+                self.intern(TyKind::Assoc {
+                    base,
+                    trait_index,
+                    name,
+                    copy,
+                })
+            }
             TyKind::Struct(id) => {
                 let def = &self.structs[id.index()];
                 if def.args.is_empty() {
@@ -496,6 +522,9 @@ impl Types {
     pub fn quantum_param(&self, ty: Ty) -> Option<ParamId> {
         match self.kind(ty) {
             TyKind::Param(p) => (!self.params[p.index()].copy).then_some(*p),
+            TyKind::Assoc {
+                base, copy: false, ..
+            } => self.quantum_param(*base),
             TyKind::Tuple(elems) => elems.iter().find_map(|&t| self.quantum_param(t)),
             TyKind::Array(elem, _) | TyKind::Distribution(elem) => self.quantum_param(*elem),
             TyKind::Ref { inner, .. } => self.quantum_param(*inner),
@@ -550,6 +579,20 @@ impl Types {
                     inner: t,
                 },
             ) if a == b => self.match_params(*p, *t, params, found),
+            (
+                TyKind::Assoc {
+                    base: p,
+                    trait_index: a,
+                    name: n,
+                    ..
+                },
+                TyKind::Assoc {
+                    base: t,
+                    trait_index: b,
+                    name: m,
+                    ..
+                },
+            ) if a == b && n == m => self.match_params(*p, *t, params, found),
             (TyKind::Struct(a), TyKind::Struct(b)) => {
                 let (da, db) = (&self.structs[a.index()], &self.structs[b.index()]);
                 da.template.unwrap_or(*a) == db.template.unwrap_or(*b)
@@ -568,6 +611,7 @@ impl Types {
     pub fn has_params(&self, ty: Ty) -> bool {
         match self.kind(ty) {
             TyKind::Param(_) => true,
+            TyKind::Assoc { base, .. } => self.has_params(*base),
             TyKind::Tuple(elems) => elems.iter().any(|&t| self.has_params(t)),
             TyKind::Array(elem, _) | TyKind::Distribution(elem) => self.has_params(*elem),
             TyKind::Ref { inner, .. } => self.has_params(*inner),
@@ -613,6 +657,8 @@ impl Types {
             // Generic code treats a value as a qubit unless it is known to be `Copy`.
             TyKind::Param(p) if self.params[p.index()].copy => Kind::Copyable,
             TyKind::Param(_) => Kind::Linear,
+            TyKind::Assoc { copy: true, .. } => Kind::Copyable,
+            TyKind::Assoc { .. } => Kind::Linear,
             TyKind::Ref { mutable: true, .. } => Kind::Affine,
             TyKind::Tuple(elems) => combine(&mut elems.iter().copied()),
             TyKind::Array(elem, _) => self.linearity_at(*elem, depth + 1),
@@ -764,6 +810,9 @@ impl Types {
                 format!("{word} {}", self.display(*inner, ast))
             }
             TyKind::Param(p) => ast.name(self.params[p.index()].name).into(),
+            TyKind::Assoc { base, name, .. } => {
+                format!("{}::{}", self.display(*base, ast), ast.name(*name))
+            }
         }
     }
 }

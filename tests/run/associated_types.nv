@@ -1,0 +1,32 @@
+// Associated types (spec/types.md §6): `T::Result` in generic code, known through each
+// `impl`, and fixed by a bound such as `Readout<Result = Bit>`.
+
+trait Readout {
+    type Result: Copy
+    fn read(mv self) -> Self::Result
+}
+
+struct Two { a: Qubit, b: Qubit }
+
+impl Readout for Two {
+    type Result = (Bit, Bit)
+    fn read(mv self) -> (Bit, Bit) { (mv self.a.measure(), mv self.b.measure()) }
+}
+
+impl Readout for Qubit {
+    type Result = Bit
+    fn read(mv self) -> Bit { mv self.measure() }
+}
+
+fn read_all<T: Readout>(x: T) -> T::Result { mv x.read() }
+
+fn one_bit<T: Readout<Result = Bit>>(x: T) -> Bit { mv x.read() }
+
+fn main() {
+    let t = Two { a: |1>, b: |0> }
+    let r = read_all(mv t)
+    print("{r.0} {r.1}")
+    print(one_bit(|1>))
+    let b: Bit = read_all(|0>)
+    print(b)
+}

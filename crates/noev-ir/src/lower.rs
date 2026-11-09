@@ -479,7 +479,9 @@ impl<'a> Builder<'a> {
 
     /// `ty` in this copy of a generic function: its type parameters replaced.
     fn subst(&mut self, ty: Ty) -> Ty {
-        self.types.subst(ty, &self.params, &self.args)
+        let ty = self.types.subst(ty, &self.params, &self.args);
+        // With its base known, an associated type is what the base's `impl` says.
+        noev_sema::check::normalize(&self.typed.impls, self.types, ty)
     }
 
     /// The type of the source local `local`, in this copy.
