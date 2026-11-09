@@ -1,5 +1,7 @@
 // `fft` and `ifft` (spec/std.md §3): NumPy's discrete Fourier transform on complex arrays.
 
+use std::fourier::{fft, ifft}
+
 fn close(a: Complex, b: Complex) -> Bool {
     (a - b).abs() < 1e-12
 }

@@ -1,3 +1,5 @@
+use std::observables::P
+
 fn ansatz(theta: Float) -> [Qubit; 2] {
     let r = |00>
     r[0].ry(theta)

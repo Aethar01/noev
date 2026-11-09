@@ -1,7 +1,7 @@
 # Modules and packages
 
 Status: **Implemented**, except where a section says otherwise: being a circuit across
-modules (§5), and the prelude as a module of its own (§6).
+modules (§5), and naming the prelude itself as `std::prelude` (§6).
 `noev check`, `build`, `run` and `export` take a `.nv` file or a package directory.
 
 ## 1. Files are modules
@@ -153,7 +153,8 @@ The other standard-library items live in modules of their own:
 | `fft`, `ifft`         | `std::fourier`      |
 | `P`, `PX`             | `std::observables`  |
 
-A name used without its import is an error whose fix-it is the `use` line.
+A name used without its import is an error whose fix-it is the `use` line. (Not implemented
+yet: naming the prelude itself, as in `use std::prelude::print`, and paths through `core`.)
 
 ## 7. Packages and dependencies
 

@@ -1,6 +1,8 @@
 // Computed labels (spec/types.md §3): `{expr}` in a ket or bra is a `Bit`, a `State` or an
 // array of them, mixed freely with fixed labels.
 
+use std::state::State
+
 fn load(bits: [Bit; 4]) -> [Qubit; 4] {
     |{bits}>
 }

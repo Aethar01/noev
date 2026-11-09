@@ -1,5 +1,7 @@
 // N013: an irreversible operation in a reversible context.
 
+use std::debug::amplitudes
+
 rev fn declared_reversible(q: mut Qubit) {
     q.h()
     q.reset()                       //~ N013

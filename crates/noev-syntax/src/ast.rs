@@ -232,6 +232,10 @@ pub const STD_NAMES: [&str; 17] = [
     "One", "Plus", "Minus", "PlusI", "MinusI",
 ];
 
+/// The modules of the standard library's package, `std`, whose items are built in
+/// (`spec/modules.md` §6). What is in the prelude is in no module of its own yet.
+pub const STD_MODULES: [&str; 4] = ["debug", "fourier", "observables", "state"];
+
 /// A parsed package and its dependencies: every module of each, in one syntax tree.
 #[derive(Debug, Default)]
 pub struct Ast {
@@ -243,6 +247,8 @@ pub struct Ast {
     modules: Vec<Module>,
     /// Every package; the first is the one being compiled.
     packages: Vec<Package>,
+    /// The standard library's package, added with [`Ast::collect_root`] when it is used.
+    std: Option<PackageId>,
     exprs: Vec<Expr>,
     stmts: Vec<Stmt>,
     blocks: Vec<Block>,
@@ -397,8 +403,23 @@ impl Ast {
         names.join("::")
     }
 
-    /// Makes [`Ast::root`] every module's items, after the modules are parsed.
+    /// The standard library's package, once [`Ast::collect_root`] has added it.
+    pub fn std_package(&self) -> Option<PackageId> {
+        self.std
+    }
+
+    /// Makes [`Ast::root`] every module's items, after the modules are parsed, and adds the
+    /// standard library's package, whose modules have no items of their own, if any module
+    /// names `std`: none can reach it otherwise.
     pub fn collect_root(&mut self) {
+        if self.std.is_none() && self.symbols.get("std").is_some() {
+            let std = self.add_package("std");
+            let root = self.package(std).root;
+            for name in STD_MODULES {
+                self.add_module(root, name);
+            }
+            self.std = Some(std);
+        }
         let mark = self.mark::<ItemId>();
         for index in 0..self.modules.len() {
             let items = self.modules[index].items;

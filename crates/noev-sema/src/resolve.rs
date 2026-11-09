@@ -21,6 +21,26 @@ pub enum Binding {
     Item(ItemId),
     /// A module.
     Module(ModuleId),
+    /// A standard-library item outside the prelude, by its name there, such as `fft`.
+    Std(&'static str),
+}
+
+/// The items of the standard library's modules that are not in the prelude
+/// (`spec/modules.md` §6), each with its namespace. They are built in, as the prelude's are.
+pub const STD_ITEMS: [(&str, &[(&str, Ns)]); 4] = [
+    ("debug", &[("amplitudes", Ns::Value)]),
+    ("fourier", &[("fft", Ns::Value), ("ifft", Ns::Value)]),
+    ("observables", &[("P", Ns::Value), ("PX", Ns::Value)]),
+    ("state", &[("State", Ns::Type)]),
+];
+
+/// The standard-library module that holds `name`, if `name` is one of its items outside the
+/// prelude.
+pub fn std_module_of(name: &str) -> Option<&'static str> {
+    STD_ITEMS
+        .iter()
+        .find(|(_, items)| items.iter().any(|&(item, _)| item == name))
+        .map(|&(module, _)| module)
 }
 
 /// Where a name can be used from.
@@ -82,6 +102,8 @@ struct Scope {
 /// Every module's scope.
 pub struct Scopes<'a> {
     ast: &'a Ast,
+    /// The name `std` and the standard library's root module, which every package can use.
+    std: Option<(Symbol, ModuleId)>,
     scopes: Vec<Scope>,
     /// The module each item is in, by [`ItemId::index`].
     item_modules: Vec<ModuleId>,
@@ -202,8 +224,16 @@ impl Scopes<'_> {
         }
         if ns == Ns::Type {
             let deps = &self.ast.package(self.package(module)).deps;
-            if let Some(&(_, dep)) = deps.iter().find(|(dep, _)| *dep == name) {
-                let root = self.ast.package(dep).root;
+            let dep = deps
+                .iter()
+                .find(|(dep, _)| *dep == name)
+                .map(|&(_, dep)| self.ast.package(dep).root);
+            // Every package can use the standard library as `std`.
+            let std = self
+                .std
+                .filter(|&(std, _)| std == name)
+                .map(|(_, root)| root);
+            if let Some(root) = dep.or(std) {
                 return Some(Found::Entry(Entry {
                     binding: Binding::Module(root),
                     visible: Visible::Everywhere,
@@ -416,8 +446,13 @@ struct Pending {
 /// resolved.
 pub fn resolve(ast: &Ast) -> (Scopes<'_>, Vec<Diagnostic>) {
     let modules = ast.modules();
+    let std = ast
+        .symbols
+        .get("std")
+        .zip(ast.std_package().map(|p| ast.package(p).root));
     let mut scopes = Scopes {
         ast,
+        std,
         scopes: modules.iter().map(|_| Scope::default()).collect(),
         item_modules: vec![ModuleId::from_index(0); ast.all_items().len()],
         fn_modules: vec![ModuleId::from_index(0); ast.all_fns().len()],
@@ -497,6 +532,30 @@ impl Resolver<'_> {
                     span: Span::default(),
                 };
                 self.insert(parent, Ns::Type, module.name, entry, "the module");
+            }
+        }
+        // The standard library's modules hold built-in items.
+        if let Some(std) = ast.std_package() {
+            for (index, module) in ast.modules().iter().enumerate() {
+                if module.package != std || module.parent.is_none() {
+                    continue;
+                }
+                let name = ast.name(module.name);
+                let Some((_, items)) = STD_ITEMS.iter().find(|(m, _)| *m == name) else {
+                    continue;
+                };
+                for &(item, ns) in *items {
+                    // A name the program never writes cannot be looked up.
+                    let Some(symbol) = ast.symbols.get(item) else {
+                        continue;
+                    };
+                    let entry = Entry {
+                        binding: Binding::Std(item),
+                        visible: Visible::Everywhere,
+                        span: Span::default(),
+                    };
+                    self.insert(ModuleId::from_index(index), ns, symbol, entry, "the name");
+                }
             }
         }
         for (index, module) in ast.modules().iter().enumerate() {

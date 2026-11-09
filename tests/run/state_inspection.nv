@@ -2,6 +2,8 @@
 // lends the register, and fixes the overall phase so the first amplitude that is not zero is
 // real and positive.
 
+use std::debug::amplitudes
+
 fn main() {
     let r = |+0>
     ctrl r[0] { r[1].x() }

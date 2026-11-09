@@ -11,13 +11,10 @@ results. An item can therefore move to Noev source later without any program not
 
 ## 1. What is in scope
 
-Until Noev has modules, every item in [core.md](core.md) and in this document is in scope in every program,
-without imports. A program's own function with the same name takes precedence.
-
-Once Noev has modules, the standard library becomes modules under `std::`, and the
-**prelude** becomes the set of names imported into every module automatically. Which items
-are in the prelude, and the module of each one that is not, is in
-[modules.md](modules.md) §6.
+Every item in [core.md](core.md) is in the **prelude**, the names every module has without
+imports, and so are most items in this document. The others are in modules of the standard
+library, under `std::`, and need a `use`: each says which in its heading. A module's own
+names, and its imports, take precedence over the prelude's ([modules.md](modules.md) §6).
 
 ## 2. Qubits
 
@@ -67,7 +64,7 @@ gate angle chosen from one ([execution.md](execution.md) §4).
 A measurement test is a shortcut for the same thing: `<+| mv q` is
 `mv q.measure_in(Basis::X) == 0`.
 
-### `State`
+### `State` (`std::state`)
 
 The six basis states a ket or bra label names, as a value, so a label can be computed
 (`|{s}>`, [types.md](types.md) §3).
@@ -80,13 +77,15 @@ enum State { Zero, One, Plus, Minus, PlusI, MinusI }
 As with `Basis`, a program's own type called `State` takes the name, and kets still accept
 the standard one.
 
-### `amplitudes` (backends that can read the state)
+### `amplitudes` (`std::debug`; backends that can read the state)
 
 For debugging: the amplitudes of a register's state, on a backend with the capability to
 read it, such as a simulator ([runtime.md](runtime.md) §3). A program that calls it is
 rejected for a target without that capability.
 
 ```noev
+use std::debug::amplitudes
+
 let r = |+0>
 ctrl r[0] { r[1].x() }
 print(amplitudes(r))     // [0.7071…+0.0i, 0.0+0.0i, 0.0+0.0i, 0.7071…+0.0i]
@@ -103,7 +102,7 @@ a `sample` that reads amplitudes runs shot by shot.
 
 ## 3. Classical post-processing
 
-### `fft` and `ifft`
+### `fft` and `ifft` (`std::fourier`)
 
 The discrete Fourier transform of a `[Complex; N]` or `[c32; N]`, as NumPy computes it:
 
@@ -118,7 +117,7 @@ amplitudes or counts; the quantum Fourier transform itself is a circuit of gates
 
 ## 4. Observables
 
-### `P` and `PX`
+### `P` and `PX` (`std::observables`)
 
 Projectors onto one qubit's basis states, as sums of Paulis.
 
@@ -139,6 +138,8 @@ value. A product of single-qubit projectors on different qubits projects onto th
 multi-qubit state:
 
 ```noev
+use std::observables::P
+
 let p11 = <ansatz(theta)| P(0, 1) * P(1, 1) |ansatz(theta)>   // probability of measuring 11
 ```
 

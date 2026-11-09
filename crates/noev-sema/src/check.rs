@@ -155,6 +155,15 @@ impl Typed {
     }
 }
 
+/// A function a name refers to.
+#[derive(Clone, Copy, Debug)]
+enum FnRef {
+    /// One of the program's.
+    Fn(FnId),
+    /// A built-in standard-library function, by its name there.
+    Std(&'static str),
+}
+
 /// What the surrounding code wants from an expression.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Expect {
@@ -668,7 +677,8 @@ impl<'a> Checker<'a> {
                 }
                 let text = self.path_text(segments);
                 let message = format!("cannot find the type `{text}`");
-                self.error(node.span, message);
+                let help = self.std_help(ast.list(segments)[0]);
+                self.error(node.span, message).help = help;
                 Ty::ERROR
             }
         }
@@ -1630,8 +1640,10 @@ impl<'a> Checker<'a> {
             Some(module) => self.scopes.qualified(self.module, module, name, Ns::Type),
         };
         let Some(binding) = self.found(found, name, span) else {
-            // The prelude's types, which a module's own names take precedence over.
-            let id = *self.std_types.get(&name).filter(|_| at.is_none())?;
+            // The prelude's types, which a module's own names take precedence over; `State`
+            // is in `std::state`.
+            let in_prelude = at.is_none() && resolve::std_module_of(self.name(name)).is_none();
+            let id = *self.std_types.get(&name).filter(|_| in_prelude)?;
             return Some(self.t.types.struct_ty(id));
         };
         match binding {
@@ -1639,25 +1651,41 @@ impl<'a> Checker<'a> {
                 Some(id) => Some(self.t.types.struct_ty(id)),
                 None => self.alias_type(item),
             },
+            Binding::Std(text) => {
+                let id = *self.std_types.get(&self.ast.symbols.get(text)?)?;
+                Some(self.t.types.struct_ty(id))
+            }
             Binding::Module(_) | Binding::Fn(_) => None,
         }
     }
 
-    /// The function `name` names in the module `at`, or as written here when `at` is `None`.
-    /// `Err` if the name is ambiguous, which is reported.
+    /// The help for a standard-library name used without its `use`, if it is one.
+    fn std_help(&self, name: Symbol) -> Option<String> {
+        let text = self.name(name);
+        let module = resolve::std_module_of(text)?;
+        Some(format!(
+            "`{text}` is in `std::{module}`, which the prelude does not import: add \
+             `use std::{module}::{text}`"
+        ))
+    }
+
+    /// The function `name` names in the module `at`, or as written here when `at` is `None`:
+    /// the program's, or a standard-library one imported by name. `Err` if the name is
+    /// ambiguous, which is reported.
     fn path_fn(
         &mut self,
         at: Option<ModuleId>,
         name: Symbol,
         span: Span,
-    ) -> Result<Option<FnId>, ()> {
+    ) -> Result<Option<FnRef>, ()> {
         let found = match at {
             None => self.scopes.lexical(self.module, name, Ns::Value),
             Some(module) => self.scopes.qualified(self.module, module, name, Ns::Value),
         };
         let ambiguous = matches!(found, Some(Found::Ambiguous(..)));
         match self.found(found, name, span) {
-            Some(Binding::Fn(f)) => Ok(Some(f)),
+            Some(Binding::Fn(f)) => Ok(Some(FnRef::Fn(f))),
+            Some(Binding::Std(text)) => Ok(Some(FnRef::Std(text))),
             _ if ambiguous => Err(()),
             _ => Ok(None),
         }
@@ -1751,7 +1779,7 @@ impl<'a> Checker<'a> {
         }
         if let ([name], Some(module)) = (rest, at) {
             let path = self.path_text(segments);
-            let message = if self.path_fn(Some(module), *name, span) != Ok(None) {
+            let message = if !matches!(self.path_fn(Some(module), *name, span), Ok(None)) {
                 format!("`{path}` is a function; call it with `{path}(…)`")
             } else if self.path_type(Some(module), *name, span).is_some() {
                 format!("`{path}` is a type, not a value")
@@ -1790,7 +1818,8 @@ impl<'a> Checker<'a> {
         }
         let text = self.path_text(segments);
         let message = format!("cannot find the value `{text}`");
-        self.error(span, message);
+        let help = self.std_help(self.ast.list(segments)[0]);
+        self.error(span, message).help = help;
         Ty::ERROR
     }
 
@@ -2373,6 +2402,31 @@ impl<'a> Checker<'a> {
 
 // Calls.
 impl<'a> Checker<'a> {
+    /// A call of the program's function `f`.
+    fn fn_call(&mut self, id: ExprId, f: FnId, args: &[ExprId], span: Span) -> Ty {
+        let sig = self.t.fns[f.index()].sig.clone();
+        self.t.callees[id.index()] = Some(Callee::Fn(f));
+        self.check_args(&sig, None, args, span)
+    }
+
+    /// A call of the built-in function or conversion named `text`, if there is one.
+    fn builtin_call(&mut self, id: ExprId, text: &str, args: &[ExprId], span: Span) -> Option<Ty> {
+        if let Some(target) = prelude::builtin_type(text) {
+            return Some(self.conversion(id, target, args, span));
+        }
+        Some(match text {
+            "print" | "eprint" => self.print_call(id, text == "eprint", args),
+            "measure" => self.measure_fn(id, args, span),
+            "amplitudes" => self.amplitudes_fn(id, args, span),
+            "fft" | "ifft" => self.fourier_fn(id, text == "ifft", args, span),
+            _ => {
+                let (builtin, sig) = prelude::function(&mut self.t.types, text)?;
+                self.t.callees[id.index()] = Some(Callee::Builtin(builtin));
+                self.check_args(&sig, None, args, span)
+            }
+        })
+    }
+
     fn call(
         &mut self,
         id: ExprId,
@@ -2395,30 +2449,23 @@ impl<'a> Checker<'a> {
                 let Ok(found) = self.path_fn(None, name, callee_expr.span) else {
                     return self.skip_args(args);
                 };
-                if let Some(f) = found {
-                    let sig = self.t.fns[f.index()].sig.clone();
-                    self.t.callees[id.index()] = Some(Callee::Fn(f));
-                    return self.check_args(&sig, None, args, span);
+                match found {
+                    Some(FnRef::Fn(f)) => return self.fn_call(id, f, args, span),
+                    Some(FnRef::Std(text)) => {
+                        if let Some(ty) = self.builtin_call(id, text, args, span) {
+                            return ty;
+                        }
+                    }
+                    None => {}
                 }
                 let text = self.name(name).to_string();
-                if let Some(target) = prelude::builtin_type(&text) {
-                    return self.conversion(id, target, args, span);
+                if let Some(help) = self.std_help(name) {
+                    let message = format!("cannot find the function `{text}`");
+                    self.error(callee_expr.span, message).help = Some(help);
+                    return self.skip_args(args);
                 }
-                if text == "print" || text == "eprint" {
-                    return self.print_call(id, text == "eprint", args);
-                }
-                if text == "measure" {
-                    return self.measure_fn(id, args, span);
-                }
-                if text == "amplitudes" {
-                    return self.amplitudes_fn(id, args, span);
-                }
-                if text == "fft" || text == "ifft" {
-                    return self.fourier_fn(id, text == "ifft", args, span);
-                }
-                if let Some((builtin, sig)) = prelude::function(&mut self.t.types, &text) {
-                    self.t.callees[id.index()] = Some(Callee::Builtin(builtin));
-                    return self.check_args(&sig, None, args, span);
+                if let Some(ty) = self.builtin_call(id, &text, args, span) {
+                    return ty;
                 }
                 let message = if self.names(name, Ns::Type) {
                     format!("`{text}` is a struct; create one with `{text} {{ … }}`")
@@ -2440,10 +2487,14 @@ impl<'a> Checker<'a> {
                     let Ok(found) = self.path_fn(Some(module), *name, path_span) else {
                         return self.skip_args(args);
                     };
-                    if let Some(f) = found {
-                        let sig = self.t.fns[f.index()].sig.clone();
-                        self.t.callees[id.index()] = Some(Callee::Fn(f));
-                        return self.check_args(&sig, None, args, span);
+                    match found {
+                        Some(FnRef::Fn(f)) => return self.fn_call(id, f, args, span),
+                        Some(FnRef::Std(text)) => {
+                            if let Some(ty) = self.builtin_call(id, text, args, span) {
+                                return ty;
+                            }
+                        }
+                        None => {}
                     }
                     let message =
                         format!("cannot find the function `{}`", self.path_text(segments));

@@ -217,7 +217,7 @@ fn expectation_values_are_exact() {
     assert!((float("fn test() -> Float { <+| X(0) |+> }") - 1.0).abs() < 1e-12);
     assert!(float("fn test() -> Float { <+| Z(0) |+> }").abs() < 1e-12);
     let p11 = float(
-        "fn bell() -> [Qubit; 2] {\n let r = |+0>\n ctrl r[0] { r[1].x() }\n mv r\n}\nfn test() -> Float { <bell()| P(0, 1) * P(1, 1) |bell()> }",
+        "use std::observables::P\nfn bell() -> [Qubit; 2] {\n let r = |+0>\n ctrl r[0] { r[1].x() }\n mv r\n}\nfn test() -> Float { <bell()| P(0, 1) * P(1, 1) |bell()> }",
     );
     assert!((p11 - 0.5).abs() < 1e-12, "{p11}");
     let zz = float(
@@ -1113,7 +1113,9 @@ c[1] = measure q[1];"]
 
 #[test]
 fn amplitudes_need_a_simulator_that_holds_the_state() {
-    let program = compile("fn main() {\n let q = |+>\n print(amplitudes(q))\n mv q.discard()\n}");
+    let program = compile(
+        "use std::debug::amplitudes\nfn main() {\n let q = |+>\n print(amplitudes(q))\n mv q.discard()\n}",
+    );
     let sink = || Output {
         stdout: Box::new(std::io::sink()),
         stderr: Box::new(std::io::sink()),
@@ -1129,7 +1131,7 @@ fn amplitudes_need_a_simulator_that_holds_the_state() {
     );
     // Entangled with another qubit, a register has no state of its own.
     let program = compile(
-        "fn main() {\n let r = |+0>\n ctrl r[0] { r[1].x() }\n print(amplitudes(r[0]))\n print(mv r.measure())\n}",
+        "use std::debug::amplitudes\nfn main() {\n let r = |+0>\n ctrl r[0] { r[1].x() }\n print(amplitudes(r[0]))\n print(mv r.measure())\n}",
     );
     let error = run_main(&program, &Ketrs, 7, sink()).unwrap_err();
     assert!(error.message.contains("entangled"), "{}", error.message);

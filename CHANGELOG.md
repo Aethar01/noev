@@ -42,6 +42,9 @@ before 1.0.
 - A function without `rev` is reversible only inside its own module; elsewhere a call to it
   in reversible code or under `adj` is N013 or N014, with a note saying why. A function
   visible elsewhere that acts on qubits and is reversible only by inference gets a warning.
+- **Breaking:** the prelude no longer has `State` (now `std::state`), `amplitudes`
+  (`std::debug`), `fft` and `ifft` (`std::fourier`), or `P` and `PX` (`std::observables`).
+  Using one without its `use` is an error whose help gives the line to add.
 - Functions outside a package's root module are named by their path in the IR (`ansatz::ry_layer`,
   `qlib::flip`), and `fn main` is only the one in the root module.
 
