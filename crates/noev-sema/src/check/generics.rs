@@ -119,3 +119,54 @@ fn generic_code_knows_nothing_of_t() {
         ["`T` cannot be printed"]
     );
 }
+
+#[test]
+fn size_parameters() {
+    let count = "fn count<T, const N: Int>(xs: ref [T; N]) -> Int { N }\n";
+    ok(&format!(
+        "{count}fn f(r: [Qubit; 3]) -> Int {{ count(ref r) }}"
+    ));
+    // From the type expected, or given.
+    let fresh = "fn fresh<const N: Int>() -> [Qubit; N] { [|0>; N] }\n";
+    ok(&format!("{fresh}fn f() -> [Qubit; 2] {{ fresh() }}"));
+    ok(&format!(
+        "{fresh}fn f() -> [Qubit; 4] {{ let r = fresh::<4>()\n mv r }}"
+    ));
+    ok("struct Reg<const N: Int> { qs: [Qubit; N] }\nfn f() -> Reg<2> { Reg { qs: |01> } }");
+    assert_eq!(
+        errors(
+            "fn same<const N: Int>(a: [Int; N], b: [Int; N]) {}\nfn f() { same([1, 2], [1, 2, 3]) }"
+        ),
+        ["mismatched types: expected `[Int; 2]`, found `[Int; 3]`"]
+    );
+    assert_eq!(
+        errors("fn f<const N: Bool>() {}"),
+        ["a size parameter is an `Int`: `const N: Int`"]
+    );
+    assert_eq!(
+        errors("fn f(r: [Qubit; M]) {}"),
+        ["cannot find the size `M`; declare it with `const M: Int`"]
+    );
+    assert_eq!(
+        errors("fn f<const N: Int>(x: N) {}"),
+        ["`N` is a size, not a type"]
+    );
+    assert_eq!(
+        errors("struct Reg<const N: Int> { qs: [Qubit; N] }\nfn f(r: Reg<Int>) {}"),
+        ["`N` is a size, but `Int` is a type"]
+    );
+    assert_eq!(
+        errors(&format!("{SWAP}fn f() {{ let p = swap::<3>((1, 2)) }}")),
+        ["`T` is a type, but `3` is a size"]
+    );
+    assert_eq!(
+        errors("fn f<const N: Int, const N: Int>() {}"),
+        ["the parameter `N` is declared twice"]
+    );
+}
+
+#[test]
+fn the_type_expected_tells_type_arguments() {
+    ok("fn none<T>() -> Option<T> { None }\nfn f() -> Option<Int> { none() }");
+    ok("fn none<T>() -> Option<T> { None }\nfn f() { let x: Option<Bit> = none() }");
+}

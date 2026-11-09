@@ -76,6 +76,15 @@ before 1.0.
   `impl` (`Experiment` to `ExperimentResult`), and `x.measure()`, `measure(x)` and generic
   code with `T: Measure` measure it. Qubits implement it with the built-in measurement,
   and tuples and arrays of measurable types by measuring each element.
+- Size parameters: `const N: Int` on functions, structs and `impl`s, `[T; N]`, `N` as an
+  `Int` value and `[|0>; N]`. Sizes are inferred from arguments (`[Qubit; 4]` for
+  `[Qubit; N]`) or given (`fresh::<4>()`, `Reg<4>`), and each size gets its own copy.
+  Indices into a qubit array of length `N` are proven against `N` (N017, N018): `for i in
+  0..N - 1` proves `r[i + 1]` in range, and `N - 1 - i` is at least 0 inside `0..N`.
+- Type and size arguments that a call's arguments leave unknown are inferred from the type
+  expected of the call: `let r: [Qubit; 2] = fresh()`, `let x: Option<Int> = none()`.
+- An `impl` for a generic type (`impl<const N: Int> Measure for Reg<N>`) finds its own
+  associated types in its signatures.
 
 ### Tools
 

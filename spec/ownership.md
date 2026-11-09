@@ -376,8 +376,10 @@ time, with no runtime checks.
 ### Index facts
 
 Each index is put in linear form: a sum of integer variables times constants, plus a
-constant (`2*i + 1`, `j - 1`, `n - 1 - i`). Indices outside this form (`r[f(i)]`, `r[i * j]`)
-cannot be compared, except with an identical expression.
+constant (`2*i + 1`, `j - 1`, `n - 1 - i`). A size parameter `N` (`const N: Int`, see
+[types.md](types.md) §6) is a variable too, whose value each copy of the function fixes.
+Indices outside this form (`r[f(i)]`, `r[i * j]`, `r[N / 2]`) cannot be compared, except
+with an identical expression.
 
 The compiler knows these facts at each point in the program:
 
@@ -439,7 +441,10 @@ This analysis only concerns lending. Moving an element still requires a constant
 The same facts prove that indices are in range. Each variable's range comes from the facts,
 and the index's range follows from its linear form by interval arithmetic: with `i` in
 `0..3`, `2*i + 1` lies between 1 and 5. Indexing a qubit array (or any array
-containing qubits) must be proven in range at compile time; otherwise it is N018. Indexing a
+containing qubits) must be proven in range at compile time; otherwise it is N018. In an
+array of length `N`, a size parameter, an index is in range when the facts prove it at
+least 0 and less than `N`, as differences: `for i in 0..N - 1` proves `i + 1 < N`, and
+`r[0]` needs `assert 0 < N`, since `N` can be 0. Indexing a
 purely classical array that cannot be proven in range gets a runtime check instead (see
 [types.md](types.md) §2).
 

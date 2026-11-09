@@ -208,9 +208,9 @@ noev/
 │   ├── noev-sema/             # name resolution, type checker, ownership checker
 │   ├── noev-ir/               # quantum IR, lowering from AST
 │   ├── noev-runtime/          # interpreter, backend interface (ketrs), OpenQASM 3 output
-│   └── noev/                  # CLI binary: check / build / run, diagnostics rendering, language server
+│   └── noev/                  # CLI binary: check / build / run / export, diagnostics rendering, language server
 ├── editors/                   # tree-sitter-noev grammar, nvim support
-├── examples/                  # bell, hybrid, energy, qft, teleport
+├── examples/                  # bell, hybrid, energy, qft, teleport, clone
 ├── tests/
 │   ├── ui/                    # .nv programs + expected diagnostics (compile-fail and pass)
 │   └── run/                   # .nv programs + their exact expected output (deterministic by the language)
@@ -427,7 +427,7 @@ gets a compile-fail test under `tests/ui/`.
 | -- | ----------------------------- | -------------------------------------------------------------------- | ------- |
 | 1  | Per-file span offsets         | Spans address a source map of several files, so diagnostics name the file; needed by modules | ☑ Done: `noev_syntax::SourceMap`; the CLI still reads one file |
 | 2  | Modules and packages          | Files are modules, `use` imports, `pub` visibility, the prelude, `noev.toml` packages (`spec/modules.md`) | ☑ Done |
-| 3  | Traits and generics           | `trait`, `impl Trait for Type`, generic functions and types; generic code assumes values may be linear; `Copy` and `Measure`; `Option` and `Result` become ordinary generic enums (`spec/types.md` §6) | In progress: syntax, type parameters, `Copy`, generic structs and enums, inference, traits, `impl`s and monomorphisation done; generic traits, size parameters and inferred bounds to do; associated types and `Measure` done |
+| 3  | Traits and generics           | `trait`, `impl Trait for Type`, generic functions and types; generic code assumes values may be linear; `Copy` and `Measure`; `Option` and `Result` become ordinary generic enums (`spec/types.md` §6) | In progress: syntax, type parameters, `Copy`, generic structs and enums, inference, traits, `impl`s, monomorphisation, associated types, `Measure` and size parameters done; generic traits and inferred bounds to do |
 | 4  | Quantum integers              | Registers with reversible arithmetic, on generics and operator traits | ☐ |
 | 5  | `with`/`do` and release       | Compute–use–uncompute blocks, and automatic release of qubits proven to be in \|0⟩ (`spec/ownership.md` §9) | ☐ |
 | 6  | Lifetimes                     | Non-lexical lifetimes, explicit lifetimes, references in structs     | ☐ |

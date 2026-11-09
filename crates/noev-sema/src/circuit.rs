@@ -269,7 +269,7 @@ fn holds_quantum_or_ref(typed: &Typed, ty: Ty) -> bool {
     match types.kind(ty) {
         TyKind::Qubit | TyKind::Ref { .. } => true,
         TyKind::Tuple(elems) => elems.iter().any(|&t| holds_quantum_or_ref(typed, t)),
-        &TyKind::Array(elem, _) => holds_quantum_or_ref(typed, elem),
+        &TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _) => holds_quantum_or_ref(typed, elem),
         &TyKind::Struct(s) => types.structs[s.index()]
             .fields
             .iter()
@@ -347,7 +347,7 @@ fn holds_logic(typed: &Typed, ty: Ty) -> bool {
     match types.kind(ty) {
         _ if matches!(types.deref(ty), Ty::BIT | Ty::BOOL) => true,
         TyKind::Tuple(elems) => elems.iter().any(|&t| holds_logic(typed, t)),
-        &TyKind::Array(elem, _) => holds_logic(typed, elem),
+        &TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _) => holds_logic(typed, elem),
         &TyKind::Struct(s) => types.structs[s.index()]
             .fields
             .iter()
@@ -361,7 +361,7 @@ fn holds_logic(typed: &Typed, ty: Ty) -> bool {
 fn all_logic(types: &crate::ty::Types, ty: Ty) -> bool {
     match types.kind(ty) {
         TyKind::Bit | TyKind::Bool => true,
-        &TyKind::Array(elem, _) => all_logic(types, elem),
+        &TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _) => all_logic(types, elem),
         TyKind::Tuple(elems) => elems.iter().all(|&t| all_logic(types, t)),
         _ => false,
     }

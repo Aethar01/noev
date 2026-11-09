@@ -53,6 +53,9 @@ pub enum Res {
     Builtin(Builtin),
     /// A variant of an enum, as a value: `Basis::X`.
     Variant(StructId, u32),
+    /// A size parameter, as an `Int`: `N` in `for i in 0..N`. Its value is known in each
+    /// copy of the generic function.
+    Size(Ty),
 }
 
 /// What a call calls.
@@ -163,6 +166,10 @@ pub fn normalize(impls: &[ImplInfo], types: &mut Types, ty: Ty) -> Ty {
                         let result = part(types, elem);
                         return types.array(result, len);
                     }
+                    TyKind::SizedArray(elem, len) => {
+                        let result = part(types, elem);
+                        return types.sized_array(result, len);
+                    }
                     _ => {}
                 }
             }
@@ -198,6 +205,10 @@ pub fn normalize(impls: &[ImplInfo], types: &mut Types, ty: Ty) -> Ty {
         TyKind::Array(elem, len) => {
             let elem = normalize(impls, types, elem);
             types.array(elem, len)
+        }
+        TyKind::SizedArray(elem, len) => {
+            let elem = normalize(impls, types, elem);
+            types.sized_array(elem, len)
         }
         TyKind::Ref { mutable, inner } => {
             let inner = normalize(impls, types, inner);
@@ -1094,26 +1105,37 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Makes the type parameters of `generics`, written in the current module, reporting
-    /// what is not supported yet.
+    /// Makes the type and size parameters of `generics`, written in the current module.
     fn generic_params(&mut self, generics: Generics) -> Vec<(Symbol, Ty)> {
         let ast = self.ast;
         let mut params = Vec::new();
         for param in ast.list(generics.params) {
+            if params.iter().any(|&(n, _)| n == param.name) {
+                let message = format!(
+                    "the parameter `{}` is declared twice",
+                    self.name(param.name)
+                );
+                self.error(param.span, message);
+                continue;
+            }
             match param.kind {
-                GenericKind::Size { .. } => {
-                    self.error(param.span, "size parameters are not supported yet")
-                        .help = Some("see spec/types.md §6 for what is planned".into());
+                GenericKind::Size { ty } => {
+                    if self.resolve_type(ty) != Ty::INT {
+                        let span = ast.ty(ty).span;
+                        self.error(span, "a size parameter is an `Int`: `const N: Int`");
+                    }
+                    for pred in ast.list(generics.wheres) {
+                        if pred.name == param.name {
+                            let message = format!(
+                                "`{}` is a size, which takes no bounds",
+                                self.name(pred.name)
+                            );
+                            self.error(pred.span, message);
+                        }
+                    }
+                    params.push((param.name, self.t.types.size_param(param.name)));
                 }
                 GenericKind::Type { bounds } => {
-                    if params.iter().any(|&(n, _)| n == param.name) {
-                        let message = format!(
-                            "the type parameter `{}` is declared twice",
-                            self.name(param.name)
-                        );
-                        self.error(param.span, message);
-                        continue;
-                    }
                     let (mut copy, mut traits) = self.bounds_of(bounds);
                     let mut lists = vec![bounds];
                     for pred in ast.list(generics.wheres) {
@@ -1298,7 +1320,9 @@ impl<'a> Checker<'a> {
                     return !elems.is_empty()
                         && elems.iter().all(|&e| self.implements(e, trait_id));
                 }
-                &TyKind::Array(elem, _) => return self.implements(elem, trait_id),
+                &TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _) => {
+                    return self.implements(elem, trait_id);
+                }
                 _ => {}
             }
         }
@@ -1428,6 +1452,51 @@ impl<'a> Checker<'a> {
         };
     }
 
+    /// A type argument: a type, or a size (`4`, or a size parameter `N`).
+    fn resolve_type_arg(&mut self, id: TypeId) -> Ty {
+        let ast = self.ast;
+        match ast.ty(id).kind {
+            TypeKind::Size(n) => self.t.types.intern(TyKind::Size(n)),
+            TypeKind::Path(segments)
+                if let [name] = *ast.list(segments)
+                    && let Some(ty) = self.size_param(name) =>
+            {
+                ty
+            }
+            _ => self.resolve_type(id),
+        }
+    }
+
+    /// The size parameter `name` names here, if it names one.
+    fn size_param(&self, name: Symbol) -> Option<Ty> {
+        let &(_, ty) = self.type_params.iter().rev().find(|&&(n, _)| n == name)?;
+        self.t.types.is_size(ty).then_some(ty)
+    }
+
+    /// Reports each argument that is a size where its parameter is a type, or the reverse.
+    /// Returns whether there were none.
+    fn check_arg_kinds(&mut self, params: &[Ty], args: &[Ty], span: Span) -> bool {
+        let mut ok = true;
+        for (&p, &arg) in params.iter().zip(args) {
+            let types = &self.t.types;
+            if types.is_size(p) == types.is_size(arg) || types.is_wildcard(arg) {
+                continue;
+            }
+            let param = types.display(p, self.ast);
+            let message = if types.is_size(p) {
+                format!("`{param}` is a size, but {} is a type", self.show(arg))
+            } else {
+                format!(
+                    "`{param}` is a type, but `{}` is a size",
+                    types.display(arg, self.ast)
+                )
+            };
+            self.error(span, message);
+            ok = false;
+        }
+        ok
+    }
+
     fn resolve_type(&mut self, id: TypeId) -> Ty {
         let ast = self.ast;
         let node = ast.ty(id);
@@ -1450,11 +1519,17 @@ impl<'a> Checker<'a> {
                 let elem = self.resolve_type(elem);
                 match len {
                     Len::Int(len) => self.t.types.array(elem, len),
-                    Len::Param(_) => {
-                        self.error(node.span, "size parameters are not supported yet")
-                            .help = Some("see spec/types.md §6 for what is planned".into());
-                        Ty::ERROR
-                    }
+                    Len::Param(name) => match self.size_param(name) {
+                        Some(len) => self.t.types.sized_array(elem, len),
+                        None => {
+                            let message = format!(
+                                "cannot find the size `{0}`; declare it with `const {0}: Int`",
+                                self.name(name)
+                            );
+                            self.error(node.span, message);
+                            Ty::ERROR
+                        }
+                    },
                 }
             }
             TypeKind::Size(_) => {
@@ -1465,7 +1540,7 @@ impl<'a> Checker<'a> {
                 let args: Vec<Ty> = ast
                     .list(args)
                     .iter()
-                    .map(|&a| self.resolve_type(a))
+                    .map(|&a| self.resolve_type_arg(a))
                     .collect();
                 let name = self.path_text(path);
                 match (name.as_str(), args.as_slice()) {
@@ -1493,6 +1568,10 @@ impl<'a> Checker<'a> {
                                 if args.len() == 1 { "was" } else { "were" }
                             );
                             self.error(node.span, message);
+                            return Ty::ERROR;
+                        }
+                        let params = self.t.types.structs[template.index()].args.clone();
+                        if !self.check_arg_kinds(&params, &args, node.span) {
                             return Ty::ERROR;
                         }
                         let id = self.t.types.instantiate(template, args);
@@ -1528,6 +1607,10 @@ impl<'a> Checker<'a> {
                         return Ty::ERROR;
                     }
                     if let Some(ty) = self.path_type(at, *single, node.span) {
+                        if self.t.types.is_size(ty) {
+                            self.error(node.span, format!("`{name}` is a size, not a type"));
+                            return Ty::ERROR;
+                        }
                         if let TyKind::Struct(id) = *self.t.types.kind(ty)
                             && self.struct_params.contains_key(&id)
                             && Some(ty) != self.self_ty
@@ -2184,15 +2267,19 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Array(elems) => self.array_expr(elems, expect, expr.span),
             ExprKind::ArrayRepeat { value, count } => {
-                let elem_hint = expect.ty().and_then(|t| self.array_of(t)).map(|(e, _)| e);
+                let elem_hint = expect.ty().and_then(|t| self.t.types.elem_of(t));
                 let elem = self.expr(value, elem_hint.map_or(Expect::None, Expect::Hint));
                 self.expr(count, Expect::Ty(Ty::INT));
                 let len = match ast.expr(count).kind {
-                    ExprKind::Int(n) => n,
+                    ExprKind::Int(n) => self.t.types.intern(TyKind::Size(n)),
+                    _ if let Res::Size(size) = self.t.res[count.index()] => size,
                     _ => {
                         let span = ast.expr(count).span;
-                        self.error(span, "the length of an array must be an integer literal");
-                        0
+                        self.error(
+                            span,
+                            "the length of an array must be an integer literal or a size parameter",
+                        );
+                        Ty::ERROR
                     }
                 };
                 if self.t.types.linearity(elem) != crate::ty::Kind::Copyable
@@ -2206,7 +2293,7 @@ impl<'a> Checker<'a> {
                     .help =
                         Some("write the elements out, or repeat a ket such as `[|0>; 3]`".into());
                 }
-                self.t.types.array(elem, len)
+                self.t.types.sized_array(elem, len)
             }
             ExprKind::StructLit { path, fields } => self.struct_lit(path, fields, expr.span),
             ExprKind::Field { base, name } => {
@@ -2244,7 +2331,7 @@ impl<'a> Checker<'a> {
                 let base_ty = self.expr(base, Expect::None);
                 self.expr(index, Expect::Ty(Ty::INT));
                 let ty = self.t.types.deref(base_ty);
-                if let Some((elem, _)) = self.array_of(ty) {
+                if let Some(elem) = self.t.types.elem_of(ty) {
                     return elem;
                 }
                 if !self.t.types.is_wildcard(ty) {
@@ -2521,6 +2608,10 @@ impl<'a> Checker<'a> {
             self.t.res[id.index()] = Res::Local(local);
             return self.t.local(local).ty;
         }
+        if let Some(size) = self.size_param(name) {
+            self.t.res[id.index()] = Res::Size(size);
+            return Ty::INT;
+        }
         let text = self.name(name).to_string();
         let message = if self.names(name, Ns::Value) {
             format!("`{text}` is a function; call it with `{text}(…)`")
@@ -2604,6 +2695,14 @@ impl<'a> Checker<'a> {
                 a.iter().zip(b.iter()).all(|(&w, &f)| self.bind_param(w, f))
             }
             (TyKind::Array(w, n), TyKind::Array(f, m)) if n == m => self.bind_param(w, f),
+            (TyKind::SizedArray(w, n), TyKind::SizedArray(f, m)) => {
+                self.bind_param(w, f) && self.bind_param(n, m)
+            }
+            // `[Qubit; 4]` given for `[Qubit; N]`: `N` is 4.
+            (TyKind::SizedArray(w, n), TyKind::Array(f, m)) => {
+                let m = self.t.types.intern(TyKind::Size(m));
+                self.bind_param(w, f) && self.bind_param(n, m)
+            }
             (TyKind::Distribution(w), TyKind::Distribution(f)) => self.bind_param(w, f),
             (
                 TyKind::Ref {
@@ -2964,7 +3063,7 @@ impl<'a> Checker<'a> {
 
     fn array_expr(&mut self, elems: List<ExprId>, expect: Expect, span: Span) -> Ty {
         let elems = self.ast.list(elems);
-        let wanted = expect.ty().and_then(|t| self.array_of(t)).map(|(e, _)| e);
+        let wanted = expect.ty().and_then(|t| self.t.types.elem_of(t));
         let Some((&first, rest)) = elems.split_first() else {
             return match wanted {
                 Some(elem) => self.t.types.array(elem, 0),
@@ -3540,7 +3639,18 @@ impl<'a> Checker<'a> {
 // Calls.
 impl<'a> Checker<'a> {
     /// A call of the program's function `f`, through the path `callee`.
-    fn fn_call(&mut self, id: ExprId, callee: ExprId, f: FnId, args: &[ExprId], span: Span) -> Ty {
+    /// A call of `f`, whose type is `expect`ed to be one, if any: what the arguments leave
+    /// unknown of its type arguments, the type expected can tell (`let r: [Qubit; 4] =
+    /// fresh()`).
+    fn fn_call(
+        &mut self,
+        id: ExprId,
+        callee: ExprId,
+        f: FnId,
+        args: &[ExprId],
+        expect: Expect,
+        span: Span,
+    ) -> Ty {
         let sig = self.t.fns[f.index()].sig.clone();
         self.t.callees[id.index()] = Some(Callee::Fn(f));
         let generics = self.t.fns[f.index()].generics.clone();
@@ -3556,6 +3666,10 @@ impl<'a> Checker<'a> {
         let given = self.given_args(&generics, &given, callee);
         let found = self.infer(&generics, given, |this| {
             this.check_args(&sig, None, args, span);
+            if let Some(want) = expect.ty() {
+                // A mismatch is reported where the call's type is compared.
+                this.bind_param(sig.ret, want);
+            }
         });
         let type_args = self.settle(&generics, found, "call", self.ast.expr(callee).span);
         self.check_bounds(&generics, &type_args, &name, span);
@@ -3582,7 +3696,16 @@ impl<'a> Checker<'a> {
             );
             self.error(span, message);
         }
-        let mut args: Vec<Option<Ty>> = given.iter().map(|&t| Some(self.resolve_type(t))).collect();
+        let span = self.ast.expr(callee).span;
+        let mut args: Vec<Option<Ty>> = Vec::new();
+        for (i, &t) in given.iter().enumerate() {
+            let arg = self.resolve_type_arg(t);
+            // One of the wrong kind is reported, and the argument inferred instead.
+            let fits = generics
+                .get(i)
+                .is_none_or(|&p| self.check_arg_kinds(&[p], &[arg], span));
+            args.push(fits.then_some(arg));
+        }
         args.resize(generics.len(), None);
         args
     }
@@ -3612,6 +3735,7 @@ impl<'a> Checker<'a> {
         callee: ExprId,
         name: Symbol,
         args: &[ExprId],
+        expect: Expect,
         span: Span,
     ) -> Ty {
         let callee_expr = *self.ast.expr(callee);
@@ -3625,7 +3749,7 @@ impl<'a> Checker<'a> {
             return self.skip_args(args);
         };
         match found {
-            Some(FnRef::Fn(f)) => return self.fn_call(id, callee, f, args, span),
+            Some(FnRef::Fn(f)) => return self.fn_call(id, callee, f, args, expect, span),
             Some(FnRef::Std(text)) => {
                 if let Some(ty) = self.builtin_call(id, text, args, span) {
                     return ty;
@@ -3663,7 +3787,7 @@ impl<'a> Checker<'a> {
         let callee_expr = *ast.expr(callee);
         let args = ast.list(args);
         match callee_expr.kind {
-            ExprKind::Name(name) => self.name_call(id, callee, name, args, span),
+            ExprKind::Name(name) => self.name_call(id, callee, name, args, expect, span),
             ExprKind::Path(segments) => {
                 let path_span = callee_expr.span;
                 let Some((at, rest)) = self.qualify(segments, path_span) else {
@@ -3672,7 +3796,7 @@ impl<'a> Checker<'a> {
                 if let ([name], None) = (rest, at) {
                     // `swap::<Int>`: a path only for its arguments.
                     if !BARE_VARIANTS.contains(&self.name(*name)) {
-                        return self.name_call(id, callee, *name, args, span);
+                        return self.name_call(id, callee, *name, args, expect, span);
                     }
                     return self.bare_call(id, *name, args, expect, span);
                 }
@@ -3681,7 +3805,9 @@ impl<'a> Checker<'a> {
                         return self.skip_args(args);
                     };
                     match found {
-                        Some(FnRef::Fn(f)) => return self.fn_call(id, callee, f, args, span),
+                        Some(FnRef::Fn(f)) => {
+                            return self.fn_call(id, callee, f, args, expect, span);
+                        }
                         Some(FnRef::Std(text)) => {
                             if let Some(ty) = self.builtin_call(id, text, args, span) {
                                 return ty;
@@ -4268,6 +4394,10 @@ impl<'a> Checker<'a> {
                 let elem = self.measured_type(elem)?;
                 Ok(self.t.types.array(elem, len))
             }
+            TyKind::SizedArray(elem, len) => {
+                let elem = self.measured_type(elem)?;
+                Ok(self.t.types.sized_array(elem, len))
+            }
             TyKind::Tuple(elems) => {
                 let elems = elems
                     .iter()
@@ -4444,21 +4574,19 @@ impl<'a> Checker<'a> {
             });
             return self.resolve_assoc(ret);
         }
-        match (ty, self.array_of(ty)) {
-            (Ty::QUBIT, _) => Ty::BIT,
-            (_, Some((Ty::QUBIT, len))) => self.t.types.array(Ty::BIT, len),
-            _ if self.t.types.is_wildcard(ty) => Ty::ERROR,
-            _ => {
-                let message = format!(
-                    "`measure` takes a qubit or an array of qubits, but this is {}",
-                    self.show(ty)
-                );
-                let span = self.ast.expr(arg).span;
-                self.error(span, message).help =
-                    Some("a type of your own can measure with an `impl` of `Measure`".into());
-                Ty::ERROR
-            }
+        if let Some(bits) = self.t.types.measured(ty) {
+            return bits;
         }
+        if !self.t.types.is_wildcard(ty) {
+            let message = format!(
+                "`measure` takes a qubit or an array of qubits, but this is {}",
+                self.show(ty)
+            );
+            let span = self.ast.expr(arg).span;
+            self.error(span, message).help =
+                Some("a type of your own can measure with an `impl` of `Measure`".into());
+        }
+        Ty::ERROR
     }
 }
 

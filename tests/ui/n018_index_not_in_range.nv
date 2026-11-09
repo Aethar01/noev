@@ -13,3 +13,14 @@ fn unchecked_parameter(i: Int) -> [Bit; 4] {
     r[i].h()                        //~ N018
     mv r.measure()
 }
+
+// A size parameter's value is only known in each copy, so indices are proven against `N`.
+fn sized_ladder<const N: Int>(r: mut [Qubit; N]) {
+    for i in 0..N {
+        ctrl r[i] { r[i + 1].x() }  //~ N018
+    }
+}
+
+fn sized_first<const N: Int>(r: mut [Qubit; N]) {
+    r[0].h()                        //~ N018
+}

@@ -73,6 +73,11 @@ pub enum TyKind {
     Tuple(Box<[Ty]>),
     /// `[T; N]`.
     Array(Ty, u64),
+    /// `[T; N]` for a size parameter `N`, inside generic code: an array whose length is
+    /// known in each copy (`spec/types.md` §6).
+    SizedArray(Ty, Ty),
+    /// A size given as a type argument: the `4` of `Reg<4>`.
+    Size(u64),
     /// `Distribution<T>`.
     Distribution(Ty),
     /// A struct.
@@ -120,6 +125,8 @@ pub struct ParamDef {
     /// Whether it is `T: Copy`: its values can be copied and dropped. Otherwise they
     /// are treated like qubits.
     pub copy: bool,
+    /// Whether it is a size parameter, `const N: Int`, rather than a type.
+    pub size: bool,
 }
 
 /// Whether values of a type can be copied and dropped (`spec/types.md` §5).
@@ -353,6 +360,10 @@ impl Types {
         if let Some(ty) = basic(&kind).or_else(|| self.map.get(&kind).copied()) {
             return ty;
         }
+        // An array's length is a size, which an `impl` for `[T; N]` can match.
+        if let TyKind::Array(_, len) = kind {
+            self.intern(TyKind::Size(len));
+        }
         let ty = Ty(u32::try_from(self.kinds.len()).expect("fewer than 2³² types"));
         self.kinds.push(kind.clone());
         self.map.insert(kind, ty);
@@ -387,8 +398,49 @@ impl Types {
     /// A new type parameter, and its type.
     pub fn param(&mut self, name: Symbol, copy: bool) -> Ty {
         let id = ParamId(u32::try_from(self.params.len()).expect("fewer than 2³² parameters"));
-        self.params.push(ParamDef { name, copy });
+        self.params.push(ParamDef {
+            name,
+            copy,
+            size: false,
+        });
         self.intern(TyKind::Param(id))
+    }
+
+    /// A new size parameter, `const N: Int`, and its type.
+    pub fn size_param(&mut self, name: Symbol) -> Ty {
+        let id = ParamId(u32::try_from(self.params.len()).expect("fewer than 2³² parameters"));
+        self.params.push(ParamDef {
+            name,
+            copy: true,
+            size: true,
+        });
+        self.intern(TyKind::Param(id))
+    }
+
+    /// Whether `ty` is a size: a size parameter, or a size given as an argument.
+    pub fn is_size(&self, ty: Ty) -> bool {
+        match *self.kind(ty) {
+            TyKind::Size(_) => true,
+            TyKind::Param(p) => self.params[p.index()].size,
+            _ => false,
+        }
+    }
+
+    /// `[elem; len]` for a size `len`: a fixed length, or a size parameter.
+    pub fn sized_array(&mut self, elem: Ty, len: Ty) -> Ty {
+        match *self.kind(len) {
+            TyKind::Size(n) => self.array(elem, n),
+            _ if self.is_wildcard(len) || self.is_wildcard(elem) => Ty::ERROR,
+            _ => self.intern(TyKind::SizedArray(elem, len)),
+        }
+    }
+
+    /// The element type of an array, whether or not its length is known.
+    pub fn elem_of(&self, ty: Ty) -> Option<Ty> {
+        match *self.kind(ty) {
+            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) => Some(elem),
+            _ => None,
+        }
     }
 
     /// The type parameter `ty` is, if it is one.
@@ -481,6 +533,11 @@ impl Types {
                 let elem = self.subst(elem, from, to);
                 self.array(elem, len)
             }
+            TyKind::SizedArray(elem, len) => {
+                let elem = self.subst(elem, from, to);
+                let len = self.subst(len, from, to);
+                self.sized_array(elem, len)
+            }
             TyKind::Distribution(elem) => {
                 let elem = self.subst(elem, from, to);
                 self.intern(TyKind::Distribution(elem))
@@ -525,7 +582,7 @@ impl Types {
     pub fn is_measurable(&self, ty: Ty) -> bool {
         match *self.kind(ty) {
             TyKind::Qubit => true,
-            TyKind::Array(elem, _) => elem == Ty::QUBIT,
+            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) => elem == Ty::QUBIT,
             _ => false,
         }
     }
@@ -535,6 +592,9 @@ impl Types {
         match *self.kind(ty) {
             TyKind::Qubit => Some(Ty::BIT),
             TyKind::Array(elem, len) if elem == Ty::QUBIT => Some(self.array(Ty::BIT, len)),
+            TyKind::SizedArray(elem, len) if elem == Ty::QUBIT => {
+                Some(self.sized_array(Ty::BIT, len))
+            }
             _ => None,
         }
     }
@@ -548,7 +608,9 @@ impl Types {
                 base, copy: false, ..
             } => self.quantum_param(*base),
             TyKind::Tuple(elems) => elems.iter().find_map(|&t| self.quantum_param(t)),
-            TyKind::Array(elem, _) | TyKind::Distribution(elem) => self.quantum_param(*elem),
+            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) | TyKind::Distribution(elem) => {
+                self.quantum_param(*elem)
+            }
             TyKind::Ref { inner, .. } => self.quantum_param(*inner),
             TyKind::Struct(id) => self.structs[id.index()]
                 .args
@@ -577,7 +639,9 @@ impl Types {
                 Some(earlier) => earlier == ty,
             };
         }
-        if pattern == ty {
+        // The same type matches, but its parameters must still be bound, to themselves: an
+        // `impl` for `Reg<N>` matched against `Reg<N>` in its own body.
+        if pattern == ty && !self.has_params(pattern) {
             return true;
         }
         match (self.kind(pattern), self.kind(ty)) {
@@ -587,6 +651,15 @@ impl Types {
                 .all(|(&p, &t)| self.match_params(p, t, params, found)),
             (TyKind::Array(p, n), TyKind::Array(t, m)) if n == m => {
                 self.match_params(*p, *t, params, found)
+            }
+            (TyKind::SizedArray(p, n), TyKind::SizedArray(t, m)) => {
+                self.match_params(*p, *t, params, found) && self.match_params(*n, *m, params, found)
+            }
+            (&TyKind::SizedArray(p, n), &TyKind::Array(t, m)) => {
+                let m = self
+                    .find(&TyKind::Size(m))
+                    .expect("interned with the array");
+                self.match_params(p, t, params, found) && self.match_params(n, m, params, found)
             }
             (TyKind::Distribution(p), TyKind::Distribution(t)) => {
                 self.match_params(*p, *t, params, found)
@@ -636,6 +709,7 @@ impl Types {
             TyKind::Assoc { base, .. } => self.has_params(*base),
             TyKind::Tuple(elems) => elems.iter().any(|&t| self.has_params(t)),
             TyKind::Array(elem, _) | TyKind::Distribution(elem) => self.has_params(*elem),
+            TyKind::SizedArray(..) => true,
             TyKind::Ref { inner, .. } => self.has_params(*inner),
             TyKind::Struct(id) => self.structs[id.index()]
                 .args
@@ -683,7 +757,9 @@ impl Types {
             TyKind::Assoc { .. } => Kind::Linear,
             TyKind::Ref { mutable: true, .. } => Kind::Affine,
             TyKind::Tuple(elems) => combine(&mut elems.iter().copied()),
-            TyKind::Array(elem, _) => self.linearity_at(*elem, depth + 1),
+            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) => {
+                self.linearity_at(*elem, depth + 1)
+            }
             TyKind::Struct(id) => {
                 let def = &self.structs[id.index()];
                 let variants = def.variants.iter().flatten().flat_map(|v| v.data.iter());
@@ -705,6 +781,7 @@ impl Types {
         match self.kind(ty) {
             TyKind::Qubit => true,
             TyKind::Array(elem, len) => *len > 0 && self.pure_quantum_at(*elem, depth + 1),
+            TyKind::SizedArray(elem, _) => self.pure_quantum_at(*elem, depth + 1),
             TyKind::Tuple(elems) => {
                 !elems.is_empty() && elems.iter().all(|&t| self.pure_quantum_at(t, depth + 1))
             }
@@ -742,7 +819,9 @@ impl Types {
             TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Bit | TyKind::String => true,
             _ if ty.is_number() || ty.is_complex() => true,
             // Element by element: `m == [0, 1]` for measured bits.
-            TyKind::Array(elem, _) => self.comparable_at(elem, depth + 1),
+            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) => {
+                self.comparable_at(elem, depth + 1)
+            }
             TyKind::Tuple(ref elems) => elems.iter().all(|&t| self.comparable_at(t, depth + 1)),
             TyKind::Struct(id) => match &self.structs[id.index()].variants {
                 Some(variants) => variants
@@ -817,6 +896,14 @@ impl Types {
                 }
             }
             TyKind::Array(elem, len) => format!("[{}; {len}]", self.display(*elem, ast)),
+            TyKind::SizedArray(elem, len) => {
+                format!(
+                    "[{}; {}]",
+                    self.display(*elem, ast),
+                    self.display(*len, ast)
+                )
+            }
+            TyKind::Size(n) => n.to_string(),
             TyKind::Distribution(elem) => format!("Distribution<{}>", self.display(*elem, ast)),
             TyKind::Struct(id) => {
                 let def = &self.structs[id.index()];

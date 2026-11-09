@@ -14,7 +14,7 @@ use noev_syntax::ast::*;
 use noev_syntax::{Diagnostic, Severity, Span, Symbol};
 
 use crate::check::{Adjust, Callee, LocalId, Res, Typed};
-use crate::facts::{self, Fact, Linear};
+use crate::facts::{self, Fact, Linear, Var};
 use crate::prelude::{Builtin, Reversible};
 use crate::ty::{Kind, Ty, TyKind};
 
@@ -824,10 +824,7 @@ impl Owner<'_> {
                 }
             }
             PatKind::Array(pats) => {
-                let elem = match *types.kind(ty) {
-                    TyKind::Array(elem, _) => elem,
-                    _ => Ty::ERROR,
-                };
+                let elem = types.elem_of(ty).unwrap_or(Ty::ERROR);
                 for &p in self.ast.list(pats) {
                     self.bind(p, elem, poisoned, bound);
                 }
@@ -2024,33 +2021,58 @@ impl Owner<'_> {
 
     /// N018: indices into arrays containing qubits must be proven in range.
     fn check_bounds(&mut self, base: ExprId, index: ExprId) {
-        let array = self.typed.types.deref(self.typed.ty(base));
-        let TyKind::Array(elem, len) = *self.typed.types.kind(array) else {
-            return;
+        let types = &self.typed.types;
+        let array = types.deref(self.typed.ty(base));
+        // The length: a number, or a size parameter, whose value only each copy knows.
+        let (elem, len, size) = match *types.kind(array) {
+            TyKind::Array(elem, len) => (elem, i64::try_from(len).unwrap_or(i64::MAX), None),
+            TyKind::SizedArray(elem, size) => (elem, i64::MAX, Some(size)),
+            _ => return,
         };
-        if self.typed.types.linearity(elem) != Kind::Linear {
+        if types.linearity(elem) != Kind::Linear {
             return;
         }
-        let len = i64::try_from(len).unwrap_or(i64::MAX);
+        let form = facts::linear(self.ast, self.typed, index);
+        let (lo, hi) = match &form {
+            Some(form) => facts::interval(&self.facts, form),
+            None => (None, None),
+        };
+        let below = match (size, &form) {
+            (None, _) => hi.is_some_and(|hi| hi < len),
+            (Some(size), Some(form)) => facts::below(&self.facts, form, &facts::size_form(size)),
+            (Some(_), None) => false,
+        };
+        // At least zero: by its interval, or, against a size, by its difference (`N - 1 - i`).
+        let at_least_zero = lo.is_some_and(|lo| lo >= 0)
+            || below
+                && form
+                    .as_ref()
+                    .is_some_and(|f| facts::below(&self.facts, &facts::constant_form(-1), f));
+        if below && at_least_zero {
+            return;
+        }
+        let lo = if at_least_zero { lo.max(Some(0)) } else { lo };
         let span = self.ast.expr(index).span;
         let text = self.expr_text(index);
         let array_text = self.expr_text(base);
-        let (lo, hi) = match facts::linear(self.ast, self.typed, index) {
-            Some(form) => facts::interval(&self.facts, &form),
-            None => (None, None),
-        };
+        let len_text = size.map_or(len.to_string(), |size| types.display(size, self.ast));
+        let len = len_text.as_str();
         let message = match (lo, hi) {
-            (Some(lo), Some(hi)) if lo >= 0 && hi < len => return,
             (Some(lo), _) if lo < 0 => {
                 format!("`{text}` can be {lo}, outside `{array_text}` (length {len})")
             }
-            (_, Some(hi)) if hi >= len => {
+            (_, Some(hi)) if size.is_none() && !below => {
                 format!("`{text}` can be {hi}, outside `{array_text}` (length {len})")
             }
             _ => format!("cannot prove `{text}` is within `{array_text}` (length {len})"),
         };
+        let condition = if lo.is_some_and(|lo| lo >= 0) {
+            format!("{text} < {len}")
+        } else {
+            format!("0 <= {text} and {text} < {len}")
+        };
         self.error("N018", span, message).help = Some(format!(
-            "loop over a range that fits, or `assert 0 <= {text} and {text} < {len}`"
+            "loop over a range that fits, or `assert {condition}`"
         ));
     }
 
@@ -2087,7 +2109,7 @@ impl Owner<'_> {
                     types.structs[s.index()].fields[*i as usize].1
                 }
                 (TyKind::Tuple(elems), Proj::Field(i)) => elems[*i as usize],
-                (&TyKind::Array(elem, _), Proj::Index(_)) => elem,
+                (&TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _), Proj::Index(_)) => elem,
                 _ => return Ty::ERROR,
             };
         }
@@ -2380,7 +2402,7 @@ impl Owner<'_> {
                     text.push_str(&format!(".{i}"));
                     ty = elems[*i as usize];
                 }
-                (&TyKind::Array(elem, _), Proj::Index(index)) => {
+                (&TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _), Proj::Index(index)) => {
                     let index = index
                         .as_ref()
                         .map_or("…".to_string(), |f| self.linear_text(f));
@@ -2396,8 +2418,11 @@ impl Owner<'_> {
     /// A linear form written out, such as `3 - i` or `2 * i + 1`.
     fn linear_text(&self, form: &Linear) -> String {
         let mut text = String::new();
-        for &(local, coeff) in form.terms() {
-            let name = self.name(local);
+        for &(var, coeff) in form.terms() {
+            let name = match var {
+                Var::Local(local) => self.name(local),
+                Var::Size(size) => &self.typed.types.display(size, self.ast),
+            };
             let (sign, magnitude) = if coeff < 0 {
                 ("-", -coeff)
             } else {

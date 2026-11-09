@@ -1036,6 +1036,14 @@ impl Builder<'_> {
         let expr = *ast.expr(id);
         let adjust = self.typed.adjust[id.index()];
         match expr.kind {
+            // A size parameter: its value in this copy.
+            ExprKind::Name(_) if let Res::Size(size) = self.typed.res[id.index()] => {
+                let size = self.subst(size);
+                let TyKind::Size(n) = *self.types.kind(size) else {
+                    unreachable!("a size parameter is a size in each copy");
+                };
+                return Operand::Const(Const::Int(n as i64));
+            }
             ExprKind::Int(v) if self.ty(id) == Ty::BIT => {
                 return Operand::Const(Const::Bit(v == 1));
             }
@@ -1307,8 +1315,12 @@ impl Builder<'_> {
                 let ops: Vec<Operand> = ast.list(elems).iter().map(|&e| self.operand(e)).collect();
                 self.set(&dest, Rvalue::Aggregate(ops));
             }
-            ExprKind::ArrayRepeat { value, count } => {
-                let ExprKind::Int(count) = ast.expr(count).kind else {
+            ExprKind::ArrayRepeat { value, .. } => {
+                // The length, from the type: a literal, or a size parameter's in this copy.
+                let TyKind::Array(_, count) = *({
+                    let ty = self.ty(id);
+                    self.types.kind(ty)
+                }) else {
                     return;
                 };
                 if let ExprKind::Ket { parts, .. } = ast.expr(value).kind {

@@ -496,7 +496,9 @@ impl Program {
             }
             // Lowering replaces every type parameter and resolves every associated type; this
             // is only reached by a bug.
-            TyKind::Param(_) | TyKind::Assoc { .. } => "{parameter}".into(),
+            TyKind::Param(_) | TyKind::Assoc { .. } | TyKind::SizedArray(..) | TyKind::Size(_) => {
+                "{parameter}".into()
+            }
         }
     }
 }

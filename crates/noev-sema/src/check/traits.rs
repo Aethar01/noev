@@ -263,3 +263,14 @@ fn measure_by_parts() {
         "{e}fn f<T: Measure>(x: T) -> T::Result {{ mv x.measure() }}\nfn g(p: (E, [Qubit; 2])) -> (R, [Bit; 2]) {{ f(p) }}"
     ));
 }
+
+#[test]
+fn impls_over_sizes() {
+    ok("trait Width { fn width(ref self) -> Int }\n\
+        impl<const N: Int> Width for [Qubit; N] { fn width(ref self) -> Int { N } }\n\
+        fn f(r: [Qubit; 3]) -> Int { r.width() }");
+    ok("struct Reg<const N: Int> { qs: [Qubit; N] }\n\
+        impl<const N: Int> Measure for Reg<N> {\n type Result = [Bit; N]\n \
+        fn measure(mv self) -> [Bit; N] { mv self.qs.measure() }\n}\n\
+        fn f(r: Reg<4>) -> [Bit; 4] { measure(mv r) }");
+}

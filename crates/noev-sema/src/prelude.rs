@@ -338,15 +338,15 @@ pub fn method(types: &mut Types, base: Ty, name: &str) -> Option<(Builtin, Sig)>
                 Sig::new(Some(OwnKind::Mut), params, self_mut, Yes),
             ))
         }
-        TyKind::Array(elem, len) if elem == Ty::QUBIT && name == "measure" => {
-            let bits = types.array(Ty::BIT, len);
+        TyKind::Array(Ty::QUBIT, _) | TyKind::SizedArray(Ty::QUBIT, _) if name == "measure" => {
+            let bits = types.measured(base)?;
             Some((
                 Builtin::Measure,
                 Sig::new(Some(OwnKind::Mv), vec![], bits, No),
             ))
         }
-        TyKind::Array(elem, len) if elem == Ty::QUBIT && name == "measure_in" => {
-            let bits = types.array(Ty::BIT, len);
+        TyKind::Array(Ty::QUBIT, _) | TyKind::SizedArray(Ty::QUBIT, _) if name == "measure_in" => {
+            let bits = types.measured(base)?;
             Some((
                 Builtin::MeasureIn,
                 Sig::new(Some(OwnKind::Mv), vec![types.basis?], bits, No),

@@ -338,9 +338,9 @@ where it matters: any place a linear value changes hands has an explicit `mv`.
 Status: **Implemented** for type parameters of functions, structs and enums, bounds (`Copy`
 and traits), inference of type arguments, `::<…>`, traits without type parameters,
 associated types (with `Copy` as their only bound), `impl`s (generic ones too) and
-monomorphisation, `Trait::f(x)`, and `Measure` (for qubits, and tuples and arrays of
-measurable types). Not implemented yet: size parameters, generic
-traits, and bounds inferred from bodies. The syntax is in [grammar.md](grammar.md) §2.
+monomorphisation, `Trait::f(x)`, `Measure` (for qubits, and tuples and arrays of
+measurable types), and size parameters. Not implemented yet: generic traits, and bounds
+inferred from bodies. The syntax is in [grammar.md](grammar.md) §2.
 
 ### Generic parameters
 
@@ -361,10 +361,15 @@ struct Pair<T, U> {
 ```
 
 - A size parameter, `const N: Int`, is a non-negative `Int` known when the program is
-  compiled, so `[T; N]` is an array of fixed length. Sizes are only names for now: arithmetic
-  such as `[Qubit; N + 1]` is not allowed yet.
-- Type and size arguments are inferred where the function is called, or given after `::`:
-  `swap::<Int>((1, 2))`, `qft::<8>(mut r)`.
+  compiled, so `[T; N]` is an array of fixed length. In the body, `N` is also an `Int`
+  value (`for i in 0..N`), and `[|0>; N]` makes an array of that length. Sizes are only
+  names in types for now: arithmetic such as `[Qubit; N + 1]` is not allowed yet. Indices
+  into a qubit array of length `N` are proven against `N` ([ownership.md](ownership.md)
+  §10).
+- Type and size arguments are inferred where the function is called, from its arguments
+  and then from the type expected of the call (`let r: [Qubit; 4] = fresh()`), or given
+  after `::`: `swap::<Int>((1, 2))`, `qft::<8>(mut r)`. A struct's are given or inferred
+  the same way: `Reg<4>`, or `Reg { qs: |0110> }`.
 
 ### What generic code can do with a value
 

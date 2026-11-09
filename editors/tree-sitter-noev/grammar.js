@@ -98,7 +98,7 @@ module.exports = grammar({
         '}',
       ),
 
-    // `<T: Classical + Measure<Result = Bit>, const N: Int>` (spec/types.md §6).
+    // `<T: Copy + Measure<Result = Bit>, const N: Int>` (spec/types.md §6).
     type_parameters: ($) =>
       seq('<', sepBy(',', choice($.type_parameter, $.size_parameter)), '>'),
 

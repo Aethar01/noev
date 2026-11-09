@@ -1,0 +1,38 @@
+// Size parameters (spec/types.md §6): inferred from arguments and the type expected, given
+// with `::<…>`, used as values, in generic structs and impls, and inverted with `adj`.
+
+fn count<T, const N: Int>(xs: ref [T; N]) -> Int { N }
+
+fn fresh<const N: Int>() -> [Qubit; N] { [|0>; N] }
+
+rev fn ladder<const N: Int>(r: mut [Qubit; N]) {
+    for i in 0..N - 1 {
+        ctrl r[i] { r[i + 1].x() }
+    }
+}
+
+trait Width { fn width(ref self) -> Int }
+impl<const N: Int> Width for [Qubit; N] { fn width(ref self) -> Int { N } }
+
+struct Reg<const N: Int> { qs: [Qubit; N] }
+impl<const N: Int> Measure for Reg<N> {
+    type Result = [Bit; N]
+    fn measure(mv self) -> [Bit; N] { mv self.qs.measure() }
+}
+
+fn main() {
+    let a = [1, 2, 3]
+    print(count(ref a))
+    let s: [Qubit; 2] = fresh()
+    print(mv s.measure())
+    let r = fresh::<4>()
+    r[0].x()
+    ladder(mut r)
+    print("{r.width()} {mv r.measure()}")
+    let t = |100>
+    ladder(mut t)
+    adj ladder(mut t)
+    print(mv t.measure())
+    let g = Reg { qs: |0110> }
+    print(measure(mv g))
+}
