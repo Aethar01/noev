@@ -98,6 +98,9 @@ pub struct FnInfo {
     pub self_local: Option<LocalId>,
     /// The receiver's type (`Self`, `ref Self` or `mut Self`), for methods.
     pub receiver_ty: Option<Ty>,
+    /// Its type parameters: for a method, its struct's first, then its own. Empty if it is
+    /// not generic.
+    pub generics: Vec<Ty>,
 }
 
 /// Everything the type checker learned about a program.
@@ -131,6 +134,10 @@ pub struct Typed {
     pub main: Option<FnId>,
     /// The module each function is in, methods included, indexed by [`FnId::index`].
     pub fn_modules: Vec<ModuleId>,
+    /// The type arguments of each call of a generic function or method, in the order of
+    /// [`FnInfo::generics`], by the call's expression. They can mention the calling
+    /// function's own type parameters.
+    pub type_args: FxHashMap<ExprId, Vec<Ty>>,
 }
 
 /// The block of a `sample` expression, which is run separately from the code around it.
@@ -223,6 +230,9 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         aliases: FxHashMap::default(),
         alias_types: FxHashMap::default(),
         resolving_aliases: Vec::new(),
+        type_params: Vec::new(),
+        struct_params: FxHashMap::default(),
+        inference: Vec::new(),
     };
     checker.collect();
     checker.check_bodies();
@@ -260,14 +270,26 @@ struct Checker<'a> {
     lent_bindings: Option<bool>,
     /// While checking the operand of `-`: a literal there may reach a signed type's minimum.
     negating: bool,
-    /// The `Option` and `Result` types made so far, by name and type arguments.
-    std_enums: FxHashMap<(Symbol, Vec<Ty>), StructId>,
+    /// The generic definitions of `Option` and `Result`, by name, once made.
+    std_enums: FxHashMap<Symbol, StructId>,
     /// Type aliases: the type each names, and where its name is.
     aliases: FxHashMap<ItemId, (TypeId, Span)>,
     /// The aliases resolved so far.
     alias_types: FxHashMap<ItemId, Ty>,
     /// The aliases being resolved, innermost last, to catch one that names itself.
     resolving_aliases: Vec<ItemId>,
+    /// The type parameters in scope, by name.
+    type_params: Vec<(Symbol, Ty)>,
+    /// The type parameters of each generic struct or enum, by name.
+    struct_params: FxHashMap<StructId, Vec<(Symbol, Ty)>>,
+    /// The generic calls whose type arguments are being inferred, innermost last.
+    inference: Vec<Inference>,
+}
+
+/// The type parameters of a generic call or literal, and what each is found to be so far.
+struct Inference {
+    params: Vec<Ty>,
+    found: Vec<Option<Ty>>,
 }
 
 // Collecting items.
@@ -307,6 +329,7 @@ impl<'a> Checker<'a> {
             variants: Some(vec![variant("X"), variant("Y"), variant("Z")]),
             args: Vec::new(),
             bare: false,
+            template: None,
         });
         self.std_types.insert(std_name("Basis"), basis);
         let basis_ty = self.t.types.struct_ty(basis);
@@ -321,6 +344,7 @@ impl<'a> Checker<'a> {
             variants: Some(labels.iter().map(|l| variant(l)).collect()),
             args: Vec::new(),
             bare: false,
+            template: None,
         });
         self.std_types.insert(std_name("State"), state);
         let state_ty = self.t.types.struct_ty(state);
@@ -346,25 +370,38 @@ impl<'a> Checker<'a> {
                 }
                 continue;
             }
-            let (name, name_span, is_enum) = match ast.item(item).kind {
+            let (name, name_span, is_enum, generics) = match ast.item(item).kind {
                 ItemKind::Struct {
-                    name, name_span, ..
-                } => (name, name_span, false),
+                    name,
+                    name_span,
+                    generics,
+                    ..
+                } => (name, name_span, false, generics),
                 ItemKind::Enum {
-                    name, name_span, ..
-                } => (name, name_span, true),
+                    name,
+                    name_span,
+                    generics,
+                    ..
+                } => (name, name_span, true, generics),
                 _ => continue,
             };
             let id = StructId(self.t.types.structs.len() as u32);
             self.item_structs[item.index()] = Some(id);
+            // A generic struct or enum is a template: its arguments are its parameters.
+            self.module = self.scopes.item_module(item);
+            let params = self.generic_params(generics);
             self.t.types.structs.push(StructDef {
                 name,
                 span: name_span,
                 fields: Vec::new(),
                 variants: is_enum.then(Vec::new),
-                args: Vec::new(),
+                args: params.iter().map(|&(_, t)| t).collect(),
                 bare: false,
+                template: None,
             });
+            if !params.is_empty() {
+                self.struct_params.insert(id, params);
+            }
         }
 
         // Every alias, so a broken one is reported even if nothing uses it.
@@ -389,34 +426,10 @@ impl<'a> Checker<'a> {
                 params: Vec::new(),
                 self_local: None,
                 receiver_ty: None,
+                generics: Vec::new(),
             })
             .collect();
 
-        // Generics are parsed, but not checked yet.
-        let generic = |g: &Generics| !g.params.is_empty() || !g.wheres.is_empty();
-        for &item in items {
-            let span = match ast.item(item).kind {
-                ItemKind::Fn(f) if generic(&ast.function(f).generics) => ast.function(f).name_span,
-                ItemKind::Struct {
-                    generics,
-                    name_span,
-                    ..
-                }
-                | ItemKind::Enum {
-                    generics,
-                    name_span,
-                    ..
-                } if generic(&generics) => name_span,
-                _ => continue,
-            };
-            self.error(span, "generics are not supported yet").help =
-                Some("see spec/types.md §6 for what is planned".into());
-        }
-        let mut turbofish: Vec<Span> = ast.all_path_args().map(|(e, _)| ast.expr(e).span).collect();
-        turbofish.sort_by_key(|s| s.start);
-        for span in turbofish {
-            self.error(span, "type arguments with `::<…>` are not supported yet");
-        }
         let mut next_struct = std_types;
         let main_root = ast.packages().first().map(|p| p.root);
         for &item_id in items {
@@ -438,6 +451,7 @@ impl<'a> Checker<'a> {
                     next_struct += 1;
                     let self_ty = self.t.types.struct_ty(id);
                     self.self_ty = Some(self_ty);
+                    self.type_params = self.struct_params.get(&id).cloned().unwrap_or_default();
                     let mut resolved: Vec<(Symbol, Ty)> = Vec::new();
                     let mut visible = Vec::new();
                     for field in ast.list(fields) {
@@ -471,6 +485,7 @@ impl<'a> Checker<'a> {
                     next_struct += 1;
                     let self_ty = self.t.types.struct_ty(id);
                     self.self_ty = Some(self_ty);
+                    self.type_params = self.struct_params.get(&id).cloned().unwrap_or_default();
                     let mut resolved: Vec<VariantDef> = Vec::new();
                     for variant in ast.list(variants) {
                         if resolved.iter().any(|v| v.name == variant.name) {
@@ -537,7 +552,75 @@ impl<'a> Checker<'a> {
                 }
                 ItemKind::Use(_) | ItemKind::Type { .. } | ItemKind::Error => {}
             }
+            self.type_params.clear();
         }
+        // Instances made while fields were being resolved may have missed some.
+        self.t.types.refill_instances();
+    }
+
+    /// Makes the type parameters of `generics`, written in the current module, reporting
+    /// what is not supported yet.
+    fn generic_params(&mut self, generics: Generics) -> Vec<(Symbol, Ty)> {
+        let ast = self.ast;
+        let mut params = Vec::new();
+        for param in ast.list(generics.params) {
+            match param.kind {
+                GenericKind::Size { .. } => {
+                    self.error(param.span, "size parameters are not supported yet")
+                        .help = Some("see spec/types.md §6 for what is planned".into());
+                }
+                GenericKind::Type { bounds } => {
+                    if params.iter().any(|&(n, _)| n == param.name) {
+                        let message = format!(
+                            "the type parameter `{}` is declared twice",
+                            self.name(param.name)
+                        );
+                        self.error(param.span, message);
+                        continue;
+                    }
+                    let mut copy = self.copy_bounds(bounds);
+                    for pred in ast.list(generics.wheres) {
+                        if pred.name == param.name {
+                            copy |= self.copy_bounds(pred.bounds);
+                        }
+                    }
+                    let ty = self.t.types.param(param.name, copy);
+                    params.push((param.name, ty));
+                }
+            }
+        }
+        for pred in ast.list(generics.wheres) {
+            if !ast
+                .list(generics.params)
+                .iter()
+                .any(|p| p.name == pred.name)
+            {
+                let message = format!("`{}` is not a type parameter here", self.name(pred.name));
+                self.error(pred.span, message);
+            }
+        }
+        params
+    }
+
+    /// Whether `bounds` include `Copy`, reporting the bounds not supported yet.
+    fn copy_bounds(&mut self, bounds: List<Bound>) -> bool {
+        let mut copy = false;
+        for bound in self.ast.list(bounds) {
+            if let [name] = self.ast.list(bound.path)
+                && self.name(*name) == "Copy"
+                && bound.args.is_empty()
+            {
+                copy = true;
+            } else {
+                let message = format!(
+                    "`{}` is a trait bound, and traits are not supported yet",
+                    self.path_text(bound.path)
+                );
+                self.error(bound.span, message).help =
+                    Some("for now the only bound is `Copy`".into());
+            }
+        }
+        copy
     }
 
     /// The type the alias `item` names, if it is one (`spec/types.md` §2).
@@ -568,6 +651,18 @@ impl<'a> Checker<'a> {
         Some(ty)
     }
 
+    /// The type parameters in scope in `f`'s body, by name.
+    fn fn_type_params(&self, f: FnId) -> Vec<(Symbol, Ty)> {
+        let generics = &self.t.fns[f.index()].generics;
+        generics
+            .iter()
+            .map(|&t| {
+                let p = self.t.types.as_param(t).expect("a type parameter");
+                (self.t.types.params[p.index()].name, t)
+            })
+            .collect()
+    }
+
     /// `main` takes no parameters and returns `()` (`spec/execution.md` §6).
     fn check_main(&mut self, f: FnId) {
         let decl = *self.ast.function(f);
@@ -583,6 +678,13 @@ impl<'a> Checker<'a> {
 
     fn collect_fn(&mut self, f: FnId, owner: Option<StructId>) {
         let decl = *self.ast.function(f);
+        // A method sees its struct's type parameters, then its own.
+        let outer = std::mem::take(&mut self.type_params);
+        let mut scope = owner
+            .and_then(|o| self.struct_params.get(&o).cloned())
+            .unwrap_or_default();
+        scope.extend(self.generic_params(decl.generics));
+        self.type_params = scope;
         let params = self
             .ast
             .list(decl.params)
@@ -597,8 +699,11 @@ impl<'a> Checker<'a> {
                 "`self` is only allowed in methods inside a struct or enum",
             );
         }
+        let generics = self.type_params.iter().map(|&(_, t)| t).collect();
+        self.type_params = outer;
         let info = &mut self.t.fns[f.index()];
         info.owner = owner;
+        info.generics = generics;
         info.sig = Sig {
             receiver: decl.receiver.map(|r| r.kind),
             params,
@@ -667,6 +772,21 @@ impl<'a> Checker<'a> {
                         self.error(node.span, "`Distribution` takes one type argument");
                         Ty::ERROR
                     }
+                    _ if let Some(template) = self.generic_struct(path, node.span) => {
+                        let expected = self.t.types.structs[template.index()].args.len();
+                        if args.len() != expected {
+                            let message = format!(
+                                "`{name}` takes {expected} type argument{}, but {} {} given",
+                                if expected == 1 { "" } else { "s" },
+                                args.len(),
+                                if args.len() == 1 { "was" } else { "were" }
+                            );
+                            self.error(node.span, message);
+                            return Ty::ERROR;
+                        }
+                        let id = self.t.types.instantiate(template, args);
+                        self.t.types.struct_ty(id)
+                    }
                     ("Option", &[value]) => self.std_enum(vec![value]),
                     ("Result", &[value, error]) => self.std_enum(vec![value, error]),
                     ("Option", _) => {
@@ -697,6 +817,16 @@ impl<'a> Checker<'a> {
                         return Ty::ERROR;
                     }
                     if let Some(ty) = self.path_type(at, *single, node.span) {
+                        if let TyKind::Struct(id) = *self.t.types.kind(ty)
+                            && self.struct_params.contains_key(&id)
+                            && Some(ty) != self.self_ty
+                        {
+                            let message = format!(
+                                "`{name}` is generic: give its type arguments, as in `{name}<…>`"
+                            );
+                            self.error(node.span, message);
+                            return Ty::ERROR;
+                        }
                         return ty;
                     }
                     if at.is_none() && (name == "Option" || name == "Result") {
@@ -729,6 +859,7 @@ impl<'a> Checker<'a> {
             let f = FnId::from_index(index);
             let Some(body) = decl.body else { continue };
             self.module = self.t.fn_modules[f.index()];
+            self.type_params = self.fn_type_params(f);
             let info = self.t.fns[index].clone();
             self.self_ty = info.owner.map(|id| self.t.types.struct_ty(id));
             self.ret = info.sig.ret;
@@ -1054,6 +1185,16 @@ impl<'a> Checker<'a> {
             self.bind_data_wildcard(data, mutable);
             return;
         };
+        // `Maybe::Just(x)` names the generic enum; the value is one of its instances.
+        let enum_ty = match (self.struct_of(enum_ty), self.struct_of(ty)) {
+            (Some(e), Some(v))
+                if self.struct_params.contains_key(&e)
+                    && self.t.types.structs[v.index()].template == Some(e) =>
+            {
+                ty
+            }
+            _ => enum_ty,
+        };
         if !self.t.types.is_wildcard(ty) && enum_ty != ty {
             let message = format!(
                 "this pattern is {}, but the value is {}",
@@ -1222,6 +1363,19 @@ impl<'a> Checker<'a> {
     /// Makes a value of type `found` usable where `want` is expected, recording any implicit
     /// lend or dereference, or reports a mismatch.
     fn coerce(&mut self, id: ExprId, found: Ty, want: Ty) {
+        // In a generic call, the parameters being inferred match what they are given.
+        if !self.inference.is_empty() && self.t.types.has_params(want) {
+            if self.bind_param(want, found) {
+                return;
+            }
+            if let TyKind::Ref { mutable, inner } = *self.t.types.kind(want)
+                && !matches!(self.t.types.kind(found), TyKind::Ref { .. })
+                && self.bind_param(inner, found)
+            {
+                self.t.adjust[id.index()] = Adjust::Lend { mutable };
+                return;
+            }
+        }
         let types = &self.t.types;
         if found == want || types.is_wildcard(found) || types.is_wildcard(want) {
             return;
@@ -1240,6 +1394,8 @@ impl<'a> Checker<'a> {
             Some(adjust) => adjust,
             None => {
                 let span = self.ast.expr(id).span;
+                // In a generic call, what is known of the parameters so far.
+                let want = self.known(want);
                 let message = format!(
                     "mismatched types: expected {}, found {}",
                     self.show(want),
@@ -1664,6 +1820,9 @@ impl<'a> Checker<'a> {
     fn path_type(&mut self, at: Option<ModuleId>, name: Symbol, span: Span) -> Option<Ty> {
         let found = match at {
             None => {
+                if let Some(&(_, ty)) = self.type_params.iter().rev().find(|&&(n, _)| n == name) {
+                    return Some(ty);
+                }
                 let text = self.name(name);
                 if let Some(ty) = prelude::builtin_type(text) {
                     return Some(ty);
@@ -1693,6 +1852,168 @@ impl<'a> Checker<'a> {
             }
             Binding::Module(_) | Binding::Fn(_) => None,
         }
+    }
+
+    /// Matches `found` against `want`, binding the type parameters being inferred that `want`
+    /// mentions. Returns whether they match.
+    fn bind_param(&mut self, want: Ty, found: Ty) -> bool {
+        // Before comparing: a parameter can be given itself, as a struct's `T` is in its own
+        // methods.
+        if let Some(inference) = self.inference.last_mut()
+            && let Some(i) = inference.params.iter().position(|&p| p == want)
+        {
+            return match inference.found[i] {
+                None => {
+                    inference.found[i] = Some(found);
+                    true
+                }
+                Some(earlier) => {
+                    earlier == found
+                        || self.t.types.is_wildcard(earlier)
+                        || self.t.types.is_wildcard(found)
+                }
+            };
+        }
+        let types = &self.t.types;
+        if want == found || types.is_wildcard(found) {
+            return true;
+        }
+        match (types.kind(want).clone(), types.kind(found).clone()) {
+            (TyKind::Tuple(a), TyKind::Tuple(b)) if a.len() == b.len() => {
+                a.iter().zip(b.iter()).all(|(&w, &f)| self.bind_param(w, f))
+            }
+            (TyKind::Array(w, n), TyKind::Array(f, m)) if n == m => self.bind_param(w, f),
+            (TyKind::Distribution(w), TyKind::Distribution(f)) => self.bind_param(w, f),
+            (
+                TyKind::Ref {
+                    mutable: a,
+                    inner: w,
+                },
+                TyKind::Ref {
+                    mutable: b,
+                    inner: f,
+                },
+            ) if a == b => self.bind_param(w, f),
+            (TyKind::Struct(a), TyKind::Struct(b)) => {
+                let (da, db) = (&types.structs[a.index()], &types.structs[b.index()]);
+                if da.template.unwrap_or(a) != db.template.unwrap_or(b)
+                    || da.args.len() != db.args.len()
+                {
+                    return false;
+                }
+                let (wa, fa) = (da.args.clone(), db.args.clone());
+                wa.iter().zip(&fa).all(|(&w, &f)| self.bind_param(w, f))
+            }
+            _ => false,
+        }
+    }
+
+    /// `ty` with the type parameters being inferred that are already known replaced, so
+    /// that literals take the type expected (`swap::<Bit>((0, 1))`).
+    fn known(&mut self, ty: Ty) -> Ty {
+        let Some(inference) = self.inference.last() else {
+            return ty;
+        };
+        if inference.found.iter().all(Option::is_none) || !self.t.types.has_params(ty) {
+            return ty;
+        }
+        let (from, to): (Vec<Ty>, Vec<Ty>) = inference
+            .params
+            .iter()
+            .zip(&inference.found)
+            .filter_map(|(&p, f)| Some((p, (*f)?)))
+            .unzip();
+        self.t.types.subst(ty, &from, &to)
+    }
+
+    /// Runs `check` with `params` being inferred, starting from `given`, and returns what
+    /// each was found to be, or `None` for one nothing determined.
+    fn infer(
+        &mut self,
+        params: &[Ty],
+        given: Vec<Option<Ty>>,
+        check: impl FnOnce(&mut Self),
+    ) -> Vec<Option<Ty>> {
+        self.inference.push(Inference {
+            params: params.to_vec(),
+            found: given,
+        });
+        check(self);
+        self.inference.pop().expect("pushed").found
+    }
+
+    /// The type arguments a generic call or literal ends with: what was found, with each
+    /// parameter nothing determined reported and left unknown.
+    fn settle(&mut self, params: &[Ty], found: Vec<Option<Ty>>, what: &str, span: Span) -> Vec<Ty> {
+        params
+            .iter()
+            .zip(found)
+            .map(|(&p, found)| {
+                found.unwrap_or_else(|| {
+                    let message = format!(
+                        "cannot tell what `{}` is in this {what}",
+                        self.t.types.display(p, self.ast)
+                    );
+                    self.error(span, message).help =
+                        Some("give it with `::<…>`, or a type annotation".into());
+                    Ty::ERROR
+                })
+            })
+            .collect()
+    }
+
+    /// Reports each type argument that does not meet its parameter's bound.
+    fn check_bounds(&mut self, params: &[Ty], args: &[Ty], callee: &str, span: Span) {
+        for (&p, &arg) in params.iter().zip(args) {
+            let Some(id) = self.t.types.as_param(p) else {
+                continue;
+            };
+            let def = self.t.types.params[id.index()];
+            if def.copy
+                && !self.t.types.is_wildcard(arg)
+                && self.t.types.linearity(arg) != Kind::Copyable
+            {
+                let message = format!(
+                    "`{callee}` needs `{}: Copy`, but here `{}` is {}",
+                    self.name(def.name),
+                    self.name(def.name),
+                    self.show(arg)
+                );
+                self.error(span, message);
+            }
+        }
+    }
+
+    /// For `ty`, a generic enum named without arguments (`Maybe::Nothing`), the instance the
+    /// surrounding code expects; otherwise `ty`.
+    fn instance_expected(&mut self, ty: Ty, expect: Expect, span: Span) -> Ty {
+        let Some(s) = self.struct_of(ty) else {
+            return ty;
+        };
+        if !self.struct_params.contains_key(&s) {
+            return ty;
+        }
+        if let Some(want) = expect.ty()
+            && let Some(w) = self.struct_of(want)
+            && self.t.types.structs[w.index()].template == Some(s)
+        {
+            return want;
+        }
+        let params = self.t.types.structs[s.index()].args.clone();
+        let args = self.settle(&params, vec![None; params.len()], "variant", span);
+        let instance = self.t.types.instantiate(s, args);
+        self.t.types.struct_ty(instance)
+    }
+
+    /// The generic struct or enum `path` names, if it names one.
+    fn generic_struct(&mut self, path: List<Symbol>, span: Span) -> Option<StructId> {
+        let (at, rest) = self.qualify(path, span)?;
+        let [name] = *rest else { return None };
+        let ty = self.path_type(at, name, span)?;
+        let TyKind::Struct(id) = *self.t.types.kind(ty) else {
+            return None;
+        };
+        self.struct_params.contains_key(&id).then_some(id)
     }
 
     /// The help for a standard-library name used without its `use`, if it is one.
@@ -1829,6 +2150,12 @@ impl<'a> Checker<'a> {
             && let Some(ty) = self.path_type(at, ty_name, span)
             && let Some(index) = self.variant_index(ty, name)
         {
+            let written_self = self.name(ty_name) == "Self";
+            let ty = if written_self {
+                ty
+            } else {
+                self.instance_expected(ty, expect, span)
+            };
             let TyKind::Struct(s) = *self.t.types.kind(ty) else {
                 unreachable!("only enums have variants")
             };
@@ -1979,6 +2306,19 @@ impl<'a> Checker<'a> {
                 self.field_visible(id, index, init.span);
             }
         }
+        // `Pair { first: 1, second: |0> }`: a generic struct's arguments, from its fields.
+        // `Self { … }` is the struct's own type, in its methods.
+        let written_self =
+            matches!(ast.expr(path).kind, ExprKind::Name(n) if self.name(n) == "Self");
+        if self.struct_params.contains_key(&id) && !written_self {
+            let params = self.t.types.structs[id.index()].args.clone();
+            let found = self.infer(&params, vec![None; params.len()], |this| {
+                this.field_inits(inits, &fields, struct_ty, span);
+            });
+            let args = self.settle(&params, found, "struct literal", path_span);
+            let instance = self.t.types.instantiate(id, args);
+            return self.t.types.struct_ty(instance);
+        }
         self.field_inits(inits, &fields, struct_ty, span);
         struct_ty
     }
@@ -1997,6 +2337,7 @@ impl<'a> Checker<'a> {
 
     /// Reports the field `index` of the struct `id` if the current module cannot see it.
     fn field_visible(&mut self, id: StructId, index: usize, span: Span) {
+        let id = self.t.types.structs[id.index()].template.unwrap_or(id);
         let Some(&visible) = self.field_vis.get(&id).and_then(|v| v.get(index)) else {
             return;
         };
@@ -2062,6 +2403,7 @@ impl<'a> Checker<'a> {
                 self.error(init.span, message);
             }
             seen.push(init.name);
+            let field_ty = self.known(field_ty);
             match init.value {
                 Some(value) => {
                     self.expr(value, Expect::Ty(field_ty));
@@ -2069,7 +2411,8 @@ impl<'a> Checker<'a> {
                 None => match self.lookup(init.name) {
                     Some(local) => {
                         let ty = self.t.local(local).ty;
-                        if ty != field_ty && !self.t.types.is_wildcard(ty) {
+                        let inferred = !self.inference.is_empty() && self.bind_param(field_ty, ty);
+                        if ty != field_ty && !inferred && !self.t.types.is_wildcard(ty) {
                             let message = format!(
                                 "mismatched types: the field `{}` is {}, but the variable is {}",
                                 self.name(init.name),
@@ -2438,11 +2781,51 @@ impl<'a> Checker<'a> {
 
 // Calls.
 impl<'a> Checker<'a> {
-    /// A call of the program's function `f`.
-    fn fn_call(&mut self, id: ExprId, f: FnId, args: &[ExprId], span: Span) -> Ty {
+    /// A call of the program's function `f`, through the path `callee`.
+    fn fn_call(&mut self, id: ExprId, callee: ExprId, f: FnId, args: &[ExprId], span: Span) -> Ty {
         let sig = self.t.fns[f.index()].sig.clone();
         self.t.callees[id.index()] = Some(Callee::Fn(f));
-        self.check_args(&sig, None, args, span)
+        let generics = self.t.fns[f.index()].generics.clone();
+        let given = self.ast.list(self.ast.path_args(callee)).to_vec();
+        if generics.is_empty() {
+            if !given.is_empty() {
+                let span = self.ast.expr(callee).span;
+                self.error(span, "this function takes no type arguments");
+            }
+            return self.check_args(&sig, None, args, span);
+        }
+        let name = self.name(self.ast.function(f).name).to_string();
+        let given = self.given_args(&generics, &given, callee);
+        let found = self.infer(&generics, given, |this| {
+            this.check_args(&sig, None, args, span);
+        });
+        let type_args = self.settle(&generics, found, "call", self.ast.expr(callee).span);
+        self.check_bounds(&generics, &type_args, &name, span);
+        let ret = self.t.types.subst(sig.ret, &generics, &type_args);
+        self.t.type_args.insert(id, type_args);
+        ret
+    }
+
+    /// The type arguments written with `::<…>` on `callee`, for `generics`, each `None` if
+    /// none is written.
+    fn given_args(&mut self, generics: &[Ty], given: &[TypeId], callee: ExprId) -> Vec<Option<Ty>> {
+        if given.is_empty() {
+            return vec![None; generics.len()];
+        }
+        if given.len() != generics.len() {
+            let span = self.ast.expr(callee).span;
+            let message = format!(
+                "this takes {} type argument{}, but {} {} given",
+                generics.len(),
+                if generics.len() == 1 { "" } else { "s" },
+                given.len(),
+                if given.len() == 1 { "was" } else { "were" }
+            );
+            self.error(span, message);
+        }
+        let mut args: Vec<Option<Ty>> = given.iter().map(|&t| Some(self.resolve_type(t))).collect();
+        args.resize(generics.len(), None);
+        args
     }
 
     /// A call of the built-in function or conversion named `text`, if there is one.
@@ -2463,6 +2846,52 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// A call of a function named by one name, `name`, through `callee`.
+    fn name_call(
+        &mut self,
+        id: ExprId,
+        callee: ExprId,
+        name: Symbol,
+        args: &[ExprId],
+        span: Span,
+    ) -> Ty {
+        let callee_expr = *self.ast.expr(callee);
+        if let Some(local) = self.lookup(name) {
+            let message = format!("`{}` is a variable, not a function", self.name(name));
+            self.t.res[callee.index()] = Res::Local(local);
+            self.error(callee_expr.span, message);
+            return self.skip_args(args);
+        }
+        let Ok(found) = self.path_fn(None, name, callee_expr.span) else {
+            return self.skip_args(args);
+        };
+        match found {
+            Some(FnRef::Fn(f)) => return self.fn_call(id, callee, f, args, span),
+            Some(FnRef::Std(text)) => {
+                if let Some(ty) = self.builtin_call(id, text, args, span) {
+                    return ty;
+                }
+            }
+            None => {}
+        }
+        let text = self.name(name).to_string();
+        if let Some(help) = self.std_help(name) {
+            let message = format!("cannot find the function `{text}`");
+            self.error(callee_expr.span, message).help = Some(help);
+            return self.skip_args(args);
+        }
+        if let Some(ty) = self.builtin_call(id, &text, args, span) {
+            return ty;
+        }
+        let message = if self.names(name, Ns::Type) {
+            format!("`{text}` is a struct; create one with `{text} {{ … }}`")
+        } else {
+            format!("cannot find the function `{text}`")
+        };
+        self.error(callee_expr.span, message);
+        self.skip_args(args)
+    }
+
     fn call(
         &mut self,
         id: ExprId,
@@ -2475,48 +2904,17 @@ impl<'a> Checker<'a> {
         let callee_expr = *ast.expr(callee);
         let args = ast.list(args);
         match callee_expr.kind {
-            ExprKind::Name(name) => {
-                if let Some(local) = self.lookup(name) {
-                    let message = format!("`{}` is a variable, not a function", self.name(name));
-                    self.t.res[callee.index()] = Res::Local(local);
-                    self.error(callee_expr.span, message);
-                    return self.skip_args(args);
-                }
-                let Ok(found) = self.path_fn(None, name, callee_expr.span) else {
-                    return self.skip_args(args);
-                };
-                match found {
-                    Some(FnRef::Fn(f)) => return self.fn_call(id, f, args, span),
-                    Some(FnRef::Std(text)) => {
-                        if let Some(ty) = self.builtin_call(id, text, args, span) {
-                            return ty;
-                        }
-                    }
-                    None => {}
-                }
-                let text = self.name(name).to_string();
-                if let Some(help) = self.std_help(name) {
-                    let message = format!("cannot find the function `{text}`");
-                    self.error(callee_expr.span, message).help = Some(help);
-                    return self.skip_args(args);
-                }
-                if let Some(ty) = self.builtin_call(id, &text, args, span) {
-                    return ty;
-                }
-                let message = if self.names(name, Ns::Type) {
-                    format!("`{text}` is a struct; create one with `{text} {{ … }}`")
-                } else {
-                    format!("cannot find the function `{text}`")
-                };
-                self.error(callee_expr.span, message);
-                self.skip_args(args)
-            }
+            ExprKind::Name(name) => self.name_call(id, callee, name, args, span),
             ExprKind::Path(segments) => {
                 let path_span = callee_expr.span;
                 let Some((at, rest)) = self.qualify(segments, path_span) else {
                     return self.skip_args(args);
                 };
                 if let ([name], None) = (rest, at) {
+                    // `swap::<Int>`: a path only for its arguments.
+                    if !BARE_VARIANTS.contains(&self.name(*name)) {
+                        return self.name_call(id, callee, *name, args, span);
+                    }
                     return self.bare_call(id, *name, args, expect, span);
                 }
                 if let ([name], Some(module)) = (rest, at) {
@@ -2524,7 +2922,7 @@ impl<'a> Checker<'a> {
                         return self.skip_args(args);
                     };
                     match found {
-                        Some(FnRef::Fn(f)) => return self.fn_call(id, f, args, span),
+                        Some(FnRef::Fn(f)) => return self.fn_call(id, callee, f, args, span),
                         Some(FnRef::Std(text)) => {
                             if let Some(ty) = self.builtin_call(id, text, args, span) {
                                 return ty;
@@ -2565,7 +2963,12 @@ impl<'a> Checker<'a> {
                             OwnKind::Ref => self.t.types.reference(false, ty),
                             OwnKind::Mut => self.t.types.reference(true, ty),
                         });
-                        return self.check_args(&sig, receiver, args, span);
+                        return match callee_kind {
+                            Callee::Fn(f) => {
+                                self.method_args(id, f, &sig, ty, receiver, args, span)
+                            }
+                            _ => self.check_args(&sig, receiver, args, span),
+                        };
                     }
                     let message =
                         format!("{} has no function `{}`", self.show(ty), self.name(name));
@@ -2608,7 +3011,6 @@ impl<'a> Checker<'a> {
             self.skip_args(args);
             return enum_ty;
         }
-        self.t.callees[id.index()] = Some(Callee::Variant(s, index));
         let sig = Sig {
             receiver: None,
             params: variant.data.clone(),
@@ -2616,6 +3018,19 @@ impl<'a> Checker<'a> {
             is_unsafe: false,
             reversible: Reversible::Yes,
         };
+        // `Maybe::Just(x)`: a generic enum's arguments, from the variant's data. `Self::Just(x)`
+        // is the enum's own type, in its methods.
+        if self.struct_params.contains_key(&s) && !path.starts_with("Self::") {
+            let params = self.t.types.structs[s.index()].args.clone();
+            let found = self.infer(&params, vec![None; params.len()], |this| {
+                this.check_args(&sig, None, args, span);
+            });
+            let type_args = self.settle(&params, found, "variant", span);
+            let instance = self.t.types.instantiate(s, type_args);
+            self.t.callees[id.index()] = Some(Callee::Variant(instance, index));
+            return self.t.types.struct_ty(instance);
+        }
+        self.t.callees[id.index()] = Some(Callee::Variant(s, index));
         self.check_args(&sig, None, args, span);
         enum_ty
     }
@@ -2623,8 +3038,20 @@ impl<'a> Checker<'a> {
     /// The standard library's `Option<T>` (one type argument) or `Result<T, E>` (two): an enum
     /// made the first time each is used (`spec/types.md` §2).
     fn std_enum(&mut self, args: Vec<Ty>) -> Ty {
+        let template = self.std_template(args.len() == 2);
+        let id = self.t.types.instantiate(template, args);
+        self.t.types.struct_ty(id)
+    }
+
+    /// The generic definition of `Option<T>`, or of `Result<T, E>` if `result`, made the
+    /// first time it is needed.
+    fn std_template(&mut self, result: bool) -> StructId {
         let ast = self.ast;
         let symbol = |text: &str| ast.symbols.get(text).expect("interned by the parser");
+        let name = symbol(if result { "Result" } else { "Option" });
+        if let Some(&id) = self.std_enums.get(&name) {
+            return id;
+        }
         let variant = |text: &str, data: Vec<Ty>| VariantDef {
             name: symbol(text),
             span: Span::default(),
@@ -2632,32 +3059,32 @@ impl<'a> Checker<'a> {
             names: Vec::new(),
             named: false,
         };
-        let (name, variants) = match *args.as_slice() {
-            [value] => (
-                "Option",
-                vec![variant("Some", vec![value]), variant("None", Vec::new())],
-            ),
-            [value, error] => (
-                "Result",
+        // The parameters are only ever shown replaced, so they can share the enum's name.
+        let value = self.t.types.param(name, false);
+        let (args, variants) = if result {
+            let error = self.t.types.param(name, false);
+            (
+                vec![value, error],
                 vec![variant("Ok", vec![value]), variant("Err", vec![error])],
-            ),
-            _ => unreachable!("`Option` takes one type argument, `Result` two"),
+            )
+        } else {
+            (
+                vec![value],
+                vec![variant("Some", vec![value]), variant("None", Vec::new())],
+            )
         };
-        let name = symbol(name);
-        if let Some(&id) = self.std_enums.get(&(name, args.clone())) {
-            return self.t.types.struct_ty(id);
-        }
         let id = StructId(self.t.types.structs.len() as u32);
         self.t.types.structs.push(StructDef {
             name,
             span: Span::default(),
             fields: Vec::new(),
             variants: Some(variants),
-            args: args.clone(),
+            args,
             bare: true,
+            template: None,
         });
-        self.std_enums.insert((name, args), id);
-        self.t.types.struct_ty(id)
+        self.std_enums.insert(name, id);
+        id
     }
 
     /// The `Option` or `Result` that `expect` asks for, if it has the variant `name`, and the
@@ -2770,6 +3197,8 @@ impl<'a> Checker<'a> {
     /// A method or associated function of `ty`, built-in or declared in a struct.
     fn lookup_method(&mut self, ty: Ty, name: Symbol) -> Option<(Callee, Sig)> {
         if let Some(id) = self.struct_of(ty) {
+            // An instance's methods are its generic definition's.
+            let id = self.t.types.structs[id.index()].template.unwrap_or(id);
             let &f = self.methods.get(&(id, name))?;
             return Some((Callee::Fn(f), self.t.fns[f.index()].sig.clone()));
         }
@@ -2814,7 +3243,49 @@ impl<'a> Checker<'a> {
         if base != receiver_ty {
             self.t.adjust[receiver.index()] = Adjust::Deref;
         }
-        self.check_args(&sig, None, args, span)
+        match callee {
+            Callee::Fn(f) => self.method_args(id, f, &sig, base, None, args, span),
+            _ => self.check_args(&sig, None, args, span),
+        }
+    }
+
+    /// The arguments of a call `id` of the method or associated function `f` of `owner`'s
+    /// type, and the call's type. For a generic struct's method, `owner`'s type arguments
+    /// are the struct's; the method's own are inferred.
+    #[allow(clippy::too_many_arguments)]
+    fn method_args(
+        &mut self,
+        id: ExprId,
+        f: FnId,
+        sig: &Sig,
+        owner: Ty,
+        receiver: Option<Ty>,
+        args: &[ExprId],
+        span: Span,
+    ) -> Ty {
+        let generics = self.t.fns[f.index()].generics.clone();
+        if generics.is_empty() {
+            return self.check_args(sig, receiver, args, span);
+        }
+        // The struct's arguments, when `owner` is an instance rather than its definition.
+        let mut known = vec![None; generics.len()];
+        if let Some(s) = self.struct_of(owner) {
+            let def = &self.t.types.structs[s.index()];
+            if def.template.is_some() {
+                for (slot, &arg) in known.iter_mut().zip(&def.args) {
+                    *slot = Some(arg);
+                }
+            }
+        }
+        let name = self.name(self.ast.function(f).name).to_string();
+        let found = self.infer(&generics, known, |this| {
+            this.check_args(sig, receiver, args, span);
+        });
+        let type_args = self.settle(&generics, found, "call", span);
+        self.check_bounds(&generics, &type_args, &name, span);
+        let ret = self.t.types.subst(sig.ret, &generics, &type_args);
+        self.t.type_args.insert(id, type_args);
+        ret
     }
 
     /// Checks arguments against `sig`'s parameters (preceded by `receiver`, for
@@ -2837,6 +3308,7 @@ impl<'a> Checker<'a> {
         for (i, &arg) in args.iter().enumerate() {
             match params.get(i) {
                 Some(&param) => {
+                    let param = self.known(param);
                     self.expr(arg, Expect::Ty(param));
                 }
                 None => {
@@ -3139,6 +3611,8 @@ impl DiagnosticExt for Diagnostic {
 
 mod coverage;
 
+#[cfg(test)]
+mod generics;
 #[cfg(test)]
 mod modules;
 #[cfg(test)]

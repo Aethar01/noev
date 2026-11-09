@@ -51,10 +51,16 @@ before 1.0.
 - Functions outside a package's root module are named by their path in the IR (`ansatz::ry_layer`,
   `qlib::flip`), and `fn main` is only the one in the root module.
 
-- Generics are parsed: type and size parameters (`<T: Classical, const N: Int>`) on
+- Generics are parsed: type and size parameters (`<T: Copy, const N: Int>`) on
   functions, structs, enums and traits, `where` clauses, generic `impl`s with bounds such as
   `Measure<Result = Bit>`, size parameters as array lengths, sizes as type arguments
-  (`Register<8>`) and `swap::<Int>`. The checker still reports them as not supported.
+  (`Register<8>`) and `swap::<Int>`.
+- Generic functions, structs and enums with type parameters: a plain `T` takes classical
+  values and qubits alike and is moved and consumed like a qubit (N001 and N003 say so and
+  suggest `T: Copy`); `T: Copy` lets a body copy and drop. Type arguments are inferred from
+  arguments, fields and expected types, or given with `::<…>`; each generic function is
+  compiled once per list of type arguments (`unwrap_or<Int>` in the IR). `Option` and
+  `Result` are instances of generic definitions like any other.
 
 ### Tools
 

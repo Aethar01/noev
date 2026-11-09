@@ -69,3 +69,7 @@ type Pair = [Qubit; 2]
 fn alias_not_consumed() {
     let p: Pair = |01>
 }                                   //~ N003
+
+// A generic `T` may be a qubit, so a value of it must be consumed too.
+fn generic_dropped<T>(x: T) {
+}                                   //~ N003

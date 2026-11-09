@@ -35,3 +35,9 @@ fn returned() -> Qubit {
     let q = |+>
     q                               //~ N001
 }
+
+// A generic `T` may be a qubit, so it is moved, not copied, unless `T: Copy`.
+fn generic<T>(x: T) -> T {
+    let y = x                       //~ N001
+    mv y
+}

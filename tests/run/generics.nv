@@ -1,0 +1,51 @@
+// Generic functions, structs and enums (spec/types.md §6): one definition for classical
+// values and qubits alike, with `T: Copy` where a body copies.
+
+fn swap<T>(pair: (T, T)) -> (T, T) {
+    let (a, b) = mv pair
+    (mv b, mv a)
+}
+
+fn twice<T: Copy>(x: T) -> (T, T) { (x, x) }
+
+struct Pair<T, U> {
+    first: T
+    second: U
+
+    fn new(first: T, second: U) -> Self { Pair { first: mv first, second: mv second } }
+    fn flip(mv self) -> Pair<U, T> { Pair { first: mv self.second, second: mv self.first } }
+}
+
+enum Maybe<T> {
+    Just(T),
+    Nothing
+}
+
+fn or_else<T: Copy>(m: Maybe<T>, default: T) -> T {
+    match m {
+        Maybe::Just(x) => x,
+        Maybe::Nothing => default,
+    }
+}
+
+/// Moves a qubit through a generic function and back.
+fn through<T>(x: T) -> T { mv x }
+
+fn main() {
+    let (a, b) = swap((1, 2))
+    print("{a} {b}")
+    let (p, q) = swap((|0>, |1>))
+    print("{mv p.measure()} {mv q.measure()}")
+    let (x, y) = swap::<Bit>((0, 1))
+    print("{x} {y} {twice(2.5).1}")
+
+    let pair = Pair::new(true, |1>)
+    let flipped = mv pair.flip()
+    print("{mv flipped.first.measure()} {flipped.second}")
+
+    let none: Maybe<Int> = Maybe::Nothing
+    print("{or_else(none, 7)} {or_else(Maybe::Just(3), 0)}")
+
+    let q = through(|1>)
+    print(mv q.measure())
+}

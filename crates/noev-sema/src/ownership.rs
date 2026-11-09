@@ -708,15 +708,26 @@ impl Owner<'_> {
             }
             let name = self.name(local).to_string();
             let declared = self.typed.local(local).span;
+            let help = match self.typed.types.quantum_param(ty) {
+                // A value of a generic type cannot be measured or released: it is passed on.
+                Some(p) => {
+                    let param = self.ast.name(self.typed.types.params[p.index()].name);
+                    format!(
+                        "it may hold qubits, since `{param}` can be a qubit: move it on with \
+                         `mv {name}`, or require `{param}: Copy`"
+                    )
+                }
+                None => format!(
+                    "measure it with `mv {name}.measure()`, release it with `mv {name}.discard()`, or return it"
+                ),
+            };
             self.error(
                 "N003",
                 at,
                 format!("`{name}` is still owned when it goes out of scope"),
             )
             .with_label_mut(declared, "declared here")
-            .help = Some(format!(
-                "measure it with `mv {name}.measure()`, release it with `mv {name}.discard()`, or return it"
-            ));
+            .help = Some(help);
             // Report each local once.
             self.moved.push(Moved { place, span: at });
         }
@@ -1395,6 +1406,26 @@ impl Owner<'_> {
         })
     }
 
+    /// Why the value `text` of type `ty` cannot be copied, and how else to fix it than by
+    /// moving it: requiring a type parameter to be classical.
+    fn uncopyable(&self, text: &str, ty: Ty) -> (String, String) {
+        match self.typed.types.quantum_param(ty) {
+            Some(p) => {
+                let param = self.ast.name(self.typed.types.params[p.index()].name);
+                (
+                    format!(
+                        "`{text}` may hold qubits, since `{param}` can be a qubit, so it cannot be copied"
+                    ),
+                    format!(", or require `{param}: Copy`"),
+                )
+            }
+            None => (
+                format!("`{text}` holds qubits, which cannot be copied"),
+                String::new(),
+            ),
+        }
+    }
+
     /// N014: `adj` needs something reversible.
     fn check_adj(&mut self, call: ExprId) {
         let Some(callee) = self.typed.callees[call.index()] else {
@@ -1636,13 +1667,9 @@ impl Owner<'_> {
             self.read(&place, span);
         } else {
             let text = self.ast.name(name).to_string();
-            self.error(
-                "N001",
-                span,
-                format!("`{text}` holds qubits, which cannot be copied"),
-            )
-            .help = Some(format!(
-                "write `{text}: mv {text}` to move it into the struct"
+            let (message, or) = self.uncopyable(&text, ty);
+            self.error("N001", span, message).help = Some(format!(
+                "write `{text}: mv {text}` to move it into the struct{or}"
             ));
             self.move_place(&place, ty, span);
         }
@@ -1718,12 +1745,9 @@ impl Owner<'_> {
             || matches!(self.typed.types.kind(ty), TyKind::Ref { .. });
         if use_ == Use::Value && !copyable {
             let text = self.expr_text(id);
-            self.error(
-                "N001",
-                span,
-                format!("`{text}` holds qubits, which cannot be copied"),
-            )
-            .help = Some(format!("write `mv {text}` to move it"));
+            let (message, or) = self.uncopyable(&text, ty);
+            self.error("N001", span, message).help =
+                Some(format!("write `mv {text}` to move it{or}"));
             self.move_place(&place, ty, span);
         } else {
             self.read(&place, span);

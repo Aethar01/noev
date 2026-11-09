@@ -84,6 +84,30 @@ pub enum TyKind {
         /// The referenced type.
         inner: Ty,
     },
+    /// A type parameter, inside generic code: any type its bounds allow (`spec/types.md`
+    /// §6).
+    Param(ParamId),
+}
+
+/// A type parameter of a generic function, struct or enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ParamId(u32);
+
+impl ParamId {
+    /// The parameter's position in [`Types::params`].
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// A type parameter's name and what generic code may do with its values.
+#[derive(Clone, Copy, Debug)]
+pub struct ParamDef {
+    /// Its name.
+    pub name: Symbol,
+    /// Whether it is `T: Copy`: its values can be copied and dropped. Otherwise they
+    /// are treated like qubits.
+    pub copy: bool,
 }
 
 /// Whether values of a type can be copied and dropped (`spec/types.md` §5).
@@ -114,6 +138,9 @@ pub struct StructDef {
     pub args: Vec<Ty>,
     /// Whether its variants are named alone (`Some(1)`, not `Option::Some(1)`).
     pub bare: bool,
+    /// The generic definition this is an instance of, such as `Pair<T, U>` for
+    /// `Pair<Int, Bit>`. A generic definition's own `args` are its type parameters.
+    pub template: Option<StructId>,
 }
 
 /// One variant of an enum.
@@ -142,6 +169,10 @@ pub struct Types {
     pub basis: Option<Ty>,
     /// The standard library's `State` (`spec/std.md` §2): the labels as values.
     pub state: Option<Ty>,
+    /// Every type parameter.
+    pub params: Vec<ParamDef>,
+    /// The instance of each generic definition for each list of type arguments.
+    instances: FxHashMap<(StructId, Vec<Ty>), StructId>,
 }
 
 macro_rules! basic {
@@ -163,6 +194,8 @@ macro_rules! basic {
                     structs: Vec::new(),
                     basis: None,
                     state: None,
+                    params: Vec::new(),
+                    instances: FxHashMap::default(),
                 }
             }
         }
@@ -335,6 +368,160 @@ impl Types {
         self.intern(TyKind::Struct(id))
     }
 
+    /// A new type parameter, and its type.
+    pub fn param(&mut self, name: Symbol, copy: bool) -> Ty {
+        let id = ParamId(u32::try_from(self.params.len()).expect("fewer than 2³² parameters"));
+        self.params.push(ParamDef { name, copy });
+        self.intern(TyKind::Param(id))
+    }
+
+    /// The type parameter `ty` is, if it is one.
+    pub fn as_param(&self, ty: Ty) -> Option<ParamId> {
+        match *self.kind(ty) {
+            TyKind::Param(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The instance of the generic struct or enum `template` with `args` for its type
+    /// parameters: its fields and variants with each parameter replaced.
+    pub fn instantiate(&mut self, template: StructId, args: Vec<Ty>) -> StructId {
+        if self.structs[template.index()].args == args {
+            return template;
+        }
+        if let Some(&id) = self.instances.get(&(template, args.clone())) {
+            return id;
+        }
+        let id = StructId::from_index(self.structs.len());
+        let def = StructDef {
+            fields: Vec::new(),
+            variants: self.structs[template.index()]
+                .variants
+                .as_ref()
+                .map(|_| Vec::new()),
+            args: args.clone(),
+            template: Some(template),
+            ..self.structs[template.index()].clone()
+        };
+        self.structs.push(def);
+        self.instances.insert((template, args), id);
+        self.fill(id);
+        id
+    }
+
+    /// Fills in an instance's fields and variants from its template's, as they are now.
+    fn fill(&mut self, id: StructId) {
+        let Some(template) = self.structs[id.index()].template else {
+            return;
+        };
+        let from = self.structs[template.index()].args.clone();
+        let to = self.structs[id.index()].args.clone();
+        let fields: Vec<(Symbol, Ty)> = self.structs[template.index()].fields.clone();
+        let fields = fields
+            .into_iter()
+            .map(|(n, t)| (n, self.subst(t, &from, &to)))
+            .collect();
+        let variants = self.structs[template.index()]
+            .variants
+            .clone()
+            .map(|variants| {
+                variants
+                    .into_iter()
+                    .map(|v| VariantDef {
+                        data: v.data.iter().map(|&t| self.subst(t, &from, &to)).collect(),
+                        ..v
+                    })
+                    .collect()
+            });
+        let def = &mut self.structs[id.index()];
+        def.fields = fields;
+        def.variants = variants;
+    }
+
+    /// Fills in every instance again, once the templates' fields and variants are known: an
+    /// instance made while they were being resolved may have missed some.
+    pub fn refill_instances(&mut self) {
+        let mut index = 0;
+        // Filling can make more instances, which are filled as they are made.
+        while index < self.structs.len() {
+            self.fill(StructId::from_index(index));
+            index += 1;
+        }
+    }
+
+    /// `ty` with each type in `from`, a type parameter, replaced by the type at the same
+    /// position in `to`.
+    pub fn subst(&mut self, ty: Ty, from: &[Ty], to: &[Ty]) -> Ty {
+        if from.is_empty() {
+            return ty;
+        }
+        match self.kind(ty).clone() {
+            TyKind::Param(_) => from.iter().position(|&p| p == ty).map_or(ty, |i| to[i]),
+            TyKind::Tuple(elems) => {
+                let elems: Box<[Ty]> = elems.iter().map(|&t| self.subst(t, from, to)).collect();
+                self.intern(TyKind::Tuple(elems))
+            }
+            TyKind::Array(elem, len) => {
+                let elem = self.subst(elem, from, to);
+                self.array(elem, len)
+            }
+            TyKind::Distribution(elem) => {
+                let elem = self.subst(elem, from, to);
+                self.intern(TyKind::Distribution(elem))
+            }
+            TyKind::Ref { mutable, inner } => {
+                let inner = self.subst(inner, from, to);
+                self.reference(mutable, inner)
+            }
+            TyKind::Struct(id) => {
+                let def = &self.structs[id.index()];
+                if def.args.is_empty() {
+                    return ty;
+                }
+                let template = def.template.unwrap_or(id);
+                let old = def.args.clone();
+                let args: Vec<Ty> = old.iter().map(|&t| self.subst(t, from, to)).collect();
+                if args == old {
+                    return ty;
+                }
+                let id = self.instantiate(template, args);
+                self.struct_ty(id)
+            }
+            _ => ty,
+        }
+    }
+
+    /// A type parameter `ty` mentions that may be a qubit (not `Copy`), if any: why a
+    /// value of a generic type is treated like a qubit.
+    pub fn quantum_param(&self, ty: Ty) -> Option<ParamId> {
+        match self.kind(ty) {
+            TyKind::Param(p) => (!self.params[p.index()].copy).then_some(*p),
+            TyKind::Tuple(elems) => elems.iter().find_map(|&t| self.quantum_param(t)),
+            TyKind::Array(elem, _) | TyKind::Distribution(elem) => self.quantum_param(*elem),
+            TyKind::Ref { inner, .. } => self.quantum_param(*inner),
+            TyKind::Struct(id) => self.structs[id.index()]
+                .args
+                .iter()
+                .find_map(|&t| self.quantum_param(t)),
+            _ => None,
+        }
+    }
+
+    /// Whether `ty` mentions a type parameter.
+    pub fn has_params(&self, ty: Ty) -> bool {
+        match self.kind(ty) {
+            TyKind::Param(_) => true,
+            TyKind::Tuple(elems) => elems.iter().any(|&t| self.has_params(t)),
+            TyKind::Array(elem, _) | TyKind::Distribution(elem) => self.has_params(*elem),
+            TyKind::Ref { inner, .. } => self.has_params(*inner),
+            TyKind::Struct(id) => self.structs[id.index()]
+                .args
+                .iter()
+                .any(|&t| self.has_params(t)),
+            _ => false,
+        }
+    }
+
     /// The type a reference refers to, or `ty` itself if it is not a reference.
     pub fn deref(&self, ty: Ty) -> Ty {
         match *self.kind(ty) {
@@ -366,6 +553,9 @@ impl Types {
         };
         match self.kind(ty) {
             TyKind::Qubit => Kind::Linear,
+            // Generic code treats a value as a qubit unless it is known to be `Copy`.
+            TyKind::Param(p) if self.params[p.index()].copy => Kind::Copyable,
+            TyKind::Param(_) => Kind::Linear,
             TyKind::Ref { mutable: true, .. } => Kind::Affine,
             TyKind::Tuple(elems) => combine(&mut elems.iter().copied()),
             TyKind::Array(elem, _) => self.linearity_at(*elem, depth + 1),
@@ -408,7 +598,9 @@ impl Types {
     /// values, through any number of shared references (`spec/types.md` §7).
     pub fn is_printable(&self, ty: Ty) -> bool {
         let ty = self.deref(ty);
-        self.linearity(ty) == Kind::Copyable && !matches!(self.kind(ty), TyKind::Ref { .. })
+        self.linearity(ty) == Kind::Copyable
+            && !matches!(self.kind(ty), TyKind::Ref { .. })
+            && !self.has_params(ty)
     }
 
     /// Whether `==` and `!=` work on values of `ty`: numbers, logic, strings, and arrays,
@@ -514,6 +706,7 @@ impl Types {
                 let word = if *mutable { "mut" } else { "ref" };
                 format!("{word} {}", self.display(*inner, ast))
             }
+            TyKind::Param(p) => ast.name(self.params[p.index()].name).into(),
         }
     }
 }

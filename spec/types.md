@@ -335,7 +335,10 @@ where it matters: any place a linear value changes hands has an explicit `mv`.
 
 ## 6. Traits and generics
 
-Status: specified for 0.5; not implemented yet. The syntax is in [grammar.md](grammar.md) §2.
+Status: **Implemented** for type parameters of functions, structs and enums, `Copy` bounds,
+inference of type arguments, `::<…>` and monomorphisation. Not implemented yet: size
+parameters, traits and `impl`s (and so bounds other than `Copy`, and `Measure`), and bounds
+inferred from bodies. The syntax is in [grammar.md](grammar.md) §2.
 
 ### Generic parameters
 
@@ -368,18 +371,20 @@ A type parameter with no bound accepts **any** type, classical or quantum: `swap
 treats a value of type `T` as it would a qubit: it moves it with `mv` and consumes it, and
 never copies or drops it (N001, N003). For a classical value, that costs nothing.
 
-**`T: Classical`** is the one bound about values themselves: `T` is copyable (§5), so the body
-can copy and drop its values:
+**`T: Copy`** is the one bound about values themselves: `T` is copyable (§5), so the body can
+copy and drop its values:
 
 ```noev
-fn twice<T: Classical>(x: T) -> (T, T) { (x, x) }
+fn twice<T: Copy>(x: T) -> (T, T) { (x, x) }
 ```
 
 No function can copy "a classical value or a qubit", since an unknown quantum state cannot be
-copied, so the bound marks exactly what a body cannot do for qubits. An exclusive reference
-`mut T` can be dropped but not copied; given as a `T`, it is treated like a qubit: passed on or
-returned, never dropped. There is no bound for "can be dropped but not copied" yet; one can be
-added without breaking anything.
+copied, so the bound marks exactly what a body cannot do for qubits. `Copy` is decided by the
+compiler from a type's structure (§5), never written in an `impl`: classical values are
+`Copy`, and so is a shared reference `ref T`, even to a qubit. An exclusive reference `mut T`
+can be dropped but not copied, so it is not `Copy`; given as a `T`, it is treated like a
+qubit: passed on or returned, never dropped. There is no bound for "can be dropped but not
+copied" yet; one can be added without breaking anything.
 
 There is no bound saying a type holds qubits: it would let a body do nothing new. What a
 body does with a quantum value is a trait of its own, such as `Measure`.
@@ -387,13 +392,13 @@ body does with a quantum value is a trait of its own, such as `Measure`.
 ### Bounds
 
 A bound is any trait, the standard library's or the program's: `T: Measure`, `T: Oracle`.
-Several are joined with `+` (`T: Classical + Add`), and long ones move to `where`:
+Several are joined with `+` (`T: Copy + Add`), and long ones move to `where`:
 
 ```noev
 fn zip<T, U, const N: Int>(a: [T; N], b: [U; N]) -> [(T, U); N]
 where
-    T: Classical,
-    U: Classical,
+    T: Copy,
+    U: Copy,
 { … }
 ```
 
@@ -404,7 +409,7 @@ measures to one bit.
 
 As with reversibility ([modules.md](modules.md) §5), the compiler works out what a generic
 function needs from its body, within its package: a body that copies or drops a `T` needs
-`T: Classical`, and one that calls `x.measure()` on a `T` needs `T: Measure`. A call that
+`T: Copy`, and one that calls `x.measure()` on a `T` needs `T: Measure`. A call that
 gives a type without what the function needs is an error at the call, naming the line that
 needs it. Writing a bound is always allowed; it turns the inference into a promise, checked
 in the body.
@@ -444,7 +449,7 @@ Measurement is a trait, pairing a quantum type with its classical result type:
 
 ```noev
 trait Measure {
-    type Result: Classical
+    type Result: Copy
     fn measure(mv self) -> Self::Result
 }
 ```
@@ -458,7 +463,7 @@ classical `ExperimentResult`. The free function `measure(x)` is `measure<T: Meas
 
 `Option<T>` and `Result<T, E>` are ordinary generic enums in the prelude, with their variants
 also usable bare (`Some`, `None`, `Ok`, `Err`). They can hold qubits: an `Option<Qubit>` must be
-consumed, with `match mv`. `Distribution<T>` is built in, with `T: Classical`: it holds the
+consumed, with `match mv`. `Distribution<T>` is built in, with `T: Copy`: it holds the
 results of many runs.
 
 ### Compilation

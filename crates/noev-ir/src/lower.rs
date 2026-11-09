@@ -18,14 +18,66 @@ use crate::ir::*;
 /// Lowers every function of a checked program, given which of its runs are circuits
 /// ([`noev_sema::check_circuits`]). `source` supplies the text of kets and bras.
 pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &SourceMap) -> Program {
-    let struct_names = typed
-        .types
+    // Lowering creates reference types for implicit lends, and instances of generic types,
+    // so it works on its own copy.
+    let mut types = typed.types.clone();
+    let mut functions = Vec::with_capacity(syntax.all_fns().len());
+    // `sample` runs and the copies of generic functions become functions of their own,
+    // numbered after the program's.
+    let mut runs = Vec::new();
+    let mut instances = Instances::default();
+    let first_run = syntax.all_fns().len() as u32;
+    let main = typed.main.map(|f| FuncId(f.index() as u32));
+    for (index, decl) in syntax.all_fns().iter().enumerate() {
+        let f = ast::FnId::from_index(index);
+        let name = fn_name(syntax, typed, f);
+        // A generic function is lowered once for each list of type arguments it is called
+        // with; its own slot holds nothing that runs.
+        if !typed.fns[index].generics.is_empty() {
+            functions.push(stub(name, decl.span));
+            continue;
+        }
+        let shared = Shared {
+            types: &mut types,
+            circuits,
+            runs: &mut runs,
+            first_run,
+            instances: &mut instances,
+        };
+        let mut function = Builder::new(syntax, typed, shared, source, f, name, Vec::new()).build();
+        function.sampled = circuits.fns[index].sampled();
+        functions.push(function);
+    }
+    // Copies of generic functions, as calls asked for them; making one can ask for more.
+    while let Some((f, args, slot)) = instances.pending.pop() {
+        let arg_names: Vec<String> = args.iter().map(|&t| types.display(t, syntax)).collect();
+        let name = format!("{}<{}>", fn_name(syntax, typed, f), arg_names.join(", "));
+        let shared = Shared {
+            types: &mut types,
+            circuits,
+            runs: &mut runs,
+            first_run,
+            instances: &mut instances,
+        };
+        let mut function = Builder::new(syntax, typed, shared, source, f, name, args).build();
+        function.sampled = circuits.fns[f.index()].sampled();
+        runs[slot] = function;
+    }
+    functions.extend(runs);
+    // Instances of generic types are named with their arguments: `Pair<Int, Bit>`.
+    let struct_names = types
         .structs
         .iter()
-        .map(|s| syntax.name(s.name).to_string())
+        .map(|s| {
+            let name = syntax.name(s.name).to_string();
+            if s.template.is_none() {
+                return name;
+            }
+            let args: Vec<String> = s.args.iter().map(|&t| types.display(t, syntax)).collect();
+            format!("{name}<{}>", args.join(", "))
+        })
         .collect();
-    let struct_fields = typed
-        .types
+    let struct_fields = types
         .structs
         .iter()
         .map(|s| {
@@ -35,8 +87,7 @@ pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &SourceMa
                 .collect()
         })
         .collect();
-    let variant_names = typed
-        .types
+    let variant_names = types
         .structs
         .iter()
         .map(|s| {
@@ -47,8 +98,7 @@ pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &SourceMa
                 .collect()
         })
         .collect();
-    let variant_fields = typed
-        .types
+    let variant_fields = types
         .structs
         .iter()
         .map(|s| {
@@ -64,48 +114,6 @@ pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &SourceMa
                 .collect()
         })
         .collect();
-    // Lowering creates reference types for implicit lends, so it works on its own copy.
-    let mut types = typed.types.clone();
-    let mut functions = Vec::with_capacity(syntax.all_fns().len());
-    // `sample` runs become functions of their own, numbered after the program's.
-    let mut runs = Vec::new();
-    let main = typed.main.map(|f| FuncId(f.index() as u32));
-    for (index, decl) in syntax.all_fns().iter().enumerate() {
-        let f = ast::FnId::from_index(index);
-        let owner = typed.fns[index].owner;
-        let mut name = match owner {
-            Some(s) => format!(
-                "{}::{}",
-                syntax.name(typed.types.structs[s.index()].name),
-                syntax.name(decl.name)
-            ),
-            None => syntax.name(decl.name).to_string(),
-        };
-        // Functions are named by their module's path, from the root of the package being
-        // compiled, or from the dependency's name.
-        let module = typed.fn_modules[index];
-        let package = syntax.module(module).package;
-        let mut path = Vec::new();
-        if package.index() != 0 {
-            path.push(syntax.name(syntax.package(package).name).to_string());
-        }
-        if syntax.module(module).parent.is_some() {
-            path.push(syntax.module_path(module));
-        }
-        if !path.is_empty() {
-            name = format!("{}::{name}", path.join("::"));
-        }
-        let shared = Shared {
-            types: &mut types,
-            circuits,
-            runs: &mut runs,
-            first_run: syntax.all_fns().len() as u32,
-        };
-        let mut function = Builder::new(syntax, typed, shared, source, f, name).build();
-        function.sampled = circuits.fns[index].sampled();
-        functions.push(function);
-    }
-    functions.extend(runs);
     Program {
         functions,
         main,
@@ -115,6 +123,61 @@ pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &SourceMa
         variant_names,
         variant_fields,
     }
+}
+
+/// A function's name: by its module's path from the root of the package being compiled, or
+/// from its dependency's name, and its struct's for a method.
+fn fn_name(syntax: &Ast, typed: &Typed, f: ast::FnId) -> String {
+    let decl = syntax.function(f);
+    let mut name = match typed.fns[f.index()].owner {
+        Some(s) => format!(
+            "{}::{}",
+            syntax.name(typed.types.structs[s.index()].name),
+            syntax.name(decl.name)
+        ),
+        None => syntax.name(decl.name).to_string(),
+    };
+    let module = typed.fn_modules[f.index()];
+    let package = syntax.module(module).package;
+    let mut path = Vec::new();
+    if package.index() != 0 {
+        path.push(syntax.name(syntax.package(package).name).to_string());
+    }
+    if syntax.module(module).parent.is_some() {
+        path.push(syntax.module_path(module));
+    }
+    if !path.is_empty() {
+        name = format!("{}::{name}", path.join("::"));
+    }
+    name
+}
+
+/// A function that is never called: a generic function's own slot, or one a copy fills in.
+fn stub(name: String, span: Span) -> Function {
+    Function {
+        name,
+        params: 0,
+        locals: vec![LocalDecl {
+            ty: Ty::UNIT,
+            name: None,
+        }],
+        blocks: vec![BasicBlock {
+            stmts: Vec::new(),
+            spans: Vec::new(),
+            term: Terminator::Unreachable,
+        }],
+        span,
+        sampled: false,
+    }
+}
+
+/// The copies of generic functions made so far, and those still to lower.
+#[derive(Default)]
+struct Instances {
+    /// Each copy's function, by the generic function and its type arguments.
+    ids: noev_syntax::FxHashMap<(ast::FnId, Vec<Ty>), FuncId>,
+    /// The copies asked for and not lowered yet, with where each goes among the runs.
+    pending: Vec<(ast::FnId, Vec<Ty>, usize)>,
 }
 
 /// One label of a ket or bra: fixed, or a computed value (`spec/types.md` §3).
@@ -128,10 +191,12 @@ enum LabelOp {
 struct Shared<'a> {
     types: &'a mut Types,
     circuits: &'a Circuits,
-    /// The functions made for `sample` runs so far.
+    /// The functions made for `sample` runs and copies of generic functions so far.
     runs: &'a mut Vec<Function>,
     /// The id of the first of them.
     first_run: u32,
+    /// The copies of generic functions.
+    instances: &'a mut Instances,
 }
 
 struct Builder<'a> {
@@ -141,6 +206,10 @@ struct Builder<'a> {
     circuits: &'a Circuits,
     runs: &'a mut Vec<Function>,
     first_run: u32,
+    instances: &'a mut Instances,
+    /// In a copy of a generic function, its type parameters, replaced by `args`.
+    params: Vec<Ty>,
+    args: Vec<Ty>,
     source: &'a SourceMap,
     body: Option<ast::BlockId>,
     function: Function,
@@ -161,11 +230,19 @@ impl<'a> Builder<'a> {
         source: &'a SourceMap,
         f: ast::FnId,
         name: String,
+        args: Vec<Ty>,
     ) -> Self {
         let decl = syntax.function(f);
         let info = &typed.fns[f.index()];
-        let mut builder =
-            Builder::empty(syntax, typed, shared, source, name, decl.body, info.sig.ret);
+        let params = if args.is_empty() {
+            Vec::new()
+        } else {
+            info.generics.clone()
+        };
+        let ret = shared.types.subst(info.sig.ret, &params, &args);
+        let mut builder = Builder::empty(syntax, typed, shared, source, name, decl.body, ret);
+        builder.params = params;
+        builder.args = args;
         builder.function.span = decl.span;
         match (info.self_local, info.receiver_ty) {
             (Some(local), _) => {
@@ -174,6 +251,7 @@ impl<'a> Builder<'a> {
             }
             // A method whose body never mentions `self` still takes the receiver.
             (None, Some(ty)) => {
+                let ty = builder.subst(ty);
                 builder.function.locals.push(LocalDecl {
                     ty,
                     name: Some("self".into()),
@@ -206,6 +284,9 @@ impl<'a> Builder<'a> {
             circuits: shared.circuits,
             runs: shared.runs,
             first_run: shared.first_run,
+            instances: shared.instances,
+            params: Vec::new(),
+            args: Vec::new(),
             source,
             body,
             function: Function {
@@ -250,7 +331,10 @@ impl<'a> Builder<'a> {
             circuits: self.circuits,
             runs: &mut *self.runs,
             first_run: self.first_run,
+            instances: &mut *self.instances,
         };
+        let ret = shared.types.subst(run.ty, &self.params, &self.args);
+        let (params, args) = (self.params.clone(), self.args.clone());
         let mut builder = Builder::empty(
             self.ast,
             self.typed,
@@ -258,8 +342,11 @@ impl<'a> Builder<'a> {
             self.source,
             name,
             Some(body),
-            run.ty,
+            ret,
         );
+        // A run in a copy of a generic function is part of the copy.
+        builder.params = params;
+        builder.args = args;
         builder.function.sampled = self.circuits.runs[&id].sampled();
         for &local in &captures {
             builder.declare(local);
@@ -359,9 +446,10 @@ impl<'a> Builder<'a> {
     }
 
     fn declare(&mut self, local: LocalId) -> Local {
+        let ty = self.local_ty(local);
         let source = self.typed.local(local);
         self.function.locals.push(LocalDecl {
-            ty: source.ty,
+            ty,
             name: Some(self.ast.name(source.name).to_string()),
         });
         let ir = Local(self.function.locals.len() as u32 - 1);
@@ -373,8 +461,39 @@ impl<'a> Builder<'a> {
         self.locals[local.index()].expect("locals are declared before use")
     }
 
-    fn ty(&self, id: ExprId) -> Ty {
-        self.typed.ty(id)
+    fn ty(&mut self, id: ExprId) -> Ty {
+        let ty = self.typed.ty(id);
+        self.subst(ty)
+    }
+
+    /// `ty` in this copy of a generic function: its type parameters replaced.
+    fn subst(&mut self, ty: Ty) -> Ty {
+        self.types.subst(ty, &self.params, &self.args)
+    }
+
+    /// The type of the source local `local`, in this copy.
+    fn local_ty(&mut self, local: LocalId) -> Ty {
+        let ty = self.typed.local(local).ty;
+        self.subst(ty)
+    }
+
+    /// The function a call `call` of `f` runs: `f` itself, or the copy of it for the call's
+    /// type arguments, made if this is the first call to ask for it.
+    fn func(&mut self, f: ast::FnId, call: ExprId) -> FuncId {
+        if self.typed.fns[f.index()].generics.is_empty() {
+            return FuncId(f.index() as u32);
+        }
+        let args: Vec<Ty> = self.typed.type_args.get(&call).cloned().unwrap_or_default();
+        let args: Vec<Ty> = args.into_iter().map(|t| self.subst(t)).collect();
+        if let Some(&id) = self.instances.ids.get(&(f, args.clone())) {
+            return id;
+        }
+        let slot = self.runs.len();
+        self.runs.push(stub(String::new(), Span::default()));
+        let id = FuncId(self.first_run + slot as u32);
+        self.instances.ids.insert((f, args.clone()), id);
+        self.instances.pending.push((f, args, slot));
+        id
     }
 
     fn is_ref(&self, ty: Ty) -> bool {
@@ -483,7 +602,10 @@ impl Builder<'_> {
                     self.expr_into(init, Some(Place::local(local)));
                 }
                 _ => {
-                    let temp = self.temp(self.ty(init));
+                    let temp = {
+                        let ty = self.ty(init);
+                        self.temp(ty)
+                    };
                     self.expr_into(init, Some(temp.clone()));
                     self.bind(pat, temp);
                 }
@@ -691,7 +813,7 @@ impl Builder<'_> {
         match self.ast.pat(pat).kind {
             ast::PatKind::Name(_) => {
                 let local = self.typed.pat_locals[pat.index()].expect("checked");
-                let ty = self.typed.local(local).ty;
+                let ty = self.local_ty(local);
                 // In a lent `match`, a name for a part that can't be copied refers to it.
                 let by_ref = match *self.types.kind(ty) {
                     TyKind::Ref { mutable, .. }
@@ -767,7 +889,10 @@ impl Builder<'_> {
             }
             ExprKind::Field { base, name } => {
                 let base_place = self.place_deref(base);
-                let struct_ty = self.types.deref(self.ty(base));
+                let struct_ty = {
+                    let ty = self.ty(base);
+                    self.types.deref(ty)
+                };
                 if let TyKind::Struct(s) = *self.types.kind(struct_ty) {
                     let index = self.types.structs[s.index()]
                         .fields
@@ -788,7 +913,10 @@ impl Builder<'_> {
             }
             _ => {}
         }
-        let temp = self.temp(self.ty(id));
+        let temp = {
+            let ty = self.ty(id);
+            self.temp(ty)
+        };
         self.expr_into(id, Some(temp.clone()));
         temp
     }
@@ -796,7 +924,8 @@ impl Builder<'_> {
     /// Like [`Builder::place`], but through a reference: the place a reference refers to.
     fn place_deref(&mut self, id: ExprId) -> Place {
         let place = self.place(id);
-        if self.is_ref(self.ty(id)) {
+        let ty = self.ty(id);
+        if self.is_ref(ty) {
             place.with(Proj::Deref)
         } else {
             place
@@ -859,7 +988,10 @@ impl Builder<'_> {
         }
         if let Adjust::Lend { mutable } = adjust {
             let place = self.lend_target(id);
-            let ref_ty = self.types.reference(mutable, self.ty(id));
+            let ref_ty = {
+                let ty = self.ty(id);
+                self.types.reference(mutable, ty)
+            };
             let temp = self.temp(ref_ty);
             self.assign(temp.clone(), Rvalue::Ref { mutable, place });
             return Operand::Copy(temp);
@@ -896,7 +1028,10 @@ impl Builder<'_> {
             ExprKind::Own { kind, place } => {
                 let mutable = kind == OwnKind::Mut;
                 let target = self.place_deref(place);
-                let temp = self.temp(self.ty(id));
+                let temp = {
+                    let ty = self.ty(id);
+                    self.temp(ty)
+                };
                 self.assign(
                     temp.clone(),
                     Rvalue::Ref {
@@ -924,7 +1059,10 @@ impl Builder<'_> {
     /// An expression's value, following any references, for printing.
     fn value_operand(&mut self, id: ExprId) -> Operand {
         let op = self.operand(id);
-        if !self.is_ref(self.ty(id)) {
+        if !{
+            let ty = self.ty(id);
+            self.is_ref(ty)
+        } {
             return op;
         }
         let mut place = match op {
@@ -945,7 +1083,10 @@ impl Builder<'_> {
         if self.is_place_expr(id) {
             self.place(id)
         } else {
-            let temp = self.temp(self.ty(id));
+            let temp = {
+                let ty = self.ty(id);
+                self.temp(ty)
+            };
             self.expr_into(id, Some(temp.clone()));
             temp
         }
@@ -960,9 +1101,13 @@ impl Builder<'_> {
             ExprKind::MethodCall { .. } if self.is_gate_chain(id) => self.gate_call(id),
             _ if self.is_place_expr(id) => self.place_deref(id),
             _ => {
-                let temp = self.temp(self.ty(id));
+                let temp = {
+                    let ty = self.ty(id);
+                    self.temp(ty)
+                };
                 self.expr_into(id, Some(temp.clone()));
-                if self.is_ref(self.ty(id)) {
+                let ty = self.ty(id);
+                if self.is_ref(ty) {
                     temp.with(Proj::Deref)
                 } else {
                     temp
@@ -1039,7 +1184,10 @@ impl Builder<'_> {
                             out.push(FormatPart::Text(ast.name(text).to_string()))
                         }
                         ast::StrPart::Value { expr, spec } => {
-                            let ty = self.types.deref(self.ty(expr));
+                            let ty = {
+                                let ty = self.ty(expr);
+                                self.types.deref(ty)
+                            };
                             let op = self.value_operand(expr);
                             out.push(FormatPart::Value(op, ty, spec));
                         }
@@ -1050,7 +1198,10 @@ impl Builder<'_> {
             ExprKind::Ket { parts, .. } => {
                 let state = self.text(expr.span)[1..expr.span.len() as usize - 1].to_string();
                 let labels = self.labels(&state, parts);
-                let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
+                let dest = dest.unwrap_or_else(|| {
+                    let ty = self.ty(id);
+                    self.temp(ty)
+                });
                 self.ket(&labels, &dest);
             }
             ExprKind::Path(_) => match self.typed.res[id.index()] {
@@ -1078,7 +1229,10 @@ impl Builder<'_> {
                 if let ExprKind::Ket { parts, .. } = ast.expr(value).kind {
                     let span = ast.expr(value).span;
                     let state = self.text(span)[1..span.len() as usize - 1].to_string();
-                    let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
+                    let dest = dest.unwrap_or_else(|| {
+                        let ty = self.ty(id);
+                        self.temp(ty)
+                    });
                     // Each element's computed labels are evaluated afresh, as the ket is.
                     for k in 0..count {
                         let labels = self.labels(&state, parts);
@@ -1123,9 +1277,10 @@ impl Builder<'_> {
                 let args = ast.list(args).iter().map(|&a| self.operand(a)).collect();
                 let target = self.qubit_place(operand);
                 let next = self.new_block();
+                let func = self.func(f, prep);
                 self.terminate_into(
                     Terminator::Undo {
-                        func: FuncId(f.index() as u32),
+                        func,
                         args,
                         target: target.clone(),
                         next,
@@ -1133,7 +1288,11 @@ impl Builder<'_> {
                     next,
                 );
                 // Undone, the qubits are all |0⟩ exactly when they held the state.
-                let qubits = self.types.qubit_count(self.types.deref(self.ty(operand)));
+                let qubits = {
+                    let ty = self.ty(operand);
+                    let ty = self.types.deref(ty);
+                    self.types.qubit_count(ty)
+                };
                 let zeros = vec![LabelOp::Fixed(Label::Zero); qubits.unwrap_or(1) as usize];
                 self.bra_test(&zeros, target, dest);
             }
@@ -1191,15 +1350,21 @@ impl Builder<'_> {
                 let args = captures
                     .iter()
                     .map(|&l| {
-                        let ty = self.typed.local(l).ty;
+                        let ty = self.local_ty(l);
                         self.read(Place::local(self.local(l)), ty)
                     })
                     .collect();
                 let shots = self.operand(shots);
-                let TyKind::Distribution(elem) = *self.types.kind(self.ty(id)) else {
+                let TyKind::Distribution(elem) = *({
+                    let ty = self.ty(id);
+                    self.types.kind(ty)
+                }) else {
                     return;
                 };
-                let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
+                let dest = dest.unwrap_or_else(|| {
+                    let ty = self.ty(id);
+                    self.temp(ty)
+                });
                 self.push(Stmt::Sample {
                     dest,
                     func,
@@ -1293,7 +1458,10 @@ impl Builder<'_> {
                 }
                 ast::KetPart::Value(value) => value,
             };
-            let ty = self.types.deref(self.ty(value));
+            let ty = {
+                let ty = self.ty(value);
+                self.types.deref(ty)
+            };
             let op = self.operand(value);
             let TyKind::Array(_, len) = *self.types.kind(ty) else {
                 out.push(LabelOp::Value(op));
@@ -1415,7 +1583,7 @@ impl Builder<'_> {
                     return None;
                 };
                 let args = ast.list(args).iter().map(|&a| self.operand(a)).collect();
-                Some(Prep::Call(FuncId(f.index() as u32), args))
+                Some(Prep::Call(self.func(f, prep), args))
             }
             _ => None,
         }
@@ -1510,7 +1678,10 @@ impl Builder<'_> {
     }
 
     fn struct_lit(&mut self, id: ExprId, fields: ast::List<ast::FieldInit>, dest: Option<Place>) {
-        let TyKind::Struct(s) = *self.types.kind(self.ty(id)) else {
+        let TyKind::Struct(s) = *({
+            let ty = self.ty(id);
+            self.types.kind(ty)
+        }) else {
             return;
         };
         // A variant with named fields, or a struct.
@@ -1547,7 +1718,7 @@ impl Builder<'_> {
                 Some(value) => self.operand(value),
                 None => {
                     let local = self.shorthand_local(init.name);
-                    let ty = self.typed.local(local).ty;
+                    let ty = self.local_ty(local);
                     self.read(Place::local(self.local(local)), ty)
                 }
             };
@@ -1561,7 +1732,10 @@ impl Builder<'_> {
             Some(index) => Rvalue::Variant(index, ops),
             None => Rvalue::Aggregate(ops),
         };
-        let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
+        let dest = dest.unwrap_or_else(|| {
+            let ty = self.ty(id);
+            self.temp(ty)
+        });
         self.assign(dest, value);
     }
 
@@ -1595,11 +1769,15 @@ impl Builder<'_> {
                     ops.push(self.receiver_operand(id, receiver));
                 }
                 ops.extend(args.iter().map(|&a| self.operand(a)));
-                let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
+                let dest = dest.unwrap_or_else(|| {
+                    let ty = self.ty(id);
+                    self.temp(ty)
+                });
                 let next = self.new_block();
+                let func = self.func(f, id);
                 self.terminate_into(
                     Terminator::Call {
-                        func: FuncId(f.index() as u32),
+                        func,
                         args: ops,
                         dest,
                         adjoint,
@@ -1626,7 +1804,10 @@ impl Builder<'_> {
                     self.assign(dest, Rvalue::Variant(index, ops));
                 } else {
                     // Thrown away; still built, since its values were moved into it.
-                    let temp = self.temp(self.ty(id));
+                    let temp = {
+                        let ty = self.ty(id);
+                        self.temp(ty)
+                    };
                     self.assign(temp, Rvalue::Variant(index, ops));
                 }
             }
@@ -1722,8 +1903,15 @@ impl Builder<'_> {
             Builtin::Measure => {
                 let Some(first) = first else { return };
                 let target = self.qubit_place(first);
-                let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
-                match *self.types.kind(self.types.deref(self.ty(first))) {
+                let dest = dest.unwrap_or_else(|| {
+                    let ty = self.ty(id);
+                    self.temp(ty)
+                });
+                match *({
+                    let ty = self.ty(first);
+                    let ty = self.types.deref(ty);
+                    self.types.kind(ty)
+                }) {
                     TyKind::Array(_, len) => {
                         for k in 0..len {
                             let index = Proj::Index(Operand::Const(Const::Int(k as i64)));
@@ -1747,8 +1935,15 @@ impl Builder<'_> {
                 };
                 let target = self.qubit_place(first);
                 let basis = self.operand(basis);
-                let dest = dest.unwrap_or_else(|| self.temp(self.ty(id)));
-                let len = match *self.types.kind(self.types.deref(self.ty(first))) {
+                let dest = dest.unwrap_or_else(|| {
+                    let ty = self.ty(id);
+                    self.temp(ty)
+                });
+                let len = match *({
+                    let ty = self.ty(first);
+                    let ty = self.types.deref(ty);
+                    self.types.kind(ty)
+                }) {
                     TyKind::Array(_, len) => Some(len),
                     _ => None,
                 };
@@ -1853,8 +2048,11 @@ impl Builder<'_> {
             }
             Builtin::Dist(method) => {
                 let Some(first) = first else { return };
-                let TyKind::Distribution(elem) = *self.types.kind(self.types.deref(self.ty(first)))
-                else {
+                let TyKind::Distribution(elem) = *({
+                    let ty = self.ty(first);
+                    let ty = self.types.deref(ty);
+                    self.types.kind(ty)
+                }) else {
                     return;
                 };
                 let mut ops = vec![self.value_operand(first)];
@@ -1867,7 +2065,10 @@ impl Builder<'_> {
                 let args = args
                     .iter()
                     .map(|&a| {
-                        let ty = self.types.deref(self.ty(a));
+                        let ty = {
+                            let ty = self.ty(a);
+                            self.types.deref(ty)
+                        };
                         (self.value_operand(a), ty)
                     })
                     .collect();

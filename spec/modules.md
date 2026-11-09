@@ -149,7 +149,7 @@ The prelude holds what almost every program uses, as Rust's does:
   observables, maths;
 - `discard`, `Basis` and `measure_in`, `print` and `eprint` ([std.md](std.md));
 - the built-in types and `Option` and `Result` with their variants ([types.md](types.md));
-- once traits exist, `Classical` and `Measure` ([types.md](types.md) §6).
+- once traits exist, `Copy` and `Measure` ([types.md](types.md) §6).
 
 The other standard-library items live in modules of their own:
 

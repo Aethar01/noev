@@ -672,12 +672,12 @@ fn generics_text(ast: &Ast, generics: Generics) -> String {
 #[test]
 fn generic_items() {
     let parsed = parse(
-        "fn zip<T, U: Classical + Measure<Result = Bit>, const N: Int>(a: [T; N]) -> [T; N]\n\
-         where\n T: Classical,\n{ mv a }\n\
+        "fn zip<T, U: Copy + Measure<Result = Bit>, const N: Int>(a: [T; N]) -> [T; N]\n\
+         where\n T: Copy,\n{ mv a }\n\
          struct Pair<T, U> { a: T, b: U }\n\
          enum Option<T> { Some(T), None }\n\
-         trait Oracle<const N: Int> {\n type Result: Classical\n rev fn apply(ref self, r: mut [Qubit; N])\n}\n\
-         impl<T: Measure> Oracle<4> for Pair<T, T> where T: Classical {}",
+         trait Oracle<const N: Int> {\n type Result: Copy\n rev fn apply(ref self, r: mut [Qubit; N])\n}\n\
+         impl<T: Measure> Oracle<4> for Pair<T, T> where T: Copy {}",
     );
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let ast = &parsed.ast;
@@ -687,7 +687,7 @@ fn generic_items() {
     };
     assert_eq!(
         generics_text(ast, ast.function(f).generics),
-        "T, U: Classical + Measure<Result = _>, const N, where T: Classical"
+        "T, U: Copy + Measure<Result = _>, const N, where T: Copy"
     );
     let ItemKind::Struct { generics, .. } = items[1].kind else {
         panic!()
@@ -714,10 +714,7 @@ fn generic_items() {
     else {
         panic!()
     };
-    assert_eq!(
-        generics_text(ast, generics),
-        "T: Measure, where T: Classical"
-    );
+    assert_eq!(generics_text(ast, generics), "T: Measure, where T: Copy");
     assert_eq!(ast.list(bound.args).len(), 1);
     assert!(matches!(ast.ty(ty).kind, TypeKind::Generic { .. }));
 }

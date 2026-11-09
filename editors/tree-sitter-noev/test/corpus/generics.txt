@@ -2,9 +2,9 @@
 Generics, traits and impls
 ================================================================================
 
-fn zip<T, U: Classical + Measure<Result = Bit>, const N: Int>(a: [T; N], b: [U; N]) -> [(T, U); N]
+fn zip<T, U: Copy + Measure<Result = Bit>, const N: Int>(a: [T; N], b: [U; N]) -> [(T, U); N]
 where
-    T: Classical,
+    T: Copy,
 {
     let p = swap::<Int>((1, 2))
     let q = qft::<8>(r)
@@ -15,11 +15,11 @@ struct Pair<T, U> { a: T, b: U }
 enum Option<T> { Some(T), None }
 
 trait Oracle<const N: Int> {
-    type Result: Classical
+    type Result: Copy
     rev fn apply(ref self, r: mut [Qubit; N])
 }
 
-impl<T: Measure> Oracle<4> for Pair<T, T> where T: Classical {}
+impl<T: Measure> Oracle<4> for Pair<T, T> where T: Copy {}
 impl Shape for S {}
 
 --------------------------------------------------------------------------------
