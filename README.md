@@ -83,7 +83,7 @@ noev export prog.nv -o out/     # every circuit, as OpenQASM 3, without running 
 
 The [`examples/`](examples/) show the language: a Bell pair, a hybrid struct holding an angle
 and a qubit, a table of energies from expectation values, a 16-qubit quantum Fourier
-transform, and teleportation.
+transform, teleportation, and encrypted cloning, where a single-use decryption key is ownership.
 
 ## Editors
 
