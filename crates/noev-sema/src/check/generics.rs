@@ -64,8 +64,8 @@ fn copy_bounds() {
         ["`first` needs `T: Copy`, but here `T` is `Qubit`"]
     );
     assert_eq!(
-        errors("fn f<T: Measure>(x: T) {}"),
-        ["cannot find the trait `Measure`"]
+        errors("fn f<T: Missing>(x: T) {}"),
+        ["cannot find the trait `Missing`"]
     );
     assert_eq!(
         errors("fn f<T>(x: T) where U: Copy {}"),

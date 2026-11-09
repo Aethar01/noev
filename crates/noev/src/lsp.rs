@@ -411,6 +411,8 @@ impl Document {
                 let related = d
                     .labels
                     .iter()
+                    // A note on something with no source text, such as a built-in trait.
+                    .filter(|(span, _)| *span != Span::default())
                     .filter_map(|(span, text)| {
                         Some(DiagnosticRelatedInformation {
                             location: self.location(*span, uri)?,

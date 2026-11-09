@@ -70,6 +70,10 @@ before 1.0.
 - Associated types: `type Result: Copy` in a trait, `type Result = Bit` in each `impl`,
   `T::Result` and `Self::Result` in signatures, and bounds that fix one
   (`T: Readout<Result = Bit>`), checked at each call.
+- `Measure` is a trait in the prelude: a struct measures to a classical result by an
+  `impl` (`Experiment` to `ExperimentResult`), and `x.measure()`, `measure(x)` and generic
+  code with `T: Measure` measure it. Qubits and arrays of qubits implement it with the
+  built-in measurement.
 
 ### Tools
 

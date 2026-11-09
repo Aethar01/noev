@@ -139,6 +139,12 @@ pub fn normalize(impls: &[ImplInfo], types: &mut Types, ty: Ty) -> Ty {
             copy,
         } => {
             let base = normalize(impls, types, base);
+            // Qubits measure to bits by the built-in measurement.
+            if Some(trait_index) == types.measure
+                && let Some(result) = types.measured(base)
+            {
+                return result;
+            }
             let found = impls.iter().find_map(|i| {
                 if i.trait_id.0 != trait_index {
                     return None;
@@ -567,6 +573,11 @@ impl<'a> Checker<'a> {
                 fns: ast.list(fns).to_vec(),
                 assoc,
             });
+            if Some(ast.module(self.module).package) == ast.std_package()
+                && ast.name(name) == "Measure"
+            {
+                self.t.types.measure = Some(id.0);
+            }
             for &f in ast.list(fns) {
                 self.t.fn_traits.insert(f, id);
                 self.t.impl_names.insert(f, ast.function(f).name);
@@ -843,7 +854,10 @@ impl<'a> Checker<'a> {
             return None;
         };
         let found = match at {
-            None => self.scopes.lexical(self.module, name, Ns::Type),
+            None => self
+                .scopes
+                .lexical(self.module, name, Ns::Type)
+                .or_else(|| self.prelude_trait(name)),
             Some(module) => self.scopes.qualified(self.module, module, name, Ns::Type),
         };
         let trait_id = match self.found(found, name, span) {
@@ -1147,13 +1161,25 @@ impl<'a> Checker<'a> {
         if ast.name(name) == "Copy" {
             return None;
         }
-        match self.scopes.lexical(self.module, name, Ns::Type)? {
+        let found = self
+            .scopes
+            .lexical(self.module, name, Ns::Type)
+            .or_else(|| self.prelude_trait(name))?;
+        match found {
             Found::Entry(Entry {
                 binding: Binding::Item(item),
                 ..
             }) => self.item_traits.get(&item).copied(),
             _ => None,
         }
+    }
+
+    /// A trait of the prelude named `name`: one in the standard library's root module, such
+    /// as `Measure`.
+    fn prelude_trait(&self, name: Symbol) -> Option<Found> {
+        let std = self.ast.std_package()?;
+        let root = self.ast.package(std).root;
+        self.scopes.qualified(self.module, root, name, Ns::Type)
     }
 
     /// Resolves associated types in `ty` that are known: through an `impl`, a bound that
@@ -1221,6 +1247,9 @@ impl<'a> Checker<'a> {
                 .param_bounds
                 .get(&ty)
                 .is_some_and(|b| b.contains(&trait_id));
+        }
+        if Some(trait_id.0) == self.t.types.measure && self.t.types.is_measurable(ty) {
+            return true;
         }
         // An `impl` for a generic type matches instances whose arguments are parameters too.
         self.t.impls.iter().any(|i| {
@@ -4284,6 +4313,23 @@ impl<'a> Checker<'a> {
             return Ty::ERROR;
         };
         let ty = self.expr(arg, Expect::None);
+        // `measure(x)` for anything that implements `Measure`: the trait's function.
+        if let Some(m) = self.t.types.measure
+            && !self.t.types.is_measurable(ty)
+            && self.implements(ty, TraitId(m))
+        {
+            let f = self.t.traits[m as usize].fns[0];
+            self.t.callees[id.index()] = Some(Callee::Fn(f));
+            self.t.type_args.insert(id, vec![ty]);
+            let result = self.t.traits[m as usize].assoc[0].0;
+            let ret = self.t.types.intern(TyKind::Assoc {
+                base: ty,
+                trait_index: m,
+                name: result,
+                copy: true,
+            });
+            return self.resolve_assoc(ret);
+        }
         match (ty, self.array_of(ty)) {
             (Ty::QUBIT, _) => Ty::BIT,
             (_, Some((Ty::QUBIT, len))) => self.t.types.array(Ty::BIT, len),
@@ -4294,7 +4340,8 @@ impl<'a> Checker<'a> {
                     self.show(ty)
                 );
                 let span = self.ast.expr(arg).span;
-                self.error(span, message);
+                self.error(span, message).help =
+                    Some("a type of your own can measure with an `impl` of `Measure`".into());
                 Ty::ERROR
             }
         }

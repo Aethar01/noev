@@ -251,6 +251,7 @@ impl<'a> Builder<'a> {
             info.generics.clone()
         };
         let ret = shared.types.subst(info.sig.ret, &params, &args);
+        let ret = noev_sema::check::normalize(&typed.impls, shared.types, ret);
         let mut builder = Builder::empty(syntax, typed, shared, source, name, decl.body, ret);
         builder.params = params;
         builder.args = args;
@@ -345,6 +346,7 @@ impl<'a> Builder<'a> {
             instances: &mut *self.instances,
         };
         let ret = shared.types.subst(run.ty, &self.params, &self.args);
+        let ret = noev_sema::check::normalize(&self.typed.impls, shared.types, ret);
         let (params, args) = (self.params.clone(), self.args.clone());
         let mut builder = Builder::empty(
             self.ast,
@@ -488,6 +490,22 @@ impl<'a> Builder<'a> {
     fn local_ty(&mut self, local: LocalId) -> Ty {
         let ty = self.typed.local(local).ty;
         self.subst(ty)
+    }
+
+    /// Whether the call `call` of `f` is of `Measure::measure` for a qubit or an array of
+    /// them, which the built-in measurement does.
+    fn measures_builtin(&mut self, f: ast::FnId, call: ExprId) -> bool {
+        let Some(&t) = self.typed.fn_traits.get(&f) else {
+            return false;
+        };
+        if Some(t.index() as u32) != self.types.measure {
+            return false;
+        }
+        let Some(&self_ty) = self.typed.type_args.get(&call).and_then(|a| a.first()) else {
+            return false;
+        };
+        let self_ty = self.subst(self_ty);
+        self.types.is_measurable(self_ty)
     }
 
     /// The function a call `call` of `f` runs: `f` itself, or the copy of it for the call's
@@ -1783,6 +1801,12 @@ impl Builder<'_> {
         let Some(callee) = self.typed.callees[id.index()] else {
             return;
         };
+        // `Measure::measure` of a qubit, or an array of them, is the built-in measurement.
+        if let Callee::Fn(f) = callee
+            && self.measures_builtin(f, id)
+        {
+            return self.builtin(id, Builtin::Measure, receiver, args, dest, adjoint);
+        }
         match callee {
             Callee::Fn(f) => {
                 let mut ops = Vec::new();

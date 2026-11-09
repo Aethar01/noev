@@ -185,6 +185,9 @@ pub struct Types {
     pub params: Vec<ParamDef>,
     /// The instance of each generic definition for each list of type arguments.
     instances: FxHashMap<(StructId, Vec<Ty>), StructId>,
+    /// The standard library's `Measure` trait, by its position in the checker's table of
+    /// traits, once a program names it.
+    pub measure: Option<u32>,
 }
 
 macro_rules! basic {
@@ -208,6 +211,7 @@ macro_rules! basic {
                     state: None,
                     params: Vec::new(),
                     instances: FxHashMap::default(),
+                    measure: None,
                 }
             }
         }
@@ -514,6 +518,24 @@ impl Types {
                 self.struct_ty(id)
             }
             _ => ty,
+        }
+    }
+
+    /// Whether the built-in measurement takes `ty`: a qubit or an array of qubits.
+    pub fn is_measurable(&self, ty: Ty) -> bool {
+        match *self.kind(ty) {
+            TyKind::Qubit => true,
+            TyKind::Array(elem, _) => elem == Ty::QUBIT,
+            _ => false,
+        }
+    }
+
+    /// What the built-in measurement of `ty` gives: `Bit`, or `[Bit; N]`.
+    pub fn measured(&mut self, ty: Ty) -> Option<Ty> {
+        match *self.kind(ty) {
+            TyKind::Qubit => Some(Ty::BIT),
+            TyKind::Array(elem, len) if elem == Ty::QUBIT => Some(self.array(Ty::BIT, len)),
+            _ => None,
         }
     }
 

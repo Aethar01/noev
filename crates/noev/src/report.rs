@@ -154,7 +154,12 @@ fn human(out: &mut impl Write, files: &mut Files, d: &Diagnostic) -> std::io::Re
             message: "",
         },
     )];
-    for (span, message) in &d.labels {
+    // A note on something with no source text, such as a built-in trait, shows nothing.
+    for (span, message) in d
+        .labels
+        .iter()
+        .filter(|(span, _)| *span != Span::default() || d.span == Span::default())
+    {
         let mark = Mark {
             span: *span,
             symbol: '-',

@@ -433,11 +433,20 @@ impl Ast {
     /// standard library's package, whose modules have no items of their own, if any module
     /// names `std`: none can reach it otherwise.
     pub fn collect_root(&mut self) {
-        if self.std.is_none() && self.symbols.get("std").is_some() {
+        let named = |text| self.symbols.get(text).is_some();
+        let measure = named("Measure");
+        if self.std.is_none() && (named("std") || measure) {
             let std = self.add_package("std");
             let root = self.package(std).root;
             for name in STD_MODULES {
                 self.add_module(root, name);
+            }
+            if measure {
+                let item = self.measure_trait();
+                let mark = self.mark::<ItemId>();
+                self.push_to(item);
+                let items = self.finish(mark);
+                self.set_items(root, items);
             }
             self.std = Some(std);
         }
@@ -450,6 +459,83 @@ impl Ast {
             }
         }
         self.root = self.finish(mark);
+    }
+
+    /// The standard library's `Measure` trait (`spec/types.md` §6), built as if parsed from
+    ///
+    /// ```noev
+    /// pub trait Measure {
+    ///     type Result: Copy
+    ///     fn measure(mv self) -> Self::Result
+    /// }
+    /// ```
+    ///
+    /// Its parts have no source text, so their spans are empty.
+    fn measure_trait(&mut self) -> ItemId {
+        let at = Span::default();
+        let symbol = |ast: &mut Ast, text: &str| ast.symbols.intern(text);
+        let (measure_trait, result, measure, self_name, copy) = (
+            symbol(self, "Measure"),
+            symbol(self, "Result"),
+            symbol(self, "measure"),
+            symbol(self, "Self"),
+            symbol(self, "Copy"),
+        );
+        let mark = self.mark::<Symbol>();
+        self.push_to(copy);
+        let copy_path = self.finish(mark);
+        let mark = self.mark::<Bound>();
+        self.push_to(Bound {
+            path: copy_path,
+            args: List::EMPTY,
+            span: at,
+        });
+        let bounds = self.finish(mark);
+        let mark = self.mark::<AssocType>();
+        self.push_to(AssocType {
+            name: result,
+            bounds,
+        });
+        let types = self.finish(mark);
+        let mark = self.mark::<Symbol>();
+        self.push_to(self_name);
+        self.push_to(result);
+        let ret_path = self.finish(mark);
+        let ret = self.push_type(TypeExpr {
+            kind: TypeKind::Path(ret_path),
+            span: at,
+        });
+        let f = self.push_fn(FnDecl {
+            name: measure,
+            name_span: at,
+            generics: Generics::default(),
+            vis: Vis::Pub,
+            is_unsafe: false,
+            is_rev: false,
+            is_circuit: false,
+            receiver: Some(Receiver {
+                kind: OwnKind::Mv,
+                span: at,
+            }),
+            params: List::EMPTY,
+            ret: Some(ret),
+            body: None,
+            span: at,
+        });
+        let mark = self.mark::<FnId>();
+        self.push_to(f);
+        let fns = self.finish(mark);
+        self.push_item(Item {
+            kind: ItemKind::Trait {
+                name: measure_trait,
+                name_span: at,
+                generics: Generics::default(),
+                fns,
+                types,
+            },
+            vis: Vis::Pub,
+            span: at,
+        })
     }
 
     pub(crate) fn set_items(&mut self, module: ModuleId, items: List<ItemId>) {

@@ -190,3 +190,30 @@ fn associated_types() {
         ["`one` needs `Two::Result` to be `Bit`, but it is `(Bit, Bit)`"]
     );
 }
+
+#[test]
+fn measure_is_a_trait() {
+    let experiment = "struct Experiment { angle: Float, state: Qubit }\n\
+                      struct Outcome { angle: Float, bit: Bit }\n\
+                      impl Measure for Experiment {\n type Result = Outcome\n \
+                      fn measure(mv self) -> Outcome { Outcome { angle: self.angle, bit: mv self.state.measure() } }\n}\n";
+    ok(&format!(
+        "{experiment}fn f(e: Experiment) -> Outcome {{ mv e.measure() }}"
+    ));
+    ok(&format!(
+        "{experiment}fn f(e: Experiment) -> Outcome {{ measure(mv e) }}"
+    ));
+    // Qubits measure by the built-in measurement, through a bound too.
+    ok("fn f<T: Measure>(x: T) -> T::Result { mv x.measure() }\nfn g() -> [Bit; 2] { f(|01>) }");
+    ok("fn f<T: Measure<Result = Bit>>(x: T) -> Bit { measure(mv x) }\nfn g() -> Bit { f(|1>) }");
+    assert_eq!(
+        errors("struct S { x: Int }\nfn f(s: S) { let b = measure(s) }"),
+        ["`measure` takes a qubit or an array of qubits, but this is `S`"]
+    );
+    assert_eq!(
+        errors(
+            "fn f<T: Measure>(x: T) -> T::Result { mv x.measure() }\nstruct S { x: Int }\nfn g(s: S) { let r = f(s) }"
+        ),
+        ["`f` needs `T: Measure`, but `S` does not implement `Measure`"]
+    );
+}

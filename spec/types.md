@@ -338,8 +338,9 @@ where it matters: any place a linear value changes hands has an explicit `mv`.
 Status: **Implemented** for type parameters of functions, structs and enums, bounds (`Copy`
 and traits), inference of type arguments, `::<…>`, traits without type parameters,
 associated types (with `Copy` as their only bound), `impl`s (generic ones too) and
-monomorphisation. Not implemented yet: size parameters, generic traits, `Measure` as a
-trait, and bounds inferred from bodies. The syntax is in [grammar.md](grammar.md) §2.
+monomorphisation, and `Measure` (built in for qubits and arrays of qubits, not yet for
+tuples or arrays of other measurable types). Not implemented yet: size parameters, generic
+traits, and bounds inferred from bodies. The syntax is in [grammar.md](grammar.md) §2.
 
 ### Generic parameters
 
