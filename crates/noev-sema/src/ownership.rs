@@ -11,7 +11,7 @@
 //! - whether the code is in a reversible context.
 
 use noev_syntax::ast::*;
-use noev_syntax::{Diagnostic, Span, Symbol};
+use noev_syntax::{Diagnostic, Severity, Span, Symbol};
 
 use crate::check::{Adjust, Callee, LocalId, Res, Typed};
 use crate::facts::{self, Fact, Linear};
@@ -24,6 +24,7 @@ pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
     let prints = infer_printing(ast, typed);
     let mut checker = Owner {
         ast,
+        module: ModuleId::from_index(0),
         typed,
         irreversible,
         preparable: None,
@@ -45,6 +46,34 @@ pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
     for (index, decl) in ast.all_fns().iter().enumerate() {
         if let Some(body) = decl.body {
             checker.function(FnId::from_index(index), body);
+        }
+    }
+    // A function that acts on qubits and is reversible only by inference cannot be used as
+    // reversible by the modules it is visible to (`spec/modules.md` §5).
+    for (index, decl) in ast.all_fns().iter().enumerate() {
+        let info = &typed.fns[index];
+        let quantum = info
+            .sig
+            .params
+            .iter()
+            .chain(&info.receiver_ty)
+            .any(|&ty| typed.types.linearity(typed.types.deref(ty)) == Kind::Linear);
+        if decl.vis != Vis::Private
+            && decl.body.is_some()
+            && quantum
+            && info.sig.reversible == Reversible::Infer
+            && checker.irreversible[index].is_none()
+        {
+            let name = ast.name(decl.name);
+            let message = format!(
+                "`{name}` is reversible, but other modules can use it as reversible only if it \
+                 is declared `rev fn`"
+            );
+            checker.diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                ..Diagnostic::error(decl.name_span, message)
+                    .with_help(format!("write `rev fn {name}`"))
+            });
         }
     }
     checker.diagnostics
@@ -149,8 +178,15 @@ struct Irreversible {
     why: String,
 }
 
+/// Why a function in another module, not declared `rev fn`, is not reversible where it is
+/// called (`spec/modules.md` §5).
+const ELSEWHERE: &str =
+    "which is in another module: there, only a function declared `rev fn` is reversible";
+
 struct Owner<'a> {
     ast: &'a Ast,
+    /// The module of the function being checked.
+    module: ModuleId,
     typed: &'a Typed,
     irreversible: Vec<Option<Irreversible>>,
     /// For each function, why it cannot be undone as a bra's preparation, if it cannot.
@@ -205,6 +241,7 @@ fn infer_reversibility(ast: &Ast, typed: &Typed) -> Vec<Option<Irreversible>> {
             }
             let Some(body) = decl.body else { continue };
             let info = &typed.fns[index];
+            let module = typed.fn_modules[index];
             let outside: Vec<LocalId> = info
                 .self_local
                 .into_iter()
@@ -213,7 +250,7 @@ fn infer_reversibility(ast: &Ast, typed: &Typed) -> Vec<Option<Irreversible>> {
             let mut found = None;
             walk_block(ast, body, &mut |node| {
                 if found.is_none() {
-                    found = irreversible_op(ast, typed, &result, &outside, node);
+                    found = irreversible_op(ast, typed, &result, &outside, module, node);
                 }
             });
             if found.is_some() {
@@ -241,6 +278,7 @@ fn infer_preparable(ast: &Ast, typed: &Typed) -> Vec<Option<Irreversible>> {
             }
             let Some(body) = decl.body else { continue };
             let info = &typed.fns[index];
+            let module = typed.fn_modules[index];
             let outside: Vec<LocalId> = info
                 .self_local
                 .into_iter()
@@ -253,7 +291,7 @@ fn infer_preparable(ast: &Ast, typed: &Typed) -> Vec<Option<Irreversible>> {
                     ExprKind::Ket { .. } | ExprKind::Own { kind: OwnKind::Mv, .. }
                 ));
                 if found.is_none() && !creates {
-                    found = irreversible_op(ast, typed, &result, &outside, node);
+                    found = irreversible_op(ast, typed, &result, &outside, module, node);
                 }
             });
             if found.is_some() {
@@ -306,11 +344,13 @@ enum Node {
     Assign(ExprId, Span),
 }
 
+/// Why `node`, in a function in `module`, is not reversible, if it is not.
 fn irreversible_op(
     ast: &Ast,
     typed: &Typed,
     result: &[Option<Irreversible>],
     outside: &[LocalId],
+    module: ModuleId,
     node: Node,
 ) -> Option<Irreversible> {
     let (span, why) = match node {
@@ -356,6 +396,13 @@ fn irreversible_op(
                                 expr.span,
                                 format!("it calls `{name}`, which is not reversible"),
                             )
+                        }
+                        Callee::Fn(f)
+                            if typed.fns[f.index()].sig.reversible == Reversible::Infer
+                                && typed.fn_modules[f.index()] != module =>
+                        {
+                            let name = ast.name(ast.function(f).name);
+                            (expr.span, format!("it calls `{name}`, {ELSEWHERE}"))
                         }
                         _ => return None,
                     }
@@ -520,6 +567,7 @@ impl Owner<'_> {
     }
 
     fn function(&mut self, f: FnId, body: BlockId) {
+        self.module = self.typed.fn_modules[f.index()];
         let info = &self.typed.fns[f.index()];
         self.scope.clear();
         self.moved.clear();
@@ -1304,6 +1352,36 @@ impl Owner<'_> {
         self.release(&held);
     }
 
+    /// Whether calling `f` from the current function counts as reversible: as declared, or as
+    /// inferred from its body when it is in the same module (`spec/modules.md` §5).
+    fn reversible_fn(&self, f: FnId) -> bool {
+        match self.typed.fns[f.index()].sig.reversible {
+            Reversible::Yes => true,
+            Reversible::No => false,
+            Reversible::Infer => {
+                self.irreversible[f.index()].is_none()
+                    && self.typed.fn_modules[f.index()] == self.module
+            }
+        }
+    }
+
+    /// Why calling `f` from the current function does not count as reversible, if known.
+    fn why_not_reversible(&self, f: FnId) -> Option<Irreversible> {
+        if let Some(why) = &self.irreversible[f.index()] {
+            return Some(why.clone());
+        }
+        let decl = self.ast.function(f);
+        let elsewhere = self.typed.fns[f.index()].sig.reversible == Reversible::Infer
+            && self.typed.fn_modules[f.index()] != self.module;
+        elsewhere.then(|| Irreversible {
+            span: decl.name_span,
+            why: format!(
+                "`{}` is declared here, {ELSEWHERE}",
+                self.ast.name(decl.name)
+            ),
+        })
+    }
+
     /// N014: `adj` needs something reversible.
     fn check_adj(&mut self, call: ExprId) {
         let Some(callee) = self.typed.callees[call.index()] else {
@@ -1313,16 +1391,12 @@ impl Owner<'_> {
             Callee::Builtin(b) => b.reversible(),
             Callee::Convert(_) | Callee::TryConvert(_) => true,
             Callee::Variant(..) => false,
-            Callee::Fn(f) => match self.typed.fns[f.index()].sig.reversible {
-                Reversible::Yes => true,
-                Reversible::No => false,
-                Reversible::Infer => self.irreversible[f.index()].is_none(),
-            },
+            Callee::Fn(f) => self.reversible_fn(f),
         };
         if !ok {
             let span = self.ast.expr(call).span;
             let why = match callee {
-                Callee::Fn(f) => self.irreversible[f.index()].clone(),
+                Callee::Fn(f) => self.why_not_reversible(f),
                 _ => None,
             };
             let diagnostic = self.error(
@@ -1694,19 +1768,11 @@ impl Owner<'_> {
             Callee::Convert(_) | Callee::TryConvert(_) | Callee::Variant(..) => {
                 (false, true, String::new())
             }
-            Callee::Fn(f) => {
-                let sig = &self.typed.fns[f.index()].sig;
-                let reversible = match sig.reversible {
-                    Reversible::Yes => true,
-                    Reversible::No => false,
-                    Reversible::Infer => self.irreversible[f.index()].is_none(),
-                };
-                (
-                    sig.is_unsafe,
-                    reversible,
-                    self.ast.name(self.ast.function(f).name).to_string(),
-                )
-            }
+            Callee::Fn(f) => (
+                self.typed.fns[f.index()].sig.is_unsafe,
+                self.reversible_fn(f),
+                self.ast.name(self.ast.function(f).name).to_string(),
+            ),
         };
         if is_unsafe && self.unsafe_depth == 0 {
             let message = if name == "release" {
@@ -1723,7 +1789,7 @@ impl Owner<'_> {
         }
         if !reversible && !self.reversible.is_empty() {
             let why = match callee {
-                Callee::Fn(f) => self.irreversible[f.index()].clone(),
+                Callee::Fn(f) => self.why_not_reversible(f),
                 _ => None,
             };
             let diagnostic = self.error("N013", span, format!("`{name}` is not reversible"));

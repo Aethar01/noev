@@ -9,6 +9,27 @@ use super::*;
 /// or `""` for the root; `dep/` before it puts it in the dependency `dep`, which the main
 /// package depends on.
 fn errors(files: &[(&str, &str)]) -> Vec<String> {
+    let ast = package(files);
+    let (_, diagnostics) = check(&ast);
+    diagnostics.into_iter().map(|d| d.message).collect()
+}
+
+/// The diagnostics of types and then ownership, each as `code message`, or `warning message`.
+fn ownership(files: &[(&str, &str)]) -> Vec<String> {
+    let ast = package(files);
+    let (typed, diagnostics) = check(&ast);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    crate::check_ownership(&ast, &typed)
+        .into_iter()
+        .map(|d| match (d.severity, d.code) {
+            (noev_syntax::Severity::Warning, _) => format!("warning {}", d.message),
+            (_, Some(code)) => format!("{code} {}", d.message),
+            (_, None) => d.message,
+        })
+        .collect()
+}
+
+fn package(files: &[(&str, &str)]) -> Ast {
     let mut ast = Ast::new();
     let main = ast.add_package("main");
     let mut modules: Vec<(String, ModuleId)> = vec![(String::new(), ast.package(main).root)];
@@ -53,8 +74,7 @@ fn errors(files: &[(&str, &str)]) -> Vec<String> {
     }
     ast.collect_root();
     assert!(diagnostics.is_empty(), "syntax errors: {diagnostics:?}");
-    let (_, diagnostics) = check(&ast);
-    diagnostics.into_iter().map(|d| d.message).collect()
+    ast
 }
 
 fn ok(files: &[(&str, &str)]) {
@@ -310,4 +330,112 @@ fn main_is_the_root_modules() {
         ("", "fn main() {}"),
         ("a", "pub fn main(x: Int) -> Int { x }"),
     ]);
+}
+
+#[test]
+fn fields_and_methods_are_private_to_their_module() {
+    let a = "pub struct Register {\n pub size: Int\n count: Int\n \
+             pub fn new() -> Self { Register { size: 1, count: 0 } }\n \
+             fn secret(ref self) -> Int { self.count }\n \
+             pub fn total(ref self) -> Int { self.secret() + self.size }\n}";
+    ok(&[
+        (
+            "",
+            "fn main() { let r = a::Register::new()\n let t = r.total() + r.size }",
+        ),
+        ("a", a),
+    ]);
+    assert_eq!(
+        errors(&[
+            (
+                "",
+                "fn main() { let r = a::Register::new()\n let c = r.count }"
+            ),
+            ("a", a)
+        ]),
+        ["the field `count` of `Register` is private"]
+    );
+    assert_eq!(
+        errors(&[
+            (
+                "",
+                "fn main() { let r = a::Register { size: 1, count: 2 } }"
+            ),
+            ("a", a)
+        ]),
+        ["the field `count` of `Register` is private"]
+    );
+    assert_eq!(
+        errors(&[
+            (
+                "",
+                "fn main() { let r = a::Register::new()\n let s = r.secret() }"
+            ),
+            ("a", a)
+        ]),
+        ["`secret` is private"]
+    );
+    // Inside the module, and the modules in it, everything is visible.
+    ok(&[
+        ("", "fn main() {}"),
+        ("a", a),
+        (
+            "a::b",
+            "fn f() { let r = super::Register { size: 1, count: 2 }\n let s = r.secret() }",
+        ),
+    ]);
+}
+
+#[test]
+fn reversible_across_modules_only_if_declared() {
+    // Inside its module, `flip` is inferred reversible.
+    assert_eq!(
+        ownership(&[
+            ("", "fn main() {}"),
+            (
+                "a",
+                "fn flip(q: mut Qubit) { q.x() }\nrev fn twice(q: mut Qubit) { flip(q)\n adj flip(q) }"
+            ),
+        ]),
+        Vec::<String>::new()
+    );
+    // From another module, only `rev fn` is.
+    assert_eq!(
+        ownership(&[
+            (
+                "",
+                "rev fn twice(q: mut Qubit) { a::flip(q) }\nfn undo(q: mut Qubit) { adj a::flip(q) }\nfn main() {}"
+            ),
+            ("a", "pub fn flip(q: mut Qubit) { q.x() }"),
+        ]),
+        [
+            "N013 `flip` is not reversible",
+            "N014 only reversible functions can be inverted with `adj`",
+            "warning `flip` is reversible, but other modules can use it as reversible only if it is declared `rev fn`",
+        ]
+    );
+    assert_eq!(
+        ownership(&[
+            (
+                "",
+                "rev fn twice(q: mut Qubit) { a::flip(q)\n adj a::flip(q) }\nfn main() {}"
+            ),
+            ("a", "pub rev fn flip(q: mut Qubit) { q.x() }"),
+        ]),
+        Vec::<String>::new()
+    );
+    // Inference through a function in another module stops there too.
+    assert_eq!(
+        ownership(&[
+            (
+                "",
+                "rev fn r(q: mut Qubit) { wrap(q) }\nfn wrap(q: mut Qubit) { a::plain(q) }\nfn main() {}"
+            ),
+            ("a", "pub fn plain(q: mut Qubit) { q.x() }"),
+        ]),
+        [
+            "N013 `wrap` is not reversible",
+            "warning `plain` is reversible, but other modules can use it as reversible only if it is declared `rev fn`",
+        ]
+    );
 }

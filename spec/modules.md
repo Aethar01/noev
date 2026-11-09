@@ -1,7 +1,7 @@
 # Modules and packages
 
-Status: **Implemented**, except where a section says otherwise: the visibility of fields and
-methods (§4), reversibility across modules (§5), and the prelude as a module of its own (§6).
+Status: **Implemented**, except where a section says otherwise: being a circuit across
+modules (§5), and the prelude as a module of its own (§6).
 `noev check`, `build`, `run` and `export` take a `.nv` file or a package directory.
 
 ## 1. Files are modules
@@ -120,10 +120,14 @@ is part of a function's contract:
   by its `rev` declaration.
 - `unsafe fn` works the same in every module.
 - Being a circuit works like reversibility: a function is a circuit to other modules only if
-  it is declared `circuit fn` ([execution.md](execution.md) §4).
+  it is declared `circuit fn` ([execution.md](execution.md) §4). (Open: a `circuit fn` takes
+  no qubits, so this would make every run that calls another module's gates run shot by
+  shot. Not implemented until that is settled.)
 
-The compiler warns about a function visible outside its module that is reversible but not
-declared `rev`, since callers elsewhere cannot use it as reversible.
+The compiler warns about a function visible outside its module that acts on qubits and is
+reversible but not declared `rev`, since callers elsewhere cannot use it as reversible.
+Functions that do not act on qubits are left alone, so classical helpers need no `rev`
+unless reversible code in other modules calls them.
 
 ## 6. The prelude
 
@@ -199,6 +203,8 @@ path_prefix = ( IDENT | "pkg" | "super" ) { "::" IDENT } ;
 
 ## 10. Open questions
 
+- **Circuits across modules** (§5): what a function from another module must declare for a
+  run that calls it to be a circuit, given that a `circuit fn` takes no qubits.
 - **Package registry**: where packages are published and fetched from, which belongs to the
   tooling as much as the language. Until there is one, dependencies are paths or git URLs,
   as Cargo allows.

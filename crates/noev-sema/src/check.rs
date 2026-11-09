@@ -9,7 +9,7 @@ use noev_syntax::ast::*;
 use noev_syntax::{Diagnostic, FxHashMap, Span, Symbol};
 
 use crate::prelude::{self, Builtin, Math, Reversible, Sig};
-use crate::resolve::{self, Binding, Entry, Found, Ns, PathError, PathWords, Scopes};
+use crate::resolve::{self, Binding, Entry, Found, Ns, PathError, PathWords, Scopes, Visible};
 use crate::ty::{Kind, StructDef, StructId, Ty, TyKind, Types, VariantDef};
 
 /// A local variable: a `let` binding, parameter, `self`, or loop variable.
@@ -201,6 +201,7 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         diagnostics,
         item_structs: vec![None; ast.all_items().len()],
         std_types: FxHashMap::default(),
+        field_vis: FxHashMap::default(),
         methods: FxHashMap::default(),
         scope: Vec::new(),
         self_ty: None,
@@ -233,6 +234,8 @@ struct Checker<'a> {
     item_structs: Vec<Option<StructId>>,
     /// The standard library's types in the prelude: `Basis` and `State`.
     std_types: FxHashMap<Symbol, StructId>,
+    /// Where each field of each struct can be used from, in declaration order.
+    field_vis: FxHashMap<StructId, Vec<Visible>>,
     methods: FxHashMap<(StructId, Symbol), FnId>,
     /// Locals in scope, innermost last.
     scope: Vec<(Symbol, LocalId)>,
@@ -402,6 +405,7 @@ impl<'a> Checker<'a> {
                     let self_ty = self.t.types.struct_ty(id);
                     self.self_ty = Some(self_ty);
                     let mut resolved: Vec<(Symbol, Ty)> = Vec::new();
+                    let mut visible = Vec::new();
                     for field in ast.list(fields) {
                         if resolved.iter().any(|(name, _)| *name == field.name) {
                             let message =
@@ -410,9 +414,12 @@ impl<'a> Checker<'a> {
                         }
                         let ty = self.resolve_type(field.ty);
                         resolved.push((field.name, ty));
+                        visible.push(self.visibility(field.vis));
                     }
                     self.t.types.structs[id.index()].fields = resolved;
+                    self.field_vis.insert(id, visible);
                     for &method in ast.list(methods) {
+                        self.visibility(ast.function(method).vis);
                         let name = ast.function(method).name;
                         if self.methods.insert((id, name), method).is_some() {
                             let message = format!("`{}` is defined twice", self.name(name));
@@ -469,6 +476,7 @@ impl<'a> Checker<'a> {
                     }
                     self.t.types.structs[id.index()].variants = Some(resolved);
                     for &method in ast.list(methods) {
+                        self.visibility(ast.function(method).vis);
                         let name = ast.function(method).name;
                         let clash = self.methods.insert((id, name), method).is_some()
                             || self.t.types.structs[id.index()]
@@ -1285,12 +1293,13 @@ impl<'a> Checker<'a> {
                     return Ty::ERROR;
                 }
                 if let Some(id) = self.struct_of(ty)
-                    && let Some(&(_, field_ty)) = self.t.types.structs[id.index()]
+                    && let Some(index) = self.t.types.structs[id.index()]
                         .fields
                         .iter()
-                        .find(|(n, _)| *n == name)
+                        .position(|(n, _)| *n == name)
                 {
-                    return field_ty;
+                    self.field_visible(id, index, expr.span);
+                    return self.t.types.structs[id.index()].fields[index].1;
                 }
                 let message = format!("{} has no field `{}`", self.show(ty), self.name(name));
                 self.error(expr.span, message);
@@ -1899,8 +1908,56 @@ impl<'a> Checker<'a> {
             return Ty::ERROR;
         }
         let fields = self.t.types.structs[id.index()].fields.clone();
+        // Other modules cannot create a struct whose fields they cannot see.
+        for init in ast.list(inits) {
+            if let Some(index) = fields.iter().position(|(n, _)| *n == init.name) {
+                self.field_visible(id, index, init.span);
+            }
+        }
         self.field_inits(inits, &fields, struct_ty, span);
         struct_ty
+    }
+
+    /// Where `vis`, written in the current module, can be used from, reporting a `pub(in …)`
+    /// that names no module containing it.
+    fn visibility(&mut self, vis: Vis) -> Visible {
+        match self.scopes.visibility(self.words, self.module, vis) {
+            Ok(visible) => visible,
+            Err((span, message)) => {
+                self.error(span, message);
+                Visible::Within(self.module)
+            }
+        }
+    }
+
+    /// Reports the field `index` of the struct `id` if the current module cannot see it.
+    fn field_visible(&mut self, id: StructId, index: usize, span: Span) {
+        let Some(&visible) = self.field_vis.get(&id).and_then(|v| v.get(index)) else {
+            return;
+        };
+        if !self.scopes.can_see(self.module, visible) {
+            let def = &self.t.types.structs[id.index()];
+            let message = format!(
+                "the field `{}` of `{}` is private",
+                self.name(def.fields[index].0),
+                self.name(def.name)
+            );
+            self.error(span, message);
+        }
+    }
+
+    /// Reports the method `f` if the current module cannot see it.
+    fn method_visible(&mut self, f: FnId, span: Span) {
+        let decl = self.ast.function(f);
+        let module = self.t.fn_modules[f.index()];
+        let visible = self
+            .scopes
+            .visibility(self.words, module, decl.vis)
+            .unwrap_or(Visible::Within(module));
+        if !self.scopes.can_see(self.module, visible) {
+            let message = format!("`{}` is private", self.name(decl.name));
+            self.error(span, message);
+        }
     }
 
     fn skip_inits(&mut self, inits: List<FieldInit>) {
@@ -2411,6 +2468,9 @@ impl<'a> Checker<'a> {
                     && let Some(ty) = self.path_type(at, ty_name, path_span)
                 {
                     if let Some((callee_kind, sig)) = self.lookup_method(ty, name) {
+                        if let Callee::Fn(f) = callee_kind {
+                            self.method_visible(f, path_span);
+                        }
                         self.t.callees[id.index()] = Some(callee_kind);
                         // `Type::method(x, …)` passes the receiver as the first argument.
                         let receiver = sig.receiver.map(|kind| match kind {
@@ -2650,6 +2710,9 @@ impl<'a> Checker<'a> {
             self.error(span, message);
             return self.skip_args(args);
         };
+        if let Callee::Fn(f) = callee {
+            self.method_visible(f, span);
+        }
         if sig.receiver.is_none() {
             let message = format!(
                 "`{0}` is an associated function, not a method; call it as `{1}::{0}(…)`",

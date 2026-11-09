@@ -224,9 +224,12 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
     // Ownership is only meaningful for a well-typed program, and circuits for one that
     // passes ownership checking.
     let mut circuits = noev_sema::Circuits::default();
-    if diagnostics.is_empty() && type_errors.is_empty() {
+    let errors = |d: &[noev_syntax::Diagnostic]| {
+        d.iter().any(|d| d.severity == noev_syntax::Severity::Error)
+    };
+    if !errors(&diagnostics) && !errors(&type_errors) {
         diagnostics.extend(noev_sema::check_ownership(&ast, &typed));
-        if diagnostics.is_empty() {
+        if !errors(&diagnostics) {
             let (found, warnings) = noev_sema::check_circuits(&ast, &typed);
             circuits = found;
             diagnostics.extend(warnings);

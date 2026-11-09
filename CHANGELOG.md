@@ -37,6 +37,11 @@ before 1.0.
   re-exports), paths through `pkg`, `super`, `self`, modules and packages, and the
   visibility of items are checked. Imports resolve in any order, and a chain of re-exports
   in one pass.
+- Fields and methods are private to their module unless marked: other modules cannot read
+  a private field, create a struct with one, or call a private method.
+- A function without `rev` is reversible only inside its own module; elsewhere a call to it
+  in reversible code or under `adj` is N013 or N014, with a note saying why. A function
+  visible elsewhere that acts on qubits and is reversible only by inference gets a warning.
 - Functions outside a package's root module are named by their path in the IR (`ansatz::ry_layer`,
   `qlib::flip`), and `fn main` is only the one in the root module.
 

@@ -142,6 +142,34 @@ impl Scopes<'_> {
         }
     }
 
+    /// Where something marked `vis` in `module` can be used from. `Err` with the path's span
+    /// if `pub(in path)` does not name a module containing this one; it is then private.
+    pub fn visibility(
+        &self,
+        words: PathWords,
+        module: ModuleId,
+        vis: Vis,
+    ) -> Result<Visible, (Span, String)> {
+        Ok(match vis {
+            Vis::Private => Visible::Within(module),
+            Vis::Pub => Visible::Everywhere,
+            Vis::Pkg => Visible::Package(self.package(module)),
+            // Rust allows `pub(super)` only where there is a parent.
+            Vis::Super => Visible::Within(self.parent(module).unwrap_or(module)),
+            Vis::In { path, span } => {
+                let segments = self.ast.list(path);
+                match self.module_path(words, module, segments) {
+                    Ok(target) if self.is_within(module, target) => Visible::Within(target),
+                    Ok(_) => {
+                        let message = "`pub(in …)` must name a module that contains this one";
+                        return Err((span, message.into()));
+                    }
+                    Err(error) => return Err((span, path_message(self.ast, segments, &error))),
+                }
+            }
+        })
+    }
+
     /// Whether everywhere `inner` reaches, `outer` does too.
     fn covers(&self, outer: Visible, inner: Visible) -> bool {
         match (outer, inner) {
@@ -420,35 +448,15 @@ struct Resolver<'a> {
 }
 
 impl Resolver<'_> {
-    /// Resolves a visibility written in `module`.
+    /// Resolves a visibility written in `module`, reporting a `pub(in …)` that names no module
+    /// containing it.
     fn visible(&mut self, module: ModuleId, vis: Vis) -> Visible {
-        match vis {
-            Vis::Private => Visible::Within(module),
-            Vis::Pub => Visible::Everywhere,
-            Vis::Pkg => Visible::Package(self.scopes.package(module)),
-            Vis::Super => match self.scopes.parent(module) {
-                Some(parent) => Visible::Within(parent),
-                // Rust allows `pub(super)` only where there is a parent.
-                None => Visible::Within(module),
-            },
-            Vis::In { path, span } => {
-                let segments = self.ast.list(path);
-                match self.scopes.module_path(self.words, module, segments) {
-                    Ok(target) if self.scopes.is_within(module, target) => Visible::Within(target),
-                    Ok(_) => {
-                        let message = "`pub(in …)` must name a module that contains this one";
-                        self.diagnostics.push(Diagnostic::error(span, message));
-                        Visible::Within(module)
-                    }
-                    Err(_) => {
-                        let text = self.path_text(segments);
-                        let message = format!("cannot find the module `{text}`");
-                        self.diagnostics.push(Diagnostic::error(span, message));
-                        Visible::Within(module)
-                    }
-                }
-            }
-        }
+        self.scopes
+            .visibility(self.words, module, vis)
+            .unwrap_or_else(|(span, message)| {
+                self.diagnostics.push(Diagnostic::error(span, message));
+                Visible::Within(module)
+            })
     }
 
     fn path_text(&self, segments: &[Symbol]) -> String {

@@ -235,10 +235,13 @@ impl Document {
         let mut found = parsed.diagnostics.clone();
         let mut circuits = None;
         let mut reversible = None;
-        if found.is_empty() && type_errors.is_empty() {
+        let errors = |d: &[noev_syntax::Diagnostic]| {
+            d.iter().any(|d| d.severity == noev_syntax::Severity::Error)
+        };
+        if !errors(&found) && !errors(&type_errors) {
             reversible = Some(noev_sema::reversibility(&parsed.ast, &typed));
             found.extend(noev_sema::check_ownership(&parsed.ast, &typed));
-            if found.is_empty() {
+            if !errors(&found) {
                 let (info, warnings) = noev_sema::check_circuits(&parsed.ast, &typed);
                 found.extend(warnings);
                 circuits = Some(info);
