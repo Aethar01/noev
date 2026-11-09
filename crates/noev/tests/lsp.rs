@@ -418,3 +418,64 @@ fn data_variants_hover_and_definition() {
     );
     client.stop();
 }
+
+/// The next diagnostics published, with the URI they are for.
+fn next_diagnostics(client: &mut Client) -> (String, Vec<Value>) {
+    loop {
+        let message = client.receive();
+        if message["method"] == "textDocument/publishDiagnostics" {
+            let params = &message["params"];
+            let diagnostics = params["diagnostics"].as_array().unwrap().clone();
+            return (params["uri"].as_str().unwrap().to_string(), diagnostics);
+        }
+    }
+}
+
+#[test]
+fn files_of_a_package_are_checked_together() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/packages/vqe/src")
+        .canonicalize()
+        .unwrap();
+    let uri = |file: &str| format!("file://{}", dir.join(file).display());
+    let main = uri("main.nv");
+    let mut client = Client::start();
+    client.open(
+        &main,
+        &std::fs::read_to_string(dir.join("main.nv")).unwrap(),
+    );
+    // Its imports, from other modules and a dependency, resolve.
+    let (for_uri, diagnostics) = next_diagnostics(&mut client);
+    assert_eq!(for_uri, main);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    // `prepare`, on line 8, is defined in `ansatz.nv`.
+    let definition = client.at("textDocument/definition", &main, 7, 14);
+    assert_eq!(definition["uri"], uri("ansatz.nv"));
+    assert_eq!(definition["range"]["start"]["line"], 4);
+    let hover = client.at("textDocument/hover", &main, 7, 14);
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("fn prepare(layer: Layer) -> Qubit"),
+        "{hover:?}"
+    );
+
+    // Making `prepare` private, in the editor, breaks the import in `main.nv`.
+    let ansatz = uri("ansatz.nv");
+    let text = std::fs::read_to_string(dir.join("ansatz.nv")).unwrap();
+    client.open(&ansatz, &text.replace("pub fn prepare", "fn prepare"));
+    let mut published = Vec::new();
+    for _ in 0..2 {
+        published.push(next_diagnostics(&mut client));
+    }
+    let (_, diagnostics) = published
+        .iter()
+        .find(|(u, _)| *u == main)
+        .expect("main.nv rechecked");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(diagnostics[0]["message"], "`prepare` is private");
+    assert_eq!(diagnostics[0]["range"]["start"]["line"], 1);
+    client.stop();
+}

@@ -49,7 +49,14 @@ impl std::fmt::Display for LoadError {
 
 /// Loads the `.nv` file or package directory at `path`.
 pub fn load(path: &Path) -> Result<Loaded, LoadError> {
+    load_with(path, &HashMap::new())
+}
+
+/// Loads the `.nv` file or package directory at `path`, with the files in `open` read from
+/// there instead of from disk: the language server's open documents.
+pub fn load_with(path: &Path, open: &HashMap<PathBuf, String>) -> Result<Loaded, LoadError> {
     let mut loader = Loader {
+        open,
         loaded: Loaded {
             sources: SourceMap::default(),
             ast: Ast::new(),
@@ -62,7 +69,7 @@ pub fn load(path: &Path) -> Result<Loaded, LoadError> {
     if path.is_dir() {
         loader.package(path, None)?;
     } else {
-        let text = read(path)?;
+        let text = loader.read(path)?;
         let package = loader.loaded.ast.add_package("main");
         let root = loader.loaded.ast.package(package).root;
         loader.module(root, path, text)?;
@@ -71,8 +78,18 @@ pub fn load(path: &Path) -> Result<Loaded, LoadError> {
     Ok(loader.loaded)
 }
 
-fn read(path: &Path) -> Result<String, LoadError> {
-    std::fs::read_to_string(path).map_err(|e| LoadError::Io(path.to_path_buf(), e))
+/// The package directory a `.nv` file is in, if it is under a package's `src/`.
+pub fn package_of(file: &Path) -> Option<PathBuf> {
+    let mut dir = file.parent()?;
+    loop {
+        if dir.file_name().is_some_and(|n| n == "src")
+            && let Some(package) = dir.parent()
+            && package.join("noev.toml").is_file()
+        {
+            return Some(package.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
 }
 
 /// Whether `name` can name a module or package: an identifier that is not a keyword.
@@ -95,7 +112,9 @@ struct Requested {
     span: Span,
 }
 
-struct Loader {
+struct Loader<'o> {
+    /// Files read from here instead of from disk.
+    open: &'o HashMap<PathBuf, String>,
     loaded: Loaded,
     /// The packages loaded so far, by their directory.
     packages: HashMap<PathBuf, PackageId>,
@@ -106,7 +125,14 @@ struct Loader {
     manifest: u32,
 }
 
-impl Loader {
+impl Loader<'_> {
+    fn read(&self, path: &Path) -> Result<String, LoadError> {
+        if let Some(text) = self.open.get(path) {
+            return Ok(text.clone());
+        }
+        std::fs::read_to_string(path).map_err(|e| LoadError::Io(path.to_path_buf(), e))
+    }
+
     fn error(&mut self, span: Span, message: impl Into<String>) {
         self.loaded
             .diagnostics
@@ -181,7 +207,7 @@ impl Loader {
                 None => Err(LoadError::NotAPackage(dir.to_path_buf())),
             };
         }
-        let text = read(&manifest_path)?;
+        let text = self.read(&manifest_path)?;
         let base = self.add_file(&manifest_path, text.clone())?;
         let at = |range: std::ops::Range<usize>| {
             Span::new(base + range.start as u32, base + range.end as u32)
@@ -270,7 +296,7 @@ impl Loader {
         self.packages.insert(canonical.clone(), id);
         self.stack.push(canonical);
         let root = self.loaded.ast.package(id).root;
-        let text = read(&root_file)?;
+        let text = self.read(&root_file)?;
         self.module(root, &root_file, text)?;
         self.manifest = base;
         self.modules(&src, root, true)?;
@@ -367,7 +393,7 @@ impl Loader {
                 }
             };
             if is_file {
-                let text = read(&path)?;
+                let text = self.read(&path)?;
                 self.module(module, &path, text)?;
             } else {
                 self.modules(&path, module, false)?;

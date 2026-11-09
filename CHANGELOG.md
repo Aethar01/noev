@@ -51,6 +51,9 @@ before 1.0.
 ### Tools
 
 - The tree-sitter grammar and Neovim highlights know visibilities and `use`.
+- The language server checks a file in a package with the rest of the package, reading open
+  documents from the editor; it rechecks the package's other open files when one changes, and
+  go to definition and diagnostic notes can point into other files.
 
 ## [0.4.2] - 2026-11-08
 
