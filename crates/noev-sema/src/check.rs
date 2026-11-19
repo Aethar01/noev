@@ -609,9 +609,10 @@ struct Checker<'a> {
     library: bool,
     /// `std::ops`'s `Add`, `Sub`, `Mul` and `Neg`, when the program uses them.
     ops: [Option<TraitId>; 4],
-    /// While an operator's call is checked, how it is written, so a bound it does not meet
-    /// is reported as the operator's.
-    operator: Option<&'static str>,
+    /// While an operator's call is checked, how it is written and where it is, so a bound
+    /// it does not meet is reported as the operator's (and one of a call in its operands is
+    /// not).
+    operator: Option<(&'static str, Span)>,
     /// The associated types bounds fix, as `T: Measure<Result = Bit>`, by parameter, trait,
     /// trait arguments and name.
     param_assoc: FxHashMap<(Ty, TraitId, Vec<Ty>, Symbol), Ty>,
@@ -3334,7 +3335,8 @@ impl<'a> Checker<'a> {
                     && !(trait_args.is_empty() && self.infer_bound(arg, trait_id, span))
                 {
                     let trait_name = self.trait_text(trait_id, &trait_args);
-                    if let Some(word) = self.operator
+                    if let Some((word, at)) = self.operator
+                        && at == span
                         && let [rhs] = trait_args[..]
                     {
                         let message = format!(
@@ -4946,9 +4948,9 @@ impl<'a> Checker<'a> {
             self.t.adjust[receiver.index()] = Adjust::Deref;
         }
         let errors = self.diagnostics.len();
-        self.operator = Some(word);
+        let outer = self.operator.replace((word, span));
         let ty = self.method_args(id, f, &sig, Some(base), None, args, span);
-        self.operator = None;
+        self.operator = outer;
         // A side that does not fit leaves `Output` unknown: one error is enough.
         Some(if self.diagnostics.len() > errors {
             Ty::ERROR

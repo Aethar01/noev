@@ -575,6 +575,15 @@ fn operator_traits() {
         )),
         ["`+` cannot be applied to `P` and `Int`: `P` does not implement `Add<Int>`"]
     );
+    // A bound a call in an operand does not meet is that call's, not the operator's.
+    assert_eq!(
+        errors(&format!(
+            "{OPS}impl Add<Int> for P {{ type Output = Int\n fn add(mv self, r: Int) -> Int {{ r }} }}\n\
+             fn g<T: Add<Int>>(t: T) -> Int {{ 1 }}\n\
+             fn f(a: P) -> Int {{ a + g(true) }}"
+        )),
+        ["`g` needs `T: Add<Int>`, but `Bool` does not implement `Add<Int>`"]
+    );
     // Without `std::ops`, the operator is the built-in one, and says where to look.
     assert_eq!(
         errors("struct P { x: Int }\nfn f(a: P, b: P) -> P { a + b }"),
