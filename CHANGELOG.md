@@ -10,6 +10,8 @@ before 1.0.
 ### Spec
 
 - 0.5 is planned in `docs/PLAN.md`: modules, generics, native code, interop and backends.
+- Quantum integers are dropped from the plan: a library can define one on generics, size
+  parameters and `rev` methods. Operator traits stay under "not yet" in `spec/types.md` §6.
 - Modules follow Rust: glob imports, `pub(pkg)`, `pub(super)` and `pub(in path)`, and a small
   prelude, so `State`, `amplitudes`, `fft`, `ifft`, `P` and `PX` will need a `use`.
 - C interop follows Rust: arrays by reference, `extern "C" struct` for C layout, and

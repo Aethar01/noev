@@ -520,7 +520,8 @@ there; a `rev` one cannot measure, so it keeps a run a circuit.)
 
 Arithmetic in sizes; `From` beyond the built-in conversions; `impl Trait` arguments;
 closures; the quantum interfaces `Oracle`, `Ansatz` and `Observable` in the standard library.
-Operator traits (`std::ops`: `Add`, `Sub`, `Mul`, `Neg`, …) arrive with quantum integers.
+Operator traits (`std::ops`: `Add`, `Sub`, `Mul`, `Neg`, …), so that a type of a program's own
+can use `+`; they need associated types in generic traits (`Add<Rhs>` with `Output`).
 
 ## 7. Printing and formatting
 

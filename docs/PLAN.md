@@ -403,8 +403,9 @@ Releases after the v0.1 milestones (§5), in order.
 | 6  | Bras of preparations          | `<bell()| mv pair`: a measurement test against any reversible preparation | ☑ Done |
 | 7  | Computed labels               | `|0{b}>`, `<{bits}| mv r`: a `Bit`, `[Bit; N]` or `State` value as labels | ☑ Done |
 
-Quantum integers (registers with reversible arithmetic, like Silq's `uint[n]`) need generics
-and operator traits; they are 0.5 step 4.
+Quantum integers (registers with reversible arithmetic, like Silq's `uint[n]`) are not part
+of the language: with generics, size parameters and `rev` methods, a library can define one
+(`struct QInt<const N: Int> { r: [Qubit; N] }`). Dropped from 0.5 on 2026-11-19.
 
 ### 0.4: complex numbers and amplitudes
 
@@ -428,7 +429,7 @@ gets a compile-fail test under `tests/ui/`.
 | 1  | Per-file span offsets         | Spans address a source map of several files, so diagnostics name the file; needed by modules | ☑ Done: `noev_syntax::SourceMap`; the CLI still reads one file |
 | 2  | Modules and packages          | Files are modules, `use` imports, `pub` visibility, the prelude, `noev.toml` packages (`spec/modules.md`) | ☑ Done |
 | 3  | Traits and generics           | `trait`, `impl Trait for Type`, generic functions and types; generic code assumes values may be linear; `Copy` and `Measure`; `Option` and `Result` become ordinary generic enums (`spec/types.md` §6) | ☑ Done: associated types are not yet allowed in generic traits |
-| 4  | Quantum integers              | Registers with reversible arithmetic, on generics and operator traits | ☐ |
+| 4  | ~~Quantum integers~~          | Dropped on 2026-11-19: a library can define them on generics and size parameters (§11, 0.3) | Dropped |
 | 5  | `with`/`do` and release       | Compute–use–uncompute blocks, and automatic release of qubits proven to be in \|0⟩ (`spec/ownership.md` §9) | ☐ |
 | 6  | Lifetimes                     | Non-lexical lifetimes, explicit lifetimes, references in structs     | ☐ |
 | 7  | Runtime C ABI                 | Shaped like QIR's, with the interpreter moved onto it (`spec/runtime.md` §4) | ☐ |
