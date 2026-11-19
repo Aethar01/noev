@@ -543,3 +543,60 @@ fn associated_types_in_generic_traits() {
         ]
     );
 }
+
+const OPS: &str = "use std::ops::{Add, Neg}\nstruct P { x: Int }\n";
+
+/// `+` on a type of the program's own calls `Add::add`; without an `impl`, or a bound on a
+/// type parameter, it is an error that says which.
+#[test]
+fn operator_traits() {
+    ok(&format!(
+        "{OPS}impl Add<P> for P {{ type Output = Int\n fn add(mv self, r: P) -> Int {{ self.x + r.x }} }}\n\
+         fn f(a: P, b: P) -> Int {{ a + b + 1 }}\n\
+         fn g<T: Add<T, Output = Int>>(a: T, b: T) -> Int {{ mv a + mv b }}"
+    ));
+    assert_eq!(
+        errors(&format!("{OPS}fn f(a: P, b: P) -> P {{ a + b }}")),
+        ["`+` cannot be applied to `P`: it does not implement `Add`"]
+    );
+    assert_eq!(
+        errors(&format!("{OPS}fn f(a: P) -> P {{ -a }}")),
+        ["`-` cannot be applied to `P`: it does not implement `Neg`"]
+    );
+    assert_eq!(
+        errors(&format!("{OPS}fn f<T>(a: T, b: T) -> T {{ mv a + mv b }}")),
+        ["`+` cannot be applied to `T`: it does not implement `Add`"]
+    );
+    // The right side must be what the `impl` takes.
+    assert_eq!(
+        errors(&format!(
+            "{OPS}impl Add<P> for P {{ type Output = P\n fn add(mv self, r: P) -> P {{ mv r }} }}\n\
+             fn f(a: P) -> P {{ a + 1 }}"
+        )),
+        ["`+` cannot be applied to `P` and `Int`: `P` does not implement `Add<Int>`"]
+    );
+    // Without `std::ops`, the operator is the built-in one, and says where to look.
+    assert_eq!(
+        errors("struct P { x: Int }\nfn f(a: P, b: P) -> P { a + b }"),
+        ["`+` cannot be applied to `P` and `P`"]
+    );
+}
+
+/// The operands of an operator on qubits are moved, so they need `mv`.
+#[test]
+fn operator_operands_are_moved() {
+    let reg = "use std::ops::Add\nstruct R { q: Qubit }\n\
+               impl Add<R> for R { type Output = R\n fn add(mv self, r: R) -> R { mv r.q.measure()\n mv self } }\n";
+    assert_eq!(
+        ownership(&format!("{reg}fn f(a: R, b: R) -> R {{ mv a + mv b }}")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        ownership(&format!("{reg}fn f(a: R, b: R) -> R {{ a + mv b }}")),
+        ["N001 `+` takes ownership of `a`"]
+    );
+    assert_eq!(
+        ownership(&format!("{reg}fn f(a: R, b: R) -> R {{ mv a + b }}")),
+        ["N001 `b` holds qubits, which cannot be copied"]
+    );
+}

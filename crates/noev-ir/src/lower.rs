@@ -1354,6 +1354,12 @@ impl Builder<'_> {
             }
             ExprKind::StructLit { fields, .. } => self.struct_lit(id, fields, dest),
             ExprKind::Call { .. } | ExprKind::MethodCall { .. } => self.call(id, dest, false),
+            // `a + b` on a type of the program's own calls `Add::add`.
+            ExprKind::Unary { .. } | ExprKind::Binary { .. }
+                if self.typed.is_operator_call(ast, id) =>
+            {
+                self.call(id, dest, false)
+            }
             ExprKind::Adj(call) => self.call(call, dest, true),
             ExprKind::Unary { op, operand } => {
                 let x = self.operand(operand);
@@ -1862,11 +1868,10 @@ impl Builder<'_> {
 impl Builder<'_> {
     fn call(&mut self, id: ExprId, dest: Option<Place>, adjoint: bool) {
         let ast = self.ast;
-        let (receiver, args) = match ast.expr(id).kind {
-            ExprKind::Call { args, .. } => (None, ast.list(args)),
-            ExprKind::MethodCall { receiver, args, .. } => (Some(receiver), ast.list(args)),
-            _ => return,
+        let Some((receiver, args)) = self.typed.call_parts(ast, id) else {
+            return;
         };
+        let args = &*args;
         let Some(callee) = self.typed.callees[id.index()] else {
             return;
         };

@@ -354,7 +354,58 @@ pub struct Run {
     pub ty: Ty,
 }
 
+/// The arguments of a call, after its receiver: a list from the syntax tree, or an
+/// operator's right side.
+#[derive(Clone, Copy, Debug)]
+pub enum Args<'a> {
+    /// A call's or method call's arguments.
+    List(&'a [ExprId]),
+    /// The right side of a binary operator.
+    One([ExprId; 1]),
+    /// A unary operator has none.
+    None,
+}
+
+impl std::ops::Deref for Args<'_> {
+    type Target = [ExprId];
+
+    fn deref(&self) -> &[ExprId] {
+        match self {
+            Args::List(list) => list,
+            Args::One(one) => one,
+            Args::None => &[],
+        }
+    }
+}
+
 impl Typed {
+    /// A call's receiver and arguments, if `id` is a call: a call, a method call, or an
+    /// operator on a type of the program's own, which calls its `std::ops` trait's function
+    /// with the left side (or the only one) as receiver (`spec/types.md` §6).
+    pub fn call_parts<'a>(&self, ast: &'a Ast, id: ExprId) -> Option<(Option<ExprId>, Args<'a>)> {
+        match ast.expr(id).kind {
+            ExprKind::Call { args, .. } => Some((None, Args::List(ast.list(args)))),
+            ExprKind::MethodCall { receiver, args, .. } => {
+                Some((Some(receiver), Args::List(ast.list(args))))
+            }
+            ExprKind::Binary { lhs, rhs, .. } if self.callees[id.index()].is_some() => {
+                Some((Some(lhs), Args::One([rhs])))
+            }
+            ExprKind::Unary { operand, .. } if self.callees[id.index()].is_some() => {
+                Some((Some(operand), Args::None))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `id` is an operator that calls a `std::ops` trait's function.
+    pub fn is_operator_call(&self, ast: &Ast, id: ExprId) -> bool {
+        matches!(
+            ast.expr(id).kind,
+            ExprKind::Binary { .. } | ExprKind::Unary { .. }
+        ) && self.callees[id.index()].is_some()
+    }
+
     /// The type of `expr`.
     pub fn ty(&self, expr: ExprId) -> Ty {
         self.expr_types[expr.index()]
@@ -491,6 +542,8 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         param_bounds: FxHashMap::default(),
         inferred: FxHashMap::default(),
         library: false,
+        ops: [None; 4],
+        operator: None,
         param_assoc: FxHashMap::default(),
         impl_assoc: Vec::new(),
     };
@@ -554,6 +607,11 @@ struct Checker<'a> {
     inferred: FxHashMap<Ty, Vec<(TraitId, Span)>>,
     /// Whether the package being compiled is a library: it has no `fn main`.
     library: bool,
+    /// `std::ops`'s `Add`, `Sub`, `Mul` and `Neg`, when the program uses them.
+    ops: [Option<TraitId>; 4],
+    /// While an operator's call is checked, how it is written, so a bound it does not meet
+    /// is reported as the operator's.
+    operator: Option<&'static str>,
     /// The associated types bounds fix, as `T: Measure<Result = Bit>`, by parameter, trait,
     /// trait arguments and name.
     param_assoc: FxHashMap<(Ty, TraitId, Vec<Ty>, Symbol), Ty>,
@@ -676,6 +734,13 @@ impl<'a> Checker<'a> {
                 && ast.name(name) == "Measure"
             {
                 self.t.types.measure = Some(id.0);
+            }
+            if Some(ast.module(self.module).package) == ast.std_package()
+                && let Some(op) = ["Add", "Sub", "Mul", "Neg"]
+                    .iter()
+                    .position(|&n| n == ast.name(name))
+            {
+                self.ops[op] = Some(id);
             }
             for &f in ast.list(fns) {
                 self.t.fn_traits.insert(f, id);
@@ -2595,6 +2660,11 @@ impl<'a> Checker<'a> {
                     && matches!(ast.expr(operand).kind, ExprKind::Int(_) | ExprKind::BigInt);
                 let ty = self.expr(operand, hint);
                 self.negating = false;
+                if op == UnaryOp::Neg
+                    && let Some(ty) = self.operator(id, 3, ty, &[], expr.span)
+                {
+                    return ty;
+                }
                 let ty = self.t.types.deref(ty);
                 let ok = match op {
                     UnaryOp::Neg => {
@@ -2636,6 +2706,17 @@ impl<'a> Checker<'a> {
                     (self.expr(lhs, Expect::Hint(hint)), rhs_ty)
                 } else {
                     let lhs_ty = self.expr(lhs, outer);
+                    let index = match op {
+                        Add => Some(0),
+                        Sub => Some(1),
+                        Mul => Some(2),
+                        _ => None,
+                    };
+                    if let Some(index) = index
+                        && let Some(ty) = self.operator(id, index, lhs_ty, &[rhs], expr.span)
+                    {
+                        return ty;
+                    }
                     let hint = self.t.types.deref(lhs_ty);
                     (lhs_ty, self.expr(rhs, Expect::Hint(hint)))
                 };
@@ -3067,6 +3148,18 @@ impl<'a> Checker<'a> {
                     && !(trait_args.is_empty() && self.infer_bound(arg, trait_id, span))
                 {
                     let trait_name = self.trait_text(trait_id, &trait_args);
+                    if let Some(word) = self.operator
+                        && let [rhs] = trait_args[..]
+                    {
+                        let message = format!(
+                            "`{word}` cannot be applied to {} and {}: {} does not implement `{trait_name}`",
+                            self.show(arg),
+                            self.show(rhs),
+                            self.show(arg)
+                        );
+                        self.error(span, message);
+                        continue;
+                    }
                     let message = format!(
                         "`{callee}` needs `{}: {trait_name}`, but {} does not implement `{trait_name}`",
                         self.name(def.name),
@@ -3932,6 +4025,18 @@ impl<'a> Checker<'a> {
             ))
         } else if lhs.is_number() && rhs.is_number() {
             Some("Noev does not convert between number types implicitly; convert one side, as in `i64(x)` or `Int(x)`".to_string())
+        } else if let Some(name) = match op {
+            Add => Some("Add"),
+            Sub => Some("Sub"),
+            Mul => Some("Mul"),
+            _ => None,
+        } && matches!(self.t.types.kind(lhs), TyKind::Struct(_) | TyKind::Param(_))
+        {
+            Some(format!(
+                "to give {} `{}`, implement `std::ops::{name}` for it",
+                self.show(lhs),
+                op.as_str()
+            ))
         } else {
             None
         };
@@ -4601,6 +4706,69 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// `a + b`, `a - b`, `a * b` or `-a` on a type of the program's own, a call of the
+    /// operator's trait's function with `a` as receiver: `std::ops` trait `index` (`Add`,
+    /// `Sub`, `Mul`, `Neg`). `None` for a built-in type, or when `std::ops` is not used,
+    /// leaving the operator built in.
+    fn operator(
+        &mut self,
+        id: ExprId,
+        index: usize,
+        receiver_ty: Ty,
+        args: &[ExprId],
+        span: Span,
+    ) -> Option<Ty> {
+        let trait_id = self.ops[index]?;
+        let base = self.t.types.deref(receiver_ty);
+        if !matches!(
+            self.t.types.kind(base),
+            TyKind::Struct(_) | TyKind::Param(_)
+        ) {
+            return None;
+        }
+        let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
+        if !self.implements(base, trait_id, None) {
+            let word = ["+", "-", "*", "-"][index];
+            let message = format!(
+                "`{word}` cannot be applied to {}: it does not implement `{trait_name}`",
+                self.show(base)
+            );
+            let help = if self.t.types.as_param(base).is_some() {
+                format!(
+                    "bound it: `{}: {trait_name}<…>`",
+                    self.show(base).trim_matches('`')
+                )
+            } else {
+                format!("implement `std::ops::{trait_name}` for it")
+            };
+            self.error(span, message).help = Some(help);
+            return Some(self.skip_args(args));
+        }
+        let word = ["+", "-", "*", "-"][index];
+        let f = self.t.traits[trait_id.index()].fns[0];
+        let sig = self.t.fns[f.index()].sig.clone();
+        self.t.callees[id.index()] = Some(Callee::Fn(f));
+        self.t.receivers[id.index()] = sig.receiver;
+        if base != receiver_ty {
+            let receiver = match self.ast.expr(id).kind {
+                ExprKind::Binary { lhs, .. } => lhs,
+                ExprKind::Unary { operand, .. } => operand,
+                _ => unreachable!("operators are binary or unary"),
+            };
+            self.t.adjust[receiver.index()] = Adjust::Deref;
+        }
+        let errors = self.diagnostics.len();
+        self.operator = Some(word);
+        let ty = self.method_args(id, f, &sig, Some(base), None, args, span);
+        self.operator = None;
+        // A side that does not fit leaves `Output` unknown: one error is enough.
+        Some(if self.diagnostics.len() > errors {
+            Ty::ERROR
+        } else {
+            ty
+        })
     }
 
     fn method_call(

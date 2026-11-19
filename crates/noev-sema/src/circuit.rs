@@ -556,7 +556,10 @@ fn is_quantum_op(ast: &Ast, typed: &Typed, quantum: &[bool], e: ExprId) -> bool 
         | ExprKind::BraTest { .. }
         | ExprKind::PrepTest { .. }
         | ExprKind::Ctrl { .. } => true,
-        ExprKind::Call { .. } | ExprKind::MethodCall { .. } => match typed.callees[e.index()] {
+        ExprKind::Call { .. }
+        | ExprKind::MethodCall { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Unary { .. } => match typed.callees[e.index()] {
             Some(Callee::Builtin(
                 Builtin::Gate(_)
                 | Builtin::Measure
@@ -941,15 +944,16 @@ impl<'a> Walker<'a> {
                         ExprKind::Sample { .. }
                         | ExprKind::Expectation { .. }
                         | ExprKind::Overlap { .. } => Some("starts a repeated run"),
-                        ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
-                            match typed.callees[e.index()] {
-                                Some(Callee::Builtin(Builtin::Print { .. })) => Some("prints"),
-                                Some(Callee::Fn(f)) if !self.cx.recordable[f.index()] => {
-                                    Some("calls a function that prints or starts repeated runs")
-                                }
-                                _ => None,
+                        ExprKind::Call { .. }
+                        | ExprKind::MethodCall { .. }
+                        | ExprKind::Binary { .. }
+                        | ExprKind::Unary { .. } => match typed.callees[e.index()] {
+                            Some(Callee::Builtin(Builtin::Print { .. })) => Some("prints"),
+                            Some(Callee::Fn(f)) if !self.cx.recordable[f.index()] => {
+                                Some("calls a function that prints or starts repeated runs")
                             }
-                        }
+                            _ => None,
+                        },
                         _ => None,
                     };
                     if let Some(why) = why {
@@ -1186,6 +1190,12 @@ impl<'a> Walker<'a> {
                 self.expr(operand, before);
                 true
             }
+            // `a + b` on a type of the program's own calls `Add::add`.
+            ExprKind::Unary { .. } | ExprKind::Binary { .. }
+                if self.cx.typed.is_operator_call(self.cx.ast, id) =>
+            {
+                self.call(id, before)
+            }
             ExprKind::Unary { op, operand } => {
                 let tainted = self.expr(operand, before);
                 let logic = matches!(op, UnaryOp::Not | UnaryOp::BitNot)
@@ -1361,10 +1371,8 @@ impl<'a> Walker<'a> {
 
     fn call(&mut self, id: ExprId, before: bool) -> bool {
         let ast = self.cx.ast;
-        let (receiver, args) = match ast.expr(id).kind {
-            ExprKind::Call { args, .. } => (None, ast.list(args)),
-            ExprKind::MethodCall { receiver, args, .. } => (Some(receiver), ast.list(args)),
-            _ => return false,
+        let Some((receiver, args)) = self.cx.typed.call_parts(ast, id) else {
+            return false;
         };
         let callee = self.cx.typed.callees[id.index()];
         // Qubits are never measurement results, even ones created under a condition on one.
@@ -1375,7 +1383,7 @@ impl<'a> Walker<'a> {
             let tainted = self.expr(r, before) && classical(r);
             tainted_args.push((r, tainted));
         }
-        for &a in args {
+        for &a in args.iter() {
             let tainted = self.expr(a, before) && classical(a);
             tainted_args.push((a, tainted));
         }

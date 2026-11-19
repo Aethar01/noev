@@ -241,6 +241,27 @@ pub const STD_NAMES: [&str; 17] = [
 /// (`spec/modules.md` §6). What is in the prelude is in no module of its own yet.
 pub const STD_MODULES: [&str; 4] = ["debug", "fourier", "observables", "state"];
 
+/// The standard library's `std::ops` module (`spec/types.md` §6), parsed when a program names
+/// `ops`: the traits behind `+`, `-` and `*` on a program's own types.
+const STD_OPS: &str = "
+pub trait Add<Rhs> {
+    type Output
+    fn add(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Sub<Rhs> {
+    type Output
+    fn sub(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Mul<Rhs> {
+    type Output
+    fn mul(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Neg {
+    type Output
+    fn neg(mv self) -> Self::Output
+}
+";
+
 /// A parsed package and its dependencies: every module of each, in one syntax tree.
 #[derive(Debug, Default)]
 pub struct Ast {
@@ -438,11 +459,16 @@ impl Ast {
         let named = |text| self.symbols.get(text).is_some();
         let generic = self.all_fns().iter().any(|f| !f.generics.is_empty());
         let measure = named("Measure") || (generic && named("measure"));
+        let ops = named("ops");
         if self.std.is_none() && (named("std") || measure) {
             let std = self.add_package("std");
             let root = self.package(std).root;
             for name in STD_MODULES {
                 self.add_module(root, name);
+            }
+            if ops {
+                let module = self.add_module(root, "ops");
+                self.std_module(module, STD_OPS);
             }
             if measure {
                 let item = self.measure_trait();
@@ -462,6 +488,44 @@ impl Ast {
             }
         }
         self.root = self.finish(mark);
+    }
+
+    /// Parses `source`, part of the standard library, as `module`'s items. It has no file of
+    /// its own, so its spans are made empty, as built-in parts' are, and notes on it show
+    /// nothing.
+    fn std_module(&mut self, module: ModuleId, source: &str) {
+        let (items, fns, types) = (self.items.len(), self.fns.len(), self.types.len());
+        let params = self.pools.params.items.len();
+        let generic_params = self.pools.generic_params.items.len();
+        let bounds = self.pools.bounds.items.len();
+        let diagnostics = crate::parser::parse_module(self, module, source, 0);
+        debug_assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let none = Span::default();
+        for item in &mut self.items[items..] {
+            item.span = none;
+            if let ItemKind::Trait { name_span, .. } = &mut item.kind {
+                *name_span = none;
+            }
+        }
+        for f in &mut self.fns[fns..] {
+            f.span = none;
+            f.name_span = none;
+            if let Some(r) = &mut f.receiver {
+                r.span = none;
+            }
+        }
+        for t in &mut self.types[types..] {
+            t.span = none;
+        }
+        for p in &mut self.pools.params.items[params..] {
+            p.span = none;
+        }
+        for p in &mut self.pools.generic_params.items[generic_params..] {
+            p.span = none;
+        }
+        for b in &mut self.pools.bounds.items[bounds..] {
+            b.span = none;
+        }
     }
 
     /// The standard library's `Measure` trait (`spec/types.md` §6), built as if parsed from

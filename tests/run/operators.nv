@@ -1,0 +1,69 @@
+// Operator traits (spec/types.md §6): `+`, `*` and `-` on types of the program's own, chosen
+// by the right side's type, through a bound on a generic function, and on qubits, where the
+// operands are moved with `mv`.
+
+use std::ops::{Add, Mul, Neg}
+
+struct V { x: Int, y: Int }
+
+impl Add<V> for V {
+    type Output = V
+    fn add(mv self, rhs: V) -> V { V { x: self.x + rhs.x, y: self.y + rhs.y } }
+}
+
+impl Mul<Int> for V {
+    type Output = V
+    fn mul(mv self, k: Int) -> V { V { x: self.x * k, y: self.y * k } }
+}
+
+// The dot product: another `impl` of `Mul`, picked by the right side's type.
+impl Mul<V> for V {
+    type Output = Int
+    fn mul(mv self, rhs: V) -> Int { self.x * rhs.x + self.y * rhs.y }
+}
+
+impl Neg for V {
+    type Output = V
+    fn neg(mv self) -> V { V { x: -self.x, y: -self.y } }
+}
+
+fn sum3<T: Add<T, Output = T>>(a: T, b: T, c: T) -> T { mv a + mv b + mv c }
+
+// Two qubits; adding one register to another XORs it in, and negating flips both.
+struct Reg { qs: [Qubit; 2] }
+
+impl Add<Reg> for Reg {
+    type Output = Reg
+    fn add(mv self, rhs: Reg) -> Reg {
+        let a = mv self.qs
+        let b = mv rhs.qs
+        for i in 0..2 { ctrl b[i] { a[i].x() } }
+        mv b.measure()
+        Reg { qs: mv a }
+    }
+}
+
+impl Neg for Reg {
+    type Output = Reg
+    fn neg(mv self) -> Reg {
+        let a = mv self.qs
+        a[0].x()
+        a[1].x()
+        Reg { qs: mv a }
+    }
+}
+
+fn main() {
+    let a = V { x: 1, y: 2 }
+    let b = V { x: 10, y: 20 }
+    let c = -(a + b * 2)
+    print("{c.x} {c.y}")
+    print(a * b)
+    let d = sum3(a, b, c)
+    print("{d.x} {d.y}")
+    print(1 + 2 * 3)
+    let r = Reg { qs: |10> }
+    let s = Reg { qs: |11> }
+    let t = -(mv r + mv s)
+    print(mv t.qs.measure())
+}

@@ -25,6 +25,9 @@ before 1.0.
   the `impl` by the arguments inferred from it, or by the type's only `impl` or bound when
   they leave one open, and is an error otherwise. A generic trait's associated types depend
   on its arguments (`Scale<Int>` and `Scale<Float>` can each give a type its own `Out`).
+- Operator traits: `+`, `-`, `*` and unary `-` on a program's own types call `std::ops`'s
+  `Add`, `Sub`, `Mul` and `Neg`, picked by the right side's type, so `v * 2` and `v * w` can
+  differ. Sides holding qubits are moved with `mv`, as arguments are.
 - Being a circuit is decided across modules and packages by the compiler, as within one;
   only reversibility needs a declaration (`rev fn`) to cross a module.
 - Backends are libraries implementing `std::backend::Backend`, in Noev, Rust or C. Every

@@ -337,7 +337,7 @@ where it matters: any place a linear value changes hands has an explicit `mv`.
 
 Status: **Implemented**: type parameters of functions, structs and enums, bounds (`Copy` and
 traits) written or inferred, inference of type arguments, `::<…>`, traits with and without
-type and size parameters, associated types (with `Copy` as their only bound), `impl`s (generic ones too) and monomorphisation, `Trait::f(x)`, `Measure`
+type and size parameters, operator traits (`std::ops`), associated types (with `Copy` as their only bound), `impl`s (generic ones too) and monomorphisation, `Trait::f(x)`, `Measure`
 (for qubits, and tuples and arrays of measurable types), and size parameters. The syntax is
 in [grammar.md](grammar.md) §2.
 
@@ -503,6 +503,42 @@ elements' results. A struct measures by an `impl` of its own, such as `Experimen
 classical `ExperimentResult`. The free function `measure(x)` is `measure<T: Measure>(x: T)
 -> T::Result`.
 
+### Operator traits
+
+`+`, `-`, `*` and unary `-` on a type of the program's own call the function of a trait in
+`std::ops`, which the program implements:
+
+```noev
+use std::ops::{Add, Mul}
+
+impl Add<V> for V {
+    type Output = V
+    fn add(mv self, rhs: V) -> V { V { x: self.x + rhs.x } }
+}
+
+impl Mul<Int> for V {                  // `v * 2`
+    type Output = V
+    fn mul(mv self, k: Int) -> V { V { x: self.x * k } }
+}
+```
+
+| Operator | Trait         | Function                                   |
+| -------- | ------------- | ------------------------------------------ |
+| `a + b`  | `Add<Rhs>`    | `fn add(mv self, rhs: Rhs) -> Self::Output` |
+| `a - b`  | `Sub<Rhs>`    | `fn sub(mv self, rhs: Rhs) -> Self::Output` |
+| `a * b`  | `Mul<Rhs>`    | `fn mul(mv self, rhs: Rhs) -> Self::Output` |
+| `-a`     | `Neg`         | `fn neg(mv self) -> Self::Output`           |
+
+- `a + b` is `Add::add(a, b)`: the `impl` is picked by the right side's type, as for any
+  generic trait, so `v * 2` and `v * w` can be different `impl`s with different `Output`s.
+- Both sides are given by value, so they follow the rules for arguments: a side holding
+  qubits is moved with `mv` (`mv a + mv b`, N001 otherwise), and a copyable one is copied.
+- In generic code the bound is written: `T: Add<T, Output = T>`. Operators do not infer
+  bounds, since their traits have parameters.
+- Built-in types keep their built-in operators. They do not implement the `std::ops` traits
+  yet, so a `T: Add<T>` cannot be given an `Int`.
+- The traits are not in the prelude: `use std::ops::Add` to implement or bound one.
+
 ### Built-in generic types
 
 `Option<T>` and `Result<T, E>` are ordinary generic enums in the prelude, with their variants
@@ -524,8 +560,8 @@ there; a `rev` one cannot measure, so it keeps a run a circuit.)
 
 Arithmetic in sizes; `From` beyond the built-in conversions; `impl Trait` arguments;
 closures; the quantum interfaces `Oracle`, `Ansatz` and `Observable` in the standard library.
-Operator traits (`std::ops`: `Add`, `Sub`, `Mul`, `Neg`, …), so that a type of a program's own
-can use `+`; they need associated types in generic traits (`Add<Rhs>` with `Output`).
+The `std::ops` traits for built-in types, defaults for trait parameters (`Add<Rhs = Self>`),
+and traits for `/`, `%`, comparisons and the bit operators.
 
 ## 7. Printing and formatting
 

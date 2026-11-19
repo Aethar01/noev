@@ -478,7 +478,10 @@ fn irreversible_causes(
                 } if typed.types.linearity(typed.ty(id)) == Kind::Linear => {
                     "it moves qubits".into()
                 }
-                ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
+                ExprKind::Call { .. }
+                | ExprKind::MethodCall { .. }
+                | ExprKind::Binary { .. }
+                | ExprKind::Unary { .. } => {
                     match typed.callees[id.index()] {
                         Some(Callee::Builtin(b)) if !b.reversible() => {
                             format!("it calls `{}`", b.name())
@@ -1206,9 +1209,16 @@ impl Owner<'_> {
                 self.discarded(id, use_);
                 Vec::new()
             }
-            ExprKind::Call { args, .. } => self.call(id, None, args, use_),
+            ExprKind::Call { args, .. } => self.call(id, None, self.ast.list(args), use_),
             ExprKind::MethodCall { receiver, args, .. } => {
-                self.call(id, Some(receiver), args, use_)
+                self.call(id, Some(receiver), self.ast.list(args), use_)
+            }
+            // `a + b` on a type of the program's own calls `Add::add`, `a` its receiver.
+            ExprKind::Binary { lhs, rhs, .. } if self.typed.is_operator_call(self.ast, id) => {
+                self.call(id, Some(lhs), &[rhs], use_)
+            }
+            ExprKind::Unary { operand, .. } if self.typed.is_operator_call(self.ast, id) => {
+                self.call(id, Some(operand), &[], use_)
             }
             ExprKind::Unary { operand, .. } => {
                 self.expr(operand, Use::Read);
@@ -1995,7 +2005,7 @@ impl Owner<'_> {
         &mut self,
         id: ExprId,
         receiver: Option<ExprId>,
-        args: List<ExprId>,
+        args: &[ExprId],
         use_: Use,
     ) -> Carried {
         let span = self.ast.expr(id).span;
@@ -2006,7 +2016,7 @@ impl Owner<'_> {
             receiver_carried = self.receiver(id, receiver);
         }
         let mut arg_carried = Vec::new();
-        for &arg in self.ast.list(args) {
+        for &arg in args {
             arg_carried.extend(self.expr(arg, Use::Value));
         }
 
@@ -2085,9 +2095,11 @@ impl Owner<'_> {
         );
         let ty = self.typed.ty(receiver);
         let is_ref = matches!(self.typed.types.kind(ty), TyKind::Ref { .. });
-        let method = match self.ast.expr(call).kind {
-            ExprKind::MethodCall { method, .. } => self.ast.name(method).to_string(),
-            _ => String::new(),
+        let (method, operator) = match self.ast.expr(call).kind {
+            ExprKind::MethodCall { method, .. } => (self.ast.name(method).to_string(), None),
+            ExprKind::Binary { op, .. } => (op.as_str().to_string(), Some(op.as_str())),
+            ExprKind::Unary { .. } => ("-".to_string(), Some("-")),
+            _ => (String::new(), None),
         };
         match kind {
             OwnKind::Mv => {
@@ -2114,7 +2126,15 @@ impl Owner<'_> {
                             receiver_expr.span,
                             format!("`{method}` takes ownership of `{text}`"),
                         )
-                        .help = Some(format!("write `mv {text}.{method}()`"));
+                        .help = Some(match operator {
+                            Some("-")
+                                if matches!(self.ast.expr(call).kind, ExprKind::Unary { .. }) =>
+                            {
+                                format!("write `-(mv {text})`")
+                            }
+                            Some(op) => format!("write `mv {text} {op} …`"),
+                            None => format!("write `mv {text}.{method}()`"),
+                        });
                         self.move_place(&place, ty, receiver_expr.span);
                     }
                     return Vec::new();
@@ -2127,7 +2147,7 @@ impl Owner<'_> {
                         span,
                         format!("`{method}` takes ownership, but `{text}` is a reference"),
                     )
-                    .help = Some(if is_place {
+                    .help = Some(if is_place || operator.is_some() {
                         "take the value as owned (`q: Qubit`) to consume it".to_string()
                     } else {
                         format!(

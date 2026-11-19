@@ -113,6 +113,7 @@ fn main() {
     );
 
     impls(400);
+    operators(2000);
     inferred("inferred", 2000, true);
     inferred("irrev", 2000, false);
     modules("modules", 2000, |i| {
@@ -169,6 +170,41 @@ fn modules(phase: &str, count: usize, source: impl Fn(usize) -> String) {
 
 /// Checks a program with `count` `impl`s of one generic trait for one type, each called once
 /// with its own argument: finding an `impl` looks through the trait's `impl`s.
+/// `+` and `*` on a struct of the program's own, each a call of a `std::ops` trait's
+/// function picked by the right side's type, checked through to ownership.
+fn operators(count: usize) {
+    let mut text = String::from(
+        "use std::ops::{Add, Mul}\nstruct V { x: Int }\n\
+         impl Add<V> for V { type Output = V\n fn add(mv self, r: V) -> V { V { x: self.x + r.x } } }\n\
+         impl Mul<Int> for V { type Output = V\n fn mul(mv self, k: Int) -> V { V { x: self.x * k } } }\n\
+         fn main() {\n let v = V { x: 1 }\n",
+    );
+    for i in 0..count {
+        text.push_str(&format!(" let v{i} = v + v * {i}\n"));
+    }
+    text.push_str("}\n");
+    let parsed = noev_syntax::parse(&text);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let (typed, errors) = noev_sema::check(&parsed.ast);
+    assert!(errors.is_empty(), "{errors:?}");
+    let errors = noev_sema::check_ownership(&parsed.ast, &typed);
+    assert!(errors.is_empty(), "{errors:?}");
+    let types = fastest(5, || {
+        black_box(noev_sema::check(black_box(&parsed.ast)));
+    });
+    let ownership = fastest(5, || {
+        black_box(noev_sema::check_ownership(black_box(&parsed.ast), &typed));
+    });
+    println!(
+        "{:<9} {:>10.0} ops/s  ({:.2} ms types, {:.2} ms ownership, for {} operators)",
+        "operators",
+        (2 * count) as f64 / (types + ownership).as_secs_f64(),
+        types.as_secs_f64() * 1e3,
+        ownership.as_secs_f64() * 1e3,
+        2 * count,
+    );
+}
+
 fn impls(count: usize) {
     let mut text = String::from(
         "trait Width<const N: Int> { fn width(ref self, r: ref [Int; N]) -> Int }\nstruct W {}\n",
