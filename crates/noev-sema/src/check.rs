@@ -310,6 +310,10 @@ pub struct Typed {
     /// [`FnInfo::generics`], by the call's expression. They can mention the calling
     /// function's own type parameters.
     pub type_args: FxHashMap<ExprId, Vec<Ty>>,
+    /// For `a += b` on a type of the program's own, which calls `AddAssign::add_assign` with
+    /// `a` as receiver: the right side, by the place. The call is recorded on the place, in
+    /// [`Typed::callees`] and the other tables by expression.
+    pub assign_values: FxHashMap<ExprId, ExprId>,
     /// Every trait.
     pub traits: Vec<TraitInfo>,
     /// Every `impl`.
@@ -354,6 +358,38 @@ pub struct Run {
     pub ty: Ty,
 }
 
+/// `std::ops`'s traits (`spec/types.md` §6), by name, with how each operator is written.
+const OPS: [(&str, &str); 11] = [
+    ("Add", "+"),
+    ("Sub", "-"),
+    ("Mul", "*"),
+    ("Div", "/"),
+    ("Rem", "%"),
+    ("Neg", "-"),
+    ("AddAssign", "+="),
+    ("SubAssign", "-="),
+    ("MulAssign", "*="),
+    ("DivAssign", "/="),
+    ("RemAssign", "%="),
+];
+
+/// [`OPS`]'s `Neg`.
+const NEG: usize = 5;
+
+/// The `std::ops` trait for a binary operator, or for its compound assignment, by position
+/// in [`OPS`].
+fn op_index(op: BinaryOp, assign: bool) -> Option<usize> {
+    let index = match op {
+        BinaryOp::Add => 0,
+        BinaryOp::Sub => 1,
+        BinaryOp::Mul => 2,
+        BinaryOp::Div => 3,
+        BinaryOp::Rem => 4,
+        _ => return None,
+    };
+    Some(if assign { index + 6 } else { index })
+}
+
 /// The arguments of a call, after its receiver: a list from the syntax tree, or an
 /// operator's right side.
 #[derive(Clone, Copy, Debug)]
@@ -394,7 +430,10 @@ impl Typed {
             ExprKind::Unary { operand, .. } if self.callees[id.index()].is_some() => {
                 Some((Some(operand), Args::None))
             }
-            _ => None,
+            _ => {
+                let &value = self.assign_values.get(&id)?;
+                Some((Some(id), Args::One([value])))
+            }
         }
     }
 
@@ -542,7 +581,7 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         param_bounds: FxHashMap::default(),
         inferred: FxHashMap::default(),
         library: false,
-        ops: [None; 4],
+        ops: [None; OPS.len()],
         operator: None,
         param_assoc: FxHashMap::default(),
         impl_assoc: Vec::new(),
@@ -607,8 +646,8 @@ struct Checker<'a> {
     inferred: FxHashMap<Ty, Vec<(TraitId, Span)>>,
     /// Whether the package being compiled is a library: it has no `fn main`.
     library: bool,
-    /// `std::ops`'s `Add`, `Sub`, `Mul` and `Neg`, when the program uses them.
-    ops: [Option<TraitId>; 4],
+    /// `std::ops`'s traits, in the order of [`OPS`], when the program uses them.
+    ops: [Option<TraitId>; OPS.len()],
     /// While an operator's call is checked, how it is written and where it is, so a bound
     /// it does not meet is reported as the operator's (and one of a call in its operands is
     /// not).
@@ -737,9 +776,7 @@ impl<'a> Checker<'a> {
                 self.t.types.measure = Some(id.0);
             }
             if Some(ast.module(self.module).package) == ast.std_package()
-                && let Some(op) = ["Add", "Sub", "Mul", "Neg"]
-                    .iter()
-                    .position(|&n| n == ast.name(name))
+                && let Some(op) = OPS.iter().position(|&(n, _)| n == ast.name(name))
             {
                 self.ops[op] = Some(id);
             }
@@ -2195,6 +2232,18 @@ impl<'a> Checker<'a> {
                         self.expr(value, Expect::Ty(target));
                     }
                     AssignOp::Compound(op) => {
+                        // `a += b` on a type of the program's own calls `AddAssign`, recorded
+                        // on the place.
+                        if let Some(index) = op_index(op, true)
+                            && self
+                                .operator(place, index, place, place_ty, &[value], stmt.span)
+                                .is_some()
+                        {
+                            if self.t.callees[place.index()].is_some() {
+                                self.t.assign_values.insert(place, value);
+                            }
+                            return false;
+                        }
                         let value_ty = self.expr(value, Expect::Hint(target));
                         let result = self.binary_type(op, target, value_ty, stmt.span);
                         if !self.t.types.is_wildcard(result) && result != target {
@@ -2729,7 +2778,7 @@ impl<'a> Checker<'a> {
                 let ty = self.expr(operand, hint);
                 self.negating = false;
                 if op == UnaryOp::Neg
-                    && let Some(ty) = self.operator(id, 3, ty, &[], expr.span)
+                    && let Some(ty) = self.operator(id, NEG, operand, ty, &[], expr.span)
                 {
                     return ty;
                 }
@@ -2774,14 +2823,8 @@ impl<'a> Checker<'a> {
                     (self.expr(lhs, Expect::Hint(hint)), rhs_ty)
                 } else {
                     let lhs_ty = self.expr(lhs, outer);
-                    let index = match op {
-                        Add => Some(0),
-                        Sub => Some(1),
-                        Mul => Some(2),
-                        _ => None,
-                    };
-                    if let Some(index) = index
-                        && let Some(ty) = self.operator(id, index, lhs_ty, &[rhs], expr.span)
+                    if let Some(index) = op_index(op, false)
+                        && let Some(ty) = self.operator(id, index, lhs, lhs_ty, &[rhs], expr.span)
                     {
                         return ty;
                     }
@@ -4213,12 +4256,9 @@ impl<'a> Checker<'a> {
             ))
         } else if lhs.is_number() && rhs.is_number() {
             Some("Noev does not convert between number types implicitly; convert one side, as in `i64(x)` or `Int(x)`".to_string())
-        } else if let Some(name) = match op {
-            Add => Some("Add"),
-            Sub => Some("Sub"),
-            Mul => Some("Mul"),
-            _ => None,
-        } && matches!(self.t.types.kind(lhs), TyKind::Struct(_) | TyKind::Param(_))
+        } else if let Some(index) = op_index(op, false)
+            && let name = OPS[index].0
+            && matches!(self.t.types.kind(lhs), TyKind::Struct(_) | TyKind::Param(_))
         {
             Some(format!(
                 "to give {} `{}`, implement `std::ops::{name}` for it",
@@ -4904,11 +4944,13 @@ impl<'a> Checker<'a> {
         &mut self,
         id: ExprId,
         index: usize,
+        receiver: ExprId,
         receiver_ty: Ty,
         args: &[ExprId],
         span: Span,
     ) -> Option<Ty> {
         let trait_id = self.ops[index]?;
+        let word = OPS[index].1;
         let base = self.t.types.deref(receiver_ty);
         if !matches!(
             self.t.types.kind(base),
@@ -4918,7 +4960,6 @@ impl<'a> Checker<'a> {
         }
         let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
         if !self.implements(base, trait_id, None) {
-            let word = ["+", "-", "*", "-"][index];
             let message = format!(
                 "`{word}` cannot be applied to {}: it does not implement `{trait_name}`",
                 self.show(base)
@@ -4934,17 +4975,11 @@ impl<'a> Checker<'a> {
             self.error(span, message).help = Some(help);
             return Some(self.skip_args(args));
         }
-        let word = ["+", "-", "*", "-"][index];
         let f = self.t.traits[trait_id.index()].fns[0];
         let sig = self.t.fns[f.index()].sig.clone();
         self.t.callees[id.index()] = Some(Callee::Fn(f));
         self.t.receivers[id.index()] = sig.receiver;
         if base != receiver_ty {
-            let receiver = match self.ast.expr(id).kind {
-                ExprKind::Binary { lhs, .. } => lhs,
-                ExprKind::Unary { operand, .. } => operand,
-                _ => unreachable!("operators are binary or unary"),
-            };
             self.t.adjust[receiver.index()] = Adjust::Deref;
         }
         let errors = self.diagnostics.len();
@@ -5022,9 +5057,21 @@ impl<'a> Checker<'a> {
         // The struct's arguments, when `owner` is an instance rather than its definition;
         // for a trait's function, `Self` is `owner`.
         let mut known = vec![None; generics.len()];
-        if self.t.fn_traits.contains_key(&f) {
+        if let Some(&trait_id) = self.t.fn_traits.get(&f) {
             // `Trait::f(x)` names no type: `Self` is inferred from `x`.
             known[0] = owner;
+            // A `Self` with one `impl` of a generic trait fixes its arguments before the
+            // call's are checked, so they are expected, and lent, as the `impl` takes them:
+            // `a += b` for an `impl AddAssign<ref Reg>` lends `b`.
+            let n = self.t.traits[trait_id.index()].params.len();
+            if n > 0
+                && let Some(owner) = owner
+                && let Some(only) = self.only_trait_args(owner, trait_id)
+            {
+                for (slot, arg) in known[1..=n].iter_mut().zip(only) {
+                    *slot = Some(arg);
+                }
+            }
         } else if let Some(s) = owner.and_then(|o| self.struct_of(o)) {
             let def = &self.t.types.structs[s.index()];
             if def.template.is_some() {

@@ -242,7 +242,8 @@ pub const STD_NAMES: [&str; 17] = [
 pub const STD_MODULES: [&str; 4] = ["debug", "fourier", "observables", "state"];
 
 /// The standard library's `std::ops` module (`spec/types.md` §6), parsed when a program names
-/// `ops`: the traits behind `+`, `-` and `*` on a program's own types.
+/// `ops`: the traits behind `+`, `-`, `*`, `/` and `%`, and their compound assignments, on
+/// a program's own types.
 const STD_OPS: &str = "
 pub trait Add<Rhs> {
     type Output
@@ -259,6 +260,29 @@ pub trait Mul<Rhs> {
 pub trait Neg {
     type Output
     fn neg(mv self) -> Self::Output
+}
+pub trait Div<Rhs> {
+    type Output
+    fn div(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Rem<Rhs> {
+    type Output
+    fn rem(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait AddAssign<Rhs> {
+    fn add_assign(mut self, rhs: Rhs)
+}
+pub trait SubAssign<Rhs> {
+    fn sub_assign(mut self, rhs: Rhs)
+}
+pub trait MulAssign<Rhs> {
+    fn mul_assign(mut self, rhs: Rhs)
+}
+pub trait DivAssign<Rhs> {
+    fn div_assign(mut self, rhs: Rhs)
+}
+pub trait RemAssign<Rhs> {
+    fn rem_assign(mut self, rhs: Rhs)
 }
 ";
 

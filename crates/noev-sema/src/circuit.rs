@@ -556,10 +556,8 @@ fn is_quantum_op(ast: &Ast, typed: &Typed, quantum: &[bool], e: ExprId) -> bool 
         | ExprKind::BraTest { .. }
         | ExprKind::PrepTest { .. }
         | ExprKind::Ctrl { .. } => true,
-        ExprKind::Call { .. }
-        | ExprKind::MethodCall { .. }
-        | ExprKind::Binary { .. }
-        | ExprKind::Unary { .. } => match typed.callees[e.index()] {
+        // Calls, and operators and compound assignments that call `std::ops` traits.
+        _ => match typed.callees[e.index()] {
             Some(Callee::Builtin(
                 Builtin::Gate(_)
                 | Builtin::Measure
@@ -572,7 +570,6 @@ fn is_quantum_op(ast: &Ast, typed: &Typed, quantum: &[bool], e: ExprId) -> bool 
             Some(Callee::Fn(f)) => quantum[f.index()] || typed.fn_traits.contains_key(&f),
             _ => false,
         },
-        _ => false,
     }
 }
 
@@ -944,10 +941,7 @@ impl<'a> Walker<'a> {
                         ExprKind::Sample { .. }
                         | ExprKind::Expectation { .. }
                         | ExprKind::Overlap { .. } => Some("starts a repeated run"),
-                        ExprKind::Call { .. }
-                        | ExprKind::MethodCall { .. }
-                        | ExprKind::Binary { .. }
-                        | ExprKind::Unary { .. } => match typed.callees[e.index()] {
+                        _ if typed.callees[e.index()].is_some() => match typed.callees[e.index()] {
                             Some(Callee::Builtin(Builtin::Print { .. })) => Some("prints"),
                             Some(Callee::Fn(f)) if !self.cx.recordable[f.index()] => {
                                 Some("calls a function that prints or starts repeated runs")
@@ -1031,6 +1025,15 @@ impl<'a> Walker<'a> {
             StmtKind::Let { pat, init, .. } => {
                 let tainted = self.expr(init, before) || self.control > 0;
                 self.taint_pattern(pat, tainted);
+            }
+            // `a += b` calling `AddAssign`: a call that changes `a`.
+            StmtKind::Assign { place, .. } if self.cx.typed.callees[place.index()].is_some() => {
+                let tainted = self.call(place, before) || self.control > 0;
+                if let Some(local) = root(self.cx.ast, self.cx.typed, place)
+                    && tainted
+                {
+                    self.tainted[local.index()] = true;
+                }
             }
             StmtKind::Assign { place, value, .. } => {
                 let tainted = self.expr(value, before) || self.control > 0;

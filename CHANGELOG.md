@@ -27,7 +27,10 @@ before 1.0.
   on its arguments (`Scale<Int>` and `Scale<Float>` can each give a type its own `Out`).
 - Operator traits: `+`, `-`, `*` and unary `-` on a program's own types call `std::ops`'s
   `Add`, `Sub`, `Mul` and `Neg`, picked by the right side's type, so `v * 2` and `v * w` can
-  differ. Sides holding qubits are moved with `mv`, as arguments are.
+  differ. Sides holding qubits are moved with `mv`, as arguments are. `/` and `%` call
+  `Div` and `Rem`, and `+=`, `-=`, `*=`, `/=` and `%=` call `AddAssign` and the other
+  compound-assignment traits, changing a value in place: reversibly when the `impl` is, so
+  `a += b` on qubits can run under `adj`.
 - Arithmetic in sizes: `[Qubit; N + 1]`, `[Bit; 2 * N]` and `Reg<{N + 1}>`, compared after
   normalising and solved by calls (`[Qubit; 5]` for `[Qubit; N + 1]` makes `N` 4), so a
   quantum integer can be a library type (`tests/run/qint.nv`). A call also infers a parameter

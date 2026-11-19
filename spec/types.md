@@ -513,8 +513,9 @@ classical `ExperimentResult`. The free function `measure(x)` is `measure<T: Meas
 
 ### Operator traits
 
-`+`, `-`, `*` and unary `-` on a type of the program's own call the function of a trait in
-`std::ops`, which the program implements:
+`+`, `-`, `*`, `/`, `%`, unary `-` and the compound assignments `+=`, `-=`, `*=`, `/=` and
+`%=` on a type of the program's own call the function of a trait in `std::ops`, which the
+program implements:
 
 ```noev
 use std::ops::{Add, Mul}
@@ -535,12 +536,21 @@ impl Mul<Int> for V {                  // `v * 2`
 | `a + b`  | `Add<Rhs>`    | `fn add(mv self, rhs: Rhs) -> Self::Output` |
 | `a - b`  | `Sub<Rhs>`    | `fn sub(mv self, rhs: Rhs) -> Self::Output` |
 | `a * b`  | `Mul<Rhs>`    | `fn mul(mv self, rhs: Rhs) -> Self::Output` |
+| `a / b`  | `Div<Rhs>`    | `fn div(mv self, rhs: Rhs) -> Self::Output` |
+| `a % b`  | `Rem<Rhs>`    | `fn rem(mv self, rhs: Rhs) -> Self::Output` |
 | `-a`     | `Neg`         | `fn neg(mv self) -> Self::Output`           |
+| `a += b` | `AddAssign<Rhs>` | `fn add_assign(mut self, rhs: Rhs)`      |
+| `a -= b`, `a *= b`, `a /= b`, `a %= b` | `SubAssign<Rhs>`, `MulAssign<Rhs>`, `DivAssign<Rhs>`, `RemAssign<Rhs>` | as `AddAssign` |
 
 - `a + b` is `Add::add(a, b)`: the `impl` is picked by the right side's type, as for any
   generic trait, so `v * 2` and `v * w` can be different `impl`s with different `Output`s.
 - Both sides are given by value, so they follow the rules for arguments: a side holding
   qubits is moved with `mv` (`mv a + mv b`, N001 otherwise), and a copyable one is copied.
+- `a += b` lends `a` for changing, as a `mut self` method does, once `b` is evaluated, so a
+  classical `a` must be `let mut` (N015), and changes a value in place: on qubits, an `impl`
+  of gates only is reversible, so `a += b` can run in a `rev fn` and under `adj`. When the
+  type has one `impl` of the trait, the right side is expected as it takes it, so
+  `impl AddAssign<ref Reg> for Reg` makes `a += b` lend `b`.
 - In generic code the bound is written: `T: Add<T, Output = T>`. Operators do not infer
   bounds, since their traits have parameters.
 - Built-in types keep their built-in operators. They do not implement the `std::ops` traits
@@ -570,8 +580,7 @@ Subtraction and other arithmetic in sizes beyond `+` and `*` by a number; `From`
 built-in conversions; `impl Trait` arguments;
 closures; the quantum interfaces `Oracle`, `Ansatz` and `Observable` in the standard library.
 The `std::ops` traits for built-in types, defaults for trait parameters (`Add<Rhs = Self>`),
-and traits for `/`, `%`, comparisons and the bit operators; `AddAssign` and the other
-compound-assignment traits, so `a += b` changes a value of the program's own in place.
+and traits for comparisons and the bit operators.
 
 ## 7. Printing and formatting
 

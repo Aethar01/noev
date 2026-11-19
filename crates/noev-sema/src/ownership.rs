@@ -452,6 +452,9 @@ fn irreversible_causes(
     let module = typed.fn_modules[index];
     let own = |span, why: String| Cause::Own(Irreversible { span, why });
     match node {
+        // `a += b` calling `AddAssign` changes `a` through the call, which the place's own
+        // node stands for.
+        Node::Assign(place, _) if typed.callees[place.index()].is_some() => {}
         Node::Assign(place, span) => {
             let Some(root) = root_local(ast, typed, place) else {
                 return;
@@ -478,10 +481,7 @@ fn irreversible_causes(
                 } if typed.types.linearity(typed.ty(id)) == Kind::Linear => {
                     "it moves qubits".into()
                 }
-                ExprKind::Call { .. }
-                | ExprKind::MethodCall { .. }
-                | ExprKind::Binary { .. }
-                | ExprKind::Unary { .. } => {
+                _ if typed.callees[id.index()].is_some() => {
                     match typed.callees[id.index()] {
                         Some(Callee::Builtin(b)) if !b.reversible() => {
                             format!("it calls `{}`", b.name())
@@ -988,6 +988,16 @@ impl Owner<'_> {
                     }
                     _ => self.release(&carried),
                 }
+            }
+            // `a += b` on a type of the program's own calls `AddAssign::add_assign`, lending
+            // `a` for changing once `b` is evaluated.
+            StmtKind::Assign { place, value, .. }
+                if self.typed.callees[place.index()].is_some() =>
+            {
+                self.callee_rules(self.typed.callees[place.index()], stmt.span);
+                let mut carried = self.expr(value, Use::Value);
+                carried.extend(self.receiver(place, place));
+                self.release(&carried);
             }
             StmtKind::Assign { op, place, value } => {
                 let carried = self.expr(value, Use::Value);

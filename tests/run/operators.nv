@@ -1,8 +1,9 @@
-// Operator traits (spec/types.md §6): `+`, `*` and `-` on types of the program's own, chosen
-// by the right side's type, through a bound on a generic function, and on qubits, where the
-// operands are moved with `mv`.
+// Operator traits (spec/types.md §6): `+`, `*`, `/`, `%` and `-` on types of the program's
+// own, chosen by the right side's type, through a bound on a generic function, and on qubits,
+// where the operands are moved with `mv`; and the compound assignments, which change a value
+// in place, reversibly when the `impl` is.
 
-use std::ops::{Add, Mul, Neg}
+use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Neg, Rem, RemAssign, SubAssign}
 
 struct V { x: Int, y: Int }
 
@@ -27,6 +28,44 @@ impl Neg for V {
     fn neg(mv self) -> V { V { x: -self.x, y: -self.y } }
 }
 
+impl Div<Int> for V {
+    type Output = V
+    fn div(mv self, k: Int) -> V { V { x: self.x / k, y: self.y / k } }
+}
+
+impl Rem<Int> for V {
+    type Output = V
+    fn rem(mv self, k: Int) -> V { V { x: self.x % k, y: self.y % k } }
+}
+
+impl AddAssign<V> for V {
+    fn add_assign(mut self, rhs: V) {
+        self.x += rhs.x
+        self.y += rhs.y
+    }
+}
+
+impl SubAssign<V> for V {
+    fn sub_assign(mut self, rhs: V) {
+        self.x -= rhs.x
+        self.y -= rhs.y
+    }
+}
+
+impl MulAssign<Int> for V {
+    fn mul_assign(mut self, k: Int) {
+        self.x *= k
+        self.y *= k
+    }
+}
+
+impl RemAssign<Int> for V {
+    fn rem_assign(mut self, k: Int) {
+        self.x %= k
+        self.y %= k
+    }
+}
+
 fn sum3<T: Add<T, Output = T>>(a: T, b: T, c: T) -> T { mv a + mv b + mv c }
 
 // Two qubits; adding one register to another XORs it in, and negating flips both.
@@ -42,6 +81,15 @@ impl Add<Reg> for Reg {
         Reg { qs: mv a }
     }
 }
+
+// In place: XORs another register in, so it undoes itself, and `adj` can run it.
+impl AddAssign<ref Reg> for Reg {
+    fn add_assign(mut self, rhs: ref Reg) {
+        for i in 0..2 { ctrl rhs.qs[i] { self.qs[i].x() } }
+    }
+}
+
+rev fn xor_in(a: mut Reg, b: ref Reg) { a += b }
 
 impl Neg for Reg {
     type Output = Reg
@@ -62,8 +110,23 @@ fn main() {
     let d = sum3(a, b, c)
     print("{d.x} {d.y}")
     print(1 + 2 * 3)
+    let e = b / 3 % 4
+    print("{e.x} {e.y}")
+    let mut m = V { x: 3, y: 4 }
+    m += a
+    m -= V { x: 1, y: 1 }
+    m *= 10
+    m %= 7
+    print("{m.x} {m.y}")
     let r = Reg { qs: |10> }
     let s = Reg { qs: |11> }
     let t = -(mv r + mv s)
     print(mv t.qs.measure())
+    let p = Reg { qs: |10> }
+    let q = Reg { qs: |11> }
+    p += q
+    xor_in(mut p, ref q)
+    adj xor_in(mut p, ref q)
+    print(mv p.qs.measure())
+    mv q.qs.measure()
 }

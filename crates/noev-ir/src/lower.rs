@@ -706,6 +706,10 @@ impl Builder<'_> {
                     self.bind(pat, temp);
                 }
             },
+            // `a += b` on a type of the program's own calls `AddAssign::add_assign`.
+            StmtKind::Assign { place, .. } if self.typed.callees[place.index()].is_some() => {
+                self.call(place, None, false);
+            }
             StmtKind::Assign { op, place, value } => {
                 let target = self.place_deref(place);
                 let value = self.operand(value);

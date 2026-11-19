@@ -567,13 +567,13 @@ fn operator_traits() {
         errors(&format!("{OPS}fn f<T>(a: T, b: T) -> T {{ mv a + mv b }}")),
         ["`+` cannot be applied to `T`: it does not implement `Add`"]
     );
-    // The right side must be what the `impl` takes.
+    // The right side must be what the `impl` takes: with one `impl`, it is expected.
     assert_eq!(
         errors(&format!(
             "{OPS}impl Add<P> for P {{ type Output = P\n fn add(mv self, r: P) -> P {{ mv r }} }}\n\
              fn f(a: P) -> P {{ a + 1 }}"
         )),
-        ["`+` cannot be applied to `P` and `Int`: `P` does not implement `Add<Int>`"]
+        ["mismatched types: expected `P`, found `Int`"]
     );
     // A bound a call in an operand does not meet is that call's, not the operator's.
     assert_eq!(
@@ -607,5 +607,42 @@ fn operator_operands_are_moved() {
     assert_eq!(
         ownership(&format!("{reg}fn f(a: R, b: R) -> R {{ mv a + b }}")),
         ["N001 `b` holds qubits, which cannot be copied"]
+    );
+}
+
+/// `a += b` on a type of the program's own calls `AddAssign::add_assign`, lending `a` for
+/// changing: a classical one must be `let mut`, and one with only an `impl` for `ref R`
+/// lends the right side.
+#[test]
+fn compound_assignment_traits() {
+    let v = "use std::ops::AddAssign\nstruct V { x: Int }\n\
+             impl AddAssign<V> for V { fn add_assign(mut self, r: V) { self.x += r.x } }\n";
+    assert_eq!(
+        ownership(&format!(
+            "{v}fn f(w: V) {{ let mut v = V {{ x: 1 }}\n v += w }}"
+        )),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        ownership(&format!(
+            "{v}fn f(w: V) {{ let v = V {{ x: 1 }}\n v += w }}"
+        )),
+        ["N015 `v` is not declared `let mut`, so it cannot be changed"]
+    );
+    assert_eq!(
+        errors(&format!(
+            "{v}fn f(w: V) {{ let mut v = V {{ x: 1 }}\n v -= w }}"
+        )),
+        ["`-=` cannot be applied to `V`: it does not implement `SubAssign`"]
+    );
+    let r = "use std::ops::{AddAssign, SubAssign}\nstruct R { q: Qubit }\n\
+             impl AddAssign<ref R> for R { fn add_assign(mut self, r: ref R) { ctrl r.q { self.q.x() } } }\n";
+    assert_eq!(
+        ownership(&format!("{r}rev fn f(a: mut R, b: ref R) {{ a += b }}")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        errors(&format!("{r}fn f(a: mut R, b: ref R) {{ a -= b }}")),
+        ["`-=` cannot be applied to `R`: it does not implement `SubAssign`"]
     );
 }

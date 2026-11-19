@@ -159,7 +159,7 @@ The other standard-library items live in modules of their own:
 | `amplitudes`          | `std::debug`        |
 | `fft`, `ifft`         | `std::fourier`      |
 | `P`, `PX`             | `std::observables`  |
-| `Add`, `Sub`, `Mul`, `Neg` | `std::ops`     |
+| `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg` and the `…Assign` traits | `std::ops` |
 
 A name used without its import is an error whose fix-it is the `use` line. (Not implemented
 yet: naming the prelude itself, as in `use std::prelude::print`, and paths through `core`.)
