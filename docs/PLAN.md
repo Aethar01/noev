@@ -430,6 +430,8 @@ gets a compile-fail test under `tests/ui/`.
 | 2  | Modules and packages          | Files are modules, `use` imports, `pub` visibility, the prelude, `noev.toml` packages (`spec/modules.md`) | ☑ Done |
 | 3  | Traits and generics           | `trait`, `impl Trait for Type`, generic functions and types; generic code assumes values may be linear; `Copy` and `Measure`; `Option` and `Result` become ordinary generic enums (`spec/types.md` §6) | ☑ Done: associated types are not yet allowed in generic traits |
 | 4  | ~~Quantum integers~~          | Dropped on 2026-11-19: a library can define them on generics and size parameters (§11, 0.3) | Dropped |
+| 4a | Operator traits               | `std::ops` (`Add`, `Sub`, `Mul`, `Neg` and the `…Assign` forms) so a program's own types use `+`; needs associated types in generic traits | ☐ |
+| 4b | Arithmetic in sizes           | `[Qubit; N + 1]`, `2 * N`: linear size expressions, compared after normalising | ☐ |
 | 5  | `with`/`do` and release       | Compute–use–uncompute blocks, and automatic release of qubits proven to be in \|0⟩ (`spec/ownership.md` §9) | ☐ |
 | 6  | Lifetimes                     | Non-lexical lifetimes, explicit lifetimes, references in structs     | ☐ |
 | 7  | Runtime C ABI                 | Shaped like QIR's, with the interpreter moved onto it (`spec/runtime.md` §4) | ☐ |
@@ -453,6 +455,14 @@ Decisions each step needs first, from the open questions in the spec:
 - Step 2: decided on 2026-11-09 to follow Rust: glob imports, `pub(pkg)`/`pub(super)`/`pub(in
   path)`, and a small prelude, so `fft`, `P`, `amplitudes` and `State` need a `use`
   (`spec/modules.md` §3, §4, §6). The package registry can wait.
+- Step 6: decided on 2026-11-19. A reference names the places it borrows from
+  (`ref[a, b] String`, `Window[r]`) instead of taking lifetime parameters, so there is no
+  variance or HRTB; what a signature borrows from is inferred within a package, as bounds
+  are, and written only on a library's `pub` functions where elision does not decide. Lends
+  are live only on paths that use them again (Polonius-style, so a conditional return of a
+  borrow is accepted), methods lend only the fields they use (inferred within a package), and
+  arguments are evaluated before a `mut` receiver's lend starts. Self-referential structs are
+  out of scope.
 - Step 13: decided on 2026-11-09 to follow Rust: arrays by reference, C layout only for
   `extern "C" struct`, callbacks as `extern "C" fn` that capture nothing (`spec/interop.md` §3).
 - Step 16: networking, still open. Proposed: `std::net` with sockets only, as Rust's, and
