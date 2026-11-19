@@ -29,15 +29,17 @@ $ noev run examples/bell.nv
 P(11) = 0.493
 ```
 
-Status: 0.1, the first release. The language is specified in [`spec/`](spec/), and this
-compiler implements all of it apart from the parts marked *Reserved* there (modules, traits
-and generics, `with`/`do`, interop). Expect changes before 1.0.
+Status: 0.4, with 0.5 in progress. The language is specified in [`spec/`](spec/), and this
+compiler implements all of it apart from the parts marked *Reserved* there. Modules and
+packages are in; traits and generics are partly in (generic traits and inferred bounds to
+do); `with`/`do`, lifetimes, native code and interop are still to come
+([`docs/PLAN.md`](docs/PLAN.md) §11). Expect changes before 1.0.
 
 ## What it does
 
 - **Qubits are owned.** A qubit is a linear value: it must be measured, discarded or returned
   exactly once, and can't be copied. `ref` and `mut` lend it, as in Rust. Breaking a rule is
-  a compile error with its own code (N001–N022, [`spec/ownership.md`](spec/ownership.md)).
+  a compile error with its own code (N001–N023, [`spec/ownership.md`](spec/ownership.md)).
 - **Every call runs once.** Code reads in order, quantum or not. Repeating a run is explicit:
   `sample n { … }` runs a block `n` times and gives a `Distribution`, and `<ψ| H |ψ>` is an
   expectation value, estimated `within` a precision you choose.
