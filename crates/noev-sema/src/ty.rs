@@ -743,6 +743,43 @@ impl Types {
         self.linearity_at(ty, 0)
     }
 
+    /// The type parameters `ty` mentions, each once.
+    pub fn params_in(&self, ty: Ty) -> Vec<Ty> {
+        let mut found = Vec::new();
+        self.collect_params(ty, &mut found);
+        found
+    }
+
+    fn collect_params(&self, ty: Ty, found: &mut Vec<Ty>) {
+        match self.kind(ty) {
+            TyKind::Param(_) => {
+                if !found.contains(&ty) {
+                    found.push(ty);
+                }
+            }
+            TyKind::Tuple(elems) => {
+                for &e in elems.iter() {
+                    self.collect_params(e, found);
+                }
+            }
+            &TyKind::Array(elem, _) | &TyKind::Distribution(elem) => {
+                self.collect_params(elem, found)
+            }
+            &TyKind::SizedArray(elem, len) => {
+                self.collect_params(elem, found);
+                self.collect_params(len, found);
+            }
+            &TyKind::Ref { inner, .. } => self.collect_params(inner, found),
+            &TyKind::Assoc { base, .. } => self.collect_params(base, found),
+            &TyKind::Struct(id) => {
+                for &a in &self.structs[id.index()].args {
+                    self.collect_params(a, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn linearity_at(&self, ty: Ty, depth: usize) -> Kind {
         // A struct containing itself is reported elsewhere; stop rather than recurse forever.
         if depth > 64 {

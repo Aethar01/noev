@@ -49,6 +49,12 @@ fn type_arguments_are_inferred_or_given() {
 }
 
 #[test]
+fn recursive_calls_infer_their_own_parameters() {
+    ok("fn f<T>(s: ref T, n: Int) -> Int { if n == 0 { 1 } else { f(s, n - 1) } }");
+    ok("fn g<T>(x: T, n: Int) -> T { if n == 0 { mv x } else { g(mv x, n - 1) } }");
+}
+
+#[test]
 fn copy_bounds() {
     let twice = "fn twice<T: Copy>(x: T) -> (T, T) { (x, x) }\n";
     ok(&format!("{twice}fn f() -> (Float, Float) {{ twice(1.5) }}"));

@@ -2800,7 +2800,19 @@ impl<'a> Checker<'a> {
             };
         }
         let types = &self.t.types;
-        if want == found || types.is_wildcard(found) {
+        if types.is_wildcard(found) {
+            return true;
+        }
+        // The same type still binds the parameters being inferred in it: a generic function
+        // calling itself gives its own `T` for `T`.
+        if want == found
+            && !self.inference.last().is_some_and(|inference| {
+                types
+                    .params_in(want)
+                    .iter()
+                    .any(|p| inference.params.contains(p))
+            })
+        {
             return true;
         }
         match (types.kind(want).clone(), types.kind(found).clone()) {
