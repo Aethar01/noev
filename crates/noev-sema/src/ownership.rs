@@ -247,114 +247,190 @@ pub fn reversibility(ast: &Ast, typed: &Typed) -> Vec<Option<(Span, String)>> {
         .collect()
 }
 
-/// For each function, why it is not reversible, or `None` if it is. Functions without `rev`
-/// are inferred from their bodies, repeating until nothing changes, since they can call each
-/// other.
-fn infer_reversibility(ast: &Ast, typed: &Typed) -> Vec<Option<Irreversible>> {
-    let mut result: Vec<Option<Irreversible>> = vec![None; ast.all_fns().len()];
-    loop {
-        let mut changed = false;
-        for (index, decl) in ast.all_fns().iter().enumerate() {
-            if result[index].is_some() || typed.fns[index].sig.reversible != Reversible::Infer {
-                continue;
-            }
-            let Some(body) = decl.body else { continue };
-            let info = &typed.fns[index];
-            let module = typed.fn_modules[index];
-            let outside: Vec<LocalId> = info
-                .self_local
-                .into_iter()
-                .chain(info.params.iter().copied())
-                .collect();
-            let mut found = None;
+/// What makes a property inferred over the whole program hold for a function: something in
+/// its own body, or a call of a function it holds for.
+#[derive(Clone)]
+enum Cause<T> {
+    Own(T),
+    Call(FnId, Span),
+}
+
+/// Every function's causes, in body order, in one list: function `i`'s are
+/// `list[ranges[i]]`, and `ranges[i]` is `None` for a function the property is not inferred
+/// for.
+struct Causes<T> {
+    list: Vec<Cause<T>>,
+    ranges: Vec<Option<(u32, u32)>>,
+}
+
+/// Each function's causes, from `cause` on each node of its body, for the functions
+/// `include` accepts; collecting stops at the first cause of its own, since none after it can
+/// be first.
+fn collect_causes<T>(
+    ast: &Ast,
+    include: impl Fn(usize) -> bool,
+    mut cause: impl FnMut(usize, Node, &mut Vec<Cause<T>>),
+) -> Causes<T> {
+    let mut list = Vec::new();
+    let ranges = ast
+        .all_fns()
+        .iter()
+        .enumerate()
+        .map(|(index, decl)| {
+            let body = decl.body.filter(|_| include(index))?;
+            let start = list.len();
             walk_block(ast, body, &mut |node| {
-                if found.is_none() {
-                    found = irreversible_op(ast, typed, &result, &outside, module, node);
+                if list.len() == start || !matches!(list.last(), Some(Cause::Own(_))) {
+                    cause(index, node, &mut list);
                 }
             });
-            if found.is_some() {
-                result[index] = found;
-                changed = true;
+            Some((start as u32, list.len() as u32))
+        })
+        .collect();
+    Causes { list, ranges }
+}
+
+/// Infers a property that holds for a function when its body has a [`Cause::Own`] cause, or
+/// calls a function it holds for: each function's first cause that holds. The functions are
+/// looked at in order once, then each one left undecided again only when a function it calls
+/// is found to hold, so this is linear in the size of the program however its calls are
+/// ordered.
+fn infer_from_calls<T: Clone>(causes: &Causes<T>) -> Vec<Option<Cause<T>>> {
+    let n = causes.ranges.len();
+    let of = |i: usize| match causes.ranges[i] {
+        Some((start, end)) => &causes.list[start as usize..end as usize],
+        None => &[],
+    };
+    let first = |result: &[Option<Cause<T>>], list: &[Cause<T>]| {
+        list.iter()
+            .find(|cause| match cause {
+                Cause::Own(_) => true,
+                Cause::Call(f, _) => result[f.index()].is_some(),
+            })
+            .cloned()
+    };
+    let mut result: Vec<Option<Cause<T>>> = vec![None; n];
+    let mut work = Vec::new();
+    for i in 0..n {
+        if causes.ranges[i].is_some() {
+            result[i] = first(&result, of(i));
+            if result[i].is_some() {
+                work.push(i);
             }
         }
-        if !changed {
-            return result;
+    }
+    if work.len() == n {
+        return result;
+    }
+    // Who calls each function, among those still undecided, as one list in callee order.
+    let mut start = vec![0u32; n + 1];
+    let undecided =
+        |result: &[Option<Cause<T>>], i: usize| result[i].is_none() && causes.ranges[i].is_some();
+    for i in (0..n).filter(|&i| undecided(&result, i)) {
+        for cause in of(i) {
+            if let Cause::Call(f, _) = cause {
+                start[f.index() + 1] += 1;
+            }
         }
     }
+    for i in 0..n {
+        start[i + 1] += start[i];
+    }
+    let mut callers = vec![0u32; start[n] as usize];
+    let mut fill = start.clone();
+    for i in (0..n).filter(|&i| undecided(&result, i)) {
+        for cause in of(i) {
+            if let Cause::Call(f, _) = cause {
+                callers[fill[f.index()] as usize] = i as u32;
+                fill[f.index()] += 1;
+            }
+        }
+    }
+    while let Some(g) = work.pop() {
+        for &c in &callers[start[g] as usize..start[g + 1] as usize] {
+            let c = c as usize;
+            if result[c].is_none() {
+                result[c] = first(&result, of(c));
+                if result[c].is_some() {
+                    work.push(c);
+                }
+            }
+        }
+    }
+    result
+}
+
+/// For each function, why it is not reversible, or `None` if it is. Functions without `rev`
+/// are inferred from their bodies, and the functions they call.
+fn infer_reversibility(ast: &Ast, typed: &Typed) -> Vec<Option<Irreversible>> {
+    let causes = collect_causes(
+        ast,
+        |index| typed.fns[index].sig.reversible == Reversible::Infer,
+        |index, node, list| irreversible_causes(ast, typed, index, node, list),
+    );
+    irreversible(ast, infer_from_calls(&causes))
 }
 
 /// For each function, why a bra cannot undo it as a preparation (`spec/ownership.md` §12): the
 /// first thing it does that is not reversible, other than creating qubits and moving them out.
-/// Repeats until nothing changes, as for reversibility, since preparations can call each
-/// other.
 fn infer_preparable(ast: &Ast, typed: &Typed) -> Vec<Option<Irreversible>> {
-    let mut result: Vec<Option<Irreversible>> = vec![None; ast.all_fns().len()];
-    loop {
-        let mut changed = false;
-        for (index, decl) in ast.all_fns().iter().enumerate() {
-            if result[index].is_some() || typed.fns[index].sig.reversible != Reversible::Infer {
-                continue;
+    let causes = collect_causes(
+        ast,
+        |index| typed.fns[index].sig.reversible == Reversible::Infer,
+        |index, node, list| {
+            let creates = matches!(node, Node::Expr(id) if matches!(
+                ast.expr(id).kind,
+                ExprKind::Ket { .. } | ExprKind::Own { kind: OwnKind::Mv, .. }
+            ));
+            if !creates {
+                irreversible_causes(ast, typed, index, node, list);
             }
-            let Some(body) = decl.body else { continue };
-            let info = &typed.fns[index];
-            let module = typed.fn_modules[index];
-            let outside: Vec<LocalId> = info
-                .self_local
-                .into_iter()
-                .chain(info.params.iter().copied())
-                .collect();
-            let mut found = None;
-            walk_block(ast, body, &mut |node| {
-                let creates = matches!(node, Node::Expr(id) if matches!(
-                    ast.expr(id).kind,
-                    ExprKind::Ket { .. } | ExprKind::Own { kind: OwnKind::Mv, .. }
-                ));
-                if found.is_none() && !creates {
-                    found = irreversible_op(ast, typed, &result, &outside, module, node);
-                }
-            });
-            if found.is_some() {
-                result[index] = found;
-                changed = true;
-            }
-        }
-        if !changed {
-            return result;
-        }
-    }
+        },
+    );
+    irreversible(ast, infer_from_calls(&causes))
+}
+
+/// Each function's reason for not being reversible, from the cause found.
+fn irreversible(ast: &Ast, found: Vec<Option<Cause<Irreversible>>>) -> Vec<Option<Irreversible>> {
+    found
+        .into_iter()
+        .map(|cause| {
+            Some(match cause? {
+                Cause::Own(why) => why,
+                Cause::Call(f, span) => Irreversible {
+                    span,
+                    why: format!(
+                        "it calls `{}`, which is not reversible",
+                        ast.name(ast.function(f).name)
+                    ),
+                },
+            })
+        })
+        .collect()
 }
 
 /// For each function, the first place it prints, directly or through a call it makes.
 fn infer_printing(ast: &Ast, typed: &Typed) -> Vec<Option<Span>> {
-    let mut result: Vec<Option<Span>> = vec![None; ast.all_fns().len()];
-    loop {
-        let mut changed = false;
-        for (index, decl) in ast.all_fns().iter().enumerate() {
-            let Some(body) = decl.body else { continue };
-            if result[index].is_some() {
-                continue;
-            }
-            let mut found = None;
-            walk_block(ast, body, &mut |node| {
-                let Node::Expr(id) = node else { return };
-                if found.is_some() {
-                    return;
+    let causes = collect_causes(
+        ast,
+        |_| true,
+        |_, node, list| {
+            let Node::Expr(id) = node else { return };
+            match typed.callees[id.index()] {
+                Some(Callee::Builtin(Builtin::Print { .. })) => {
+                    list.push(Cause::Own(ast.expr(id).span))
                 }
-                found = match typed.callees[id.index()] {
-                    Some(Callee::Builtin(Builtin::Print { .. })) => Some(ast.expr(id).span),
-                    Some(Callee::Fn(f)) if result[f.index()].is_some() => Some(ast.expr(id).span),
-                    _ => None,
-                };
-            });
-            if found.is_some() {
-                result[index] = found;
-                changed = true;
+                Some(Callee::Fn(f)) => list.push(Cause::Call(f, ast.expr(id).span)),
+                _ => {}
             }
-        }
-        if !changed {
-            return result;
-        }
-    }
+        },
+    );
+    infer_from_calls(&causes)
+        .into_iter()
+        .map(|cause| match cause? {
+            Cause::Own(span) | Cause::Call(_, span) => Some(span),
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -363,84 +439,76 @@ enum Node {
     Assign(ExprId, Span),
 }
 
-/// Why `node`, in a function in `module`, is not reversible, if it is not.
-fn irreversible_op(
+/// What in `node`, in the function `index`, makes it not reversible, if anything: pushed to
+/// `list`, as a cause of its own or a call of a function that would.
+fn irreversible_causes(
     ast: &Ast,
     typed: &Typed,
-    result: &[Option<Irreversible>],
-    outside: &[LocalId],
-    module: ModuleId,
+    index: usize,
     node: Node,
-) -> Option<Irreversible> {
-    let (span, why) = match node {
+    list: &mut Vec<Cause<Irreversible>>,
+) {
+    let info = &typed.fns[index];
+    let module = typed.fn_modules[index];
+    let own = |span, why: String| Cause::Own(Irreversible { span, why });
+    match node {
         Node::Assign(place, span) => {
-            let root = root_local(ast, typed, place)?;
-            if !outside.contains(&root) {
-                return None;
+            let Some(root) = root_local(ast, typed, place) else {
+                return;
+            };
+            if info.self_local != Some(root) && !info.params.contains(&root) {
+                return;
             }
             let name = ast.name(typed.local(root).name);
-            (
+            list.push(own(
                 span,
                 format!("it changes `{name}`, which belongs to its caller"),
-            )
+            ));
         }
         Node::Expr(id) => {
             let expr = ast.expr(id);
-            match expr.kind {
-                ExprKind::Ket { .. } => (expr.span, "it creates qubits".into()),
-                ExprKind::BraTest { .. } | ExprKind::PrepTest { .. } => {
-                    (expr.span, "it measures qubits".into())
-                }
-                ExprKind::Overlap { .. } => (expr.span, "it computes an amplitude".into()),
-                ExprKind::Expectation { .. } => {
-                    (expr.span, "it computes an expectation value".into())
-                }
-                ExprKind::Sample { .. } => (expr.span, "it samples a run".into()),
+            let why: String = match expr.kind {
+                ExprKind::Ket { .. } => "it creates qubits".into(),
+                ExprKind::BraTest { .. } | ExprKind::PrepTest { .. } => "it measures qubits".into(),
+                ExprKind::Overlap { .. } => "it computes an amplitude".into(),
+                ExprKind::Expectation { .. } => "it computes an expectation value".into(),
+                ExprKind::Sample { .. } => "it samples a run".into(),
                 ExprKind::Own {
                     kind: OwnKind::Mv, ..
                 } if typed.types.linearity(typed.ty(id)) == Kind::Linear => {
-                    (expr.span, "it moves qubits".into())
+                    "it moves qubits".into()
                 }
                 ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
-                    match typed.callees[id.index()]? {
-                        Callee::Builtin(b) if !b.reversible() => {
-                            (expr.span, format!("it calls `{}`", b.name()))
+                    match typed.callees[id.index()] {
+                        Some(Callee::Builtin(b)) if !b.reversible() => {
+                            format!("it calls `{}`", b.name())
                         }
-                        Callee::Fn(f)
-                            if typed.fns[f.index()].sig.reversible == Reversible::Infer
-                                && result[f.index()].is_some() =>
-                        {
+                        Some(Callee::Fn(f)) => {
                             let name = ast.name(ast.function(f).name);
-                            (
-                                expr.span,
-                                format!("it calls `{name}`, which is not reversible"),
-                            )
-                        }
-                        // A trait's function not declared `rev`: its `impl`s are not known here.
-                        Callee::Fn(f) if typed.fns[f.index()].sig.reversible == Reversible::No => {
-                            let name = ast.name(ast.function(f).name);
-                            (
-                                expr.span,
-                                format!(
+                            match typed.fns[f.index()].sig.reversible {
+                                Reversible::Infer => {
+                                    list.push(Cause::Call(f, expr.span));
+                                    if !other_package(ast, typed.fn_modules[f.index()], module) {
+                                        return;
+                                    }
+                                    format!("it calls `{name}`, {ELSEWHERE}")
+                                }
+                                // A trait's function not declared `rev`: its `impl`s are not
+                                // known here.
+                                Reversible::No => format!(
                                     "it calls `{name}`, which its trait does not declare `rev fn`"
                                 ),
-                            )
+                                Reversible::Yes => return,
+                            }
                         }
-                        Callee::Fn(f)
-                            if typed.fns[f.index()].sig.reversible == Reversible::Infer
-                                && other_package(ast, typed.fn_modules[f.index()], module) =>
-                        {
-                            let name = ast.name(ast.function(f).name);
-                            (expr.span, format!("it calls `{name}`, {ELSEWHERE}"))
-                        }
-                        _ => return None,
+                        _ => return,
                     }
                 }
-                _ => return None,
-            }
+                _ => return,
+            };
+            list.push(own(expr.span, why));
         }
-    };
-    Some(Irreversible { span, why })
+    }
 }
 
 /// The expressions of a ket's or bra's computed labels.

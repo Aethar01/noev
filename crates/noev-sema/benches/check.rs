@@ -113,7 +113,8 @@ fn main() {
     );
 
     impls(400);
-    inferred(2000);
+    inferred("inferred", 2000, true);
+    inferred("irrev", 2000, false);
     modules("modules", 2000, |i| {
         // Each module uses the one before it by path, by import and by glob.
         let mut text =
@@ -205,15 +206,16 @@ fn impls(count: usize) {
 /// Checks a chain of `count` generic functions with no bounds written, each passing its `T`
 /// to the one before it, the first calling `x.area()` and copying `x`: their bounds are
 /// inferred. Declared last to first, the worst order for following needs through calls.
-/// (`area` is `rev`: an irreversible chain in this order measures reversibility inference,
-/// which takes a pass over every body per step.)
-fn inferred(count: usize) {
+/// Unless `area` is `rev`, every function is irreversible because the first is, which
+/// measures reversibility inference in the same order.
+fn inferred(phase: &str, count: usize, rev: bool) {
     let mut text = String::from(
-        "trait Shape { rev fn area(ref self) -> Float }\nstruct Sq {}\n\
-         impl Shape for Sq { rev fn area(ref self) -> Float { 1.0 } }\n\
+        "trait Shape { @fn area(ref self) -> Float }\nstruct Sq {}\n\
+         impl Shape for Sq { @fn area(ref self) -> Float { 1.0 } }\n\
          fn main() { print(f%(Sq {})) }\n",
     )
-    .replace('%', &(count - 1).to_string());
+    .replace('%', &(count - 1).to_string())
+    .replace('@', if rev { "rev " } else { "" });
     for i in (1..count).rev() {
         text.push_str(&format!("fn f{i}<T>(x: T) -> Float {{ f{}(x) }}\n", i - 1));
     }
@@ -230,11 +232,15 @@ fn inferred(count: usize) {
     let ownership = fastest(5, || {
         black_box(noev_sema::check_ownership(black_box(&parsed.ast), &typed));
     });
+    let circuits = fastest(5, || {
+        black_box(noev_sema::check_circuits(black_box(&parsed.ast), &typed));
+    });
     println!(
-        "{:<9} {:>10.0} fns/s  ({:.2} ms types, {:.2} ms ownership, for a chain of {count} functions)",
-        "inferred",
-        count as f64 / (types + ownership).as_secs_f64(),
+        "{:<9} {:>10.0} fns/s  ({:.2} ms types, {:.2} ms ownership, {:.2} ms circuits, for a chain of {count} functions)",
+        phase,
+        count as f64 / (types + ownership + circuits).as_secs_f64(),
         types.as_secs_f64() * 1e3,
         ownership.as_secs_f64() * 1e3,
+        circuits.as_secs_f64() * 1e3,
     );
 }

@@ -79,6 +79,10 @@ before 1.0.
   trait function not declared `rev` through a bound is irreversible, and runs shot by shot;
   on a known type the call reaches the `impl`'s function, whose reversibility is inferred.
   `Trait::f(x)` names the trait, and is needed when two traits of a type share a name.
+- Reversibility, preparations and printing are inferred in time linear in the program:
+  each function is looked at again only when one it calls changes, instead of every
+  function on every pass. A chain of 2000 functions declared last to first, the first
+  irreversible, took 95 ms to check for ownership and now takes 2.5 ms.
 - A generic function calling itself infers its own type parameters (`f(s, n - 1)` inside
   `f<T>`), which used to be "cannot tell what `T` is".
 - Associated types: `type Result: Copy` in a trait, `type Result = Bit` in each `impl`,
