@@ -449,9 +449,17 @@ fn plan(checked: &Checked) -> String {
     let circuits = &checked.circuits;
     // `line 12` for a program of one file; `src/ansatz.nv:12` when there are several.
     let several = checked.sources.files().len() > 1;
+    // Each file's line starts, found once: finding them per row is quadratic in the length.
+    let lines: Vec<_> = checked
+        .sources
+        .files()
+        .iter()
+        .map(report::Lines::new)
+        .collect();
     let line = |span: noev_syntax::Span| {
-        let file = checked.sources.lookup(span.start);
-        let line = report::Lines::new(file).line_col(span.start).0;
+        let id = checked.sources.find(span.start);
+        let file = checked.sources.file(id);
+        let line = lines[id.index()].line_col(span.start).0;
         if several {
             format!("{}:{line}", file.name)
         } else {
@@ -461,7 +469,7 @@ fn plan(checked: &Checked) -> String {
     // Why a run is not sampled from one simulation, if it is not.
     let why = |info: &noev_sema::CircuitInfo| {
         if let Some((span, what)) = &info.not_circuit {
-            Some(format!("a measurement result is {what} ({})", line(*span)))
+            Some(format!("{what} ({})", line(*span)))
         } else if let Some((span, why)) = &info.feedback_unsupported {
             Some(format!("{why}, not compiled yet ({})", line(*span)))
         } else if let Some(span) = info.inspects {

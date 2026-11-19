@@ -51,8 +51,8 @@ pub struct CircuitInfo {
     pub quantum: bool,
     /// Whether its parameters and result contain no qubits or references (a closed run).
     pub closed: bool,
-    /// The first use of a measurement result that stops it being a circuit, and what the use
-    /// was ("used in arithmetic"); `None` when it is a circuit.
+    /// The first thing that stops it being a circuit, as a clause ("a measurement result is
+    /// used in arithmetic before its last quantum operation"); `None` when it is a circuit.
     pub not_circuit: Option<(Span, String)>,
     /// Whether a condition depends on a measurement result before its last quantum operation.
     pub feedback: bool,
@@ -188,7 +188,7 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
             );
         } else if let Some((span, what)) = &info.not_circuit {
             diagnostics.push(
-                Diagnostic::error(*span, format!("`{name}` is declared `circuit fn`, but a measurement result is {what} before its last quantum operation"))
+                Diagnostic::error(*span, format!("`{name}` is declared `circuit fn`, but {what}"))
                     .with_code("N021")
                     .with_label(decl.name_span, "declared `circuit fn` here")
                     .with_help("use measurement results only in `if`/`while` conditions or the result until the last quantum operation"),
@@ -243,7 +243,7 @@ fn repeated_run_warnings(ast: &Ast, typed: &Typed, circuits: &Circuits, out: &mu
             continue;
         }
         let warning = match &info.not_circuit {
-            Some((at, what)) => Diagnostic::error(span, format!("{subject} shot by shot: a measurement result is {what} before its last quantum operation"))
+            Some((at, what)) => Diagnostic::error(span, format!("{subject} shot by shot: {what}"))
                 .with_label(*at, "here")
                 .with_help("use measurement results only in `if`/`while` conditions or the result until the last quantum operation, and the run is sampled from one simulation"),
             None if info.feedback_unsupported.is_some() => {
@@ -997,9 +997,20 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// A measurement result is `what` (say, "printed") before the last quantum operation.
     fn violate(&mut self, span: Span, what: &str) {
         if self.info.not_circuit.is_none() {
-            self.info.not_circuit = Some((span, what.to_string()));
+            self.not_circuit(
+                span,
+                format!("a measurement result is {what} before its last quantum operation"),
+            );
+        }
+    }
+
+    /// Why the run is not a circuit, as a clause.
+    fn not_circuit(&mut self, span: Span, why: String) {
+        if self.info.not_circuit.is_none() {
+            self.info.not_circuit = Some((span, why));
         }
     }
 
@@ -1402,10 +1413,10 @@ impl<'a> Walker<'a> {
             }
             Some(Callee::Fn(f)) if unknown_body(typed, f) => {
                 let name = ast.name(ast.function(f).name);
-                let what = format!(
-                    "passed to `{name}`, a trait's function not declared `rev fn`, whose `impl`s are not known here"
+                let why = format!(
+                    "it calls `{name}`, a trait's function not declared `rev fn` whose `impl`s are not known here, so it may measure"
                 );
-                self.violate(ast.expr(id).span, &what);
+                self.not_circuit(ast.expr(id).span, why);
                 any
             }
             Some(Callee::Fn(f)) => {
@@ -1421,14 +1432,14 @@ impl<'a> Walker<'a> {
                 }
                 // What happens inside the call is part of this run.
                 let inner = given.unwrap_or(&self.cx.fns[f.index()]);
-                if let Some((span, what)) = &inner.not_circuit {
+                if let Some((span, why)) = &inner.not_circuit {
                     // Name the function where it happens, once.
-                    let what = if what.contains(" in `") {
-                        what.clone()
+                    let why = if why.starts_with("in `") {
+                        why.clone()
                     } else {
-                        format!("{what} in `{}`", ast.name(ast.function(f).name))
+                        format!("in `{}`, {why}", ast.name(ast.function(f).name))
                     };
-                    self.violate(*span, &what);
+                    self.not_circuit(*span, why);
                 }
                 self.info.feedback |= inner.feedback;
                 if let Some((span, why)) = &inner.feedback_unsupported {

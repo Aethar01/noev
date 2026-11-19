@@ -479,3 +479,31 @@ fn ok_owned(source: &str) {
     let errs = all_errors(source);
     assert!(errs.is_empty(), "{errs:?}");
 }
+
+/// Calling a trait's function that is not `rev fn`, through a bound, stops a function being
+/// a circuit because the `impl` may measure; the reason says so, not that a result is passed.
+#[test]
+fn unknown_trait_function_is_not_a_circuit() {
+    let source = "trait Oracle { rev fn apply(ref self, q: mut Qubit)\n fn width(ref self) -> Int }\n\
+                  fn run<T: Oracle>(o: ref T, q: mut Qubit) -> Int { o.apply(mut q)\n o.width() }\n\
+                  fn outer<T: Oracle>(o: ref T, q: mut Qubit) -> Int { run(ref o, mut q) }\n";
+    let parsed = parse(source);
+    let (typed, errs) = check(&parsed.ast);
+    assert!(errs.is_empty(), "{errs:?}");
+    let (circuits, _) = crate::check_circuits(&parsed.ast, &typed);
+    let why = |name: &str| {
+        let f = parsed
+            .ast
+            .all_fns()
+            .iter()
+            .position(|d| parsed.ast.name(d.name) == name);
+        circuits.fns[f.expect("declared")]
+            .not_circuit
+            .clone()
+            .map(|(_, why)| why)
+    };
+    let direct = "it calls `width`, a trait's function not declared `rev fn` whose `impl`s are \
+                  not known here, so it may measure";
+    assert_eq!(why("run").as_deref(), Some(direct));
+    assert_eq!(why("outer"), Some(format!("in `run`, {direct}")));
+}

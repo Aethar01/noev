@@ -653,10 +653,7 @@ impl Document {
         {
             let line = |span: Span| self.position(span.start).line + 1;
             let how = if let Some((span, what)) = &info.not_circuit {
-                format!(
-                    "not a circuit: a measurement result is {what} (line {})",
-                    line(*span)
-                )
+                format!("not a circuit: {what} (line {})", line(*span))
             } else if let Some((span, why)) = &info.feedback_unsupported {
                 format!(
                     "a circuit, but run shot by shot: {why} (line {})",

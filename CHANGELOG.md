@@ -124,6 +124,10 @@ before 1.0.
 - The language server checks a file in a package with the rest of the package, reading open
   documents from the editor; it rechecks the package's other open files when one changes, and
   go to definition and diagnostic notes can point into other files.
+- `noev build --emit=plan` says a function calling a trait's function that is not `rev fn`
+  is not a circuit because the `impl` may measure, instead of claiming a measurement result is
+  passed to it, and finds each file's lines once, so long programs no longer take quadratic
+  time (a chain of 4000 functions: 356 ms to 51 ms).
 
 ## [0.4.2] - 2026-11-08
 
