@@ -10,7 +10,7 @@ use noev_syntax::{Diagnostic, FxHashMap, Span, Symbol};
 
 use crate::prelude::{self, Builtin, Math, Reversible, Sig};
 use crate::resolve::{self, Binding, Entry, Found, Ns, PathError, PathWords, Scopes, Visible};
-use crate::ty::{Kind, StructDef, StructId, Ty, TyKind, Types, VariantDef};
+use crate::ty::{Kind, NEG, OPS, StructDef, StructId, Ty, TyKind, Types, VariantDef, op_index};
 
 /// A local variable: a `let` binding, parameter, `self`, or loop variable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -211,6 +211,10 @@ pub fn normalize(impls: &[ImplInfo], types: &mut Types, ty: Ty) -> Ty {
                     _ => {}
                 }
             }
+            // A built-in type's operator gives its `Output`.
+            if let Some(output) = types.builtin_op(trait_index, base, Some(&args)) {
+                return output;
+            }
             let found = impls.iter().find_map(|i| {
                 if i.trait_id.0 != trait_index {
                     return None;
@@ -356,38 +360,6 @@ pub struct Run {
     pub first_local: u32,
     /// The block's type, before returned qubits are measured.
     pub ty: Ty,
-}
-
-/// `std::ops`'s traits (`spec/types.md` §6), by name, with how each operator is written.
-const OPS: [(&str, &str); 11] = [
-    ("Add", "+"),
-    ("Sub", "-"),
-    ("Mul", "*"),
-    ("Div", "/"),
-    ("Rem", "%"),
-    ("Neg", "-"),
-    ("AddAssign", "+="),
-    ("SubAssign", "-="),
-    ("MulAssign", "*="),
-    ("DivAssign", "/="),
-    ("RemAssign", "%="),
-];
-
-/// [`OPS`]'s `Neg`.
-const NEG: usize = 5;
-
-/// The `std::ops` trait for a binary operator, or for its compound assignment, by position
-/// in [`OPS`].
-fn op_index(op: BinaryOp, assign: bool) -> Option<usize> {
-    let index = match op {
-        BinaryOp::Add => 0,
-        BinaryOp::Sub => 1,
-        BinaryOp::Mul => 2,
-        BinaryOp::Div => 3,
-        BinaryOp::Rem => 4,
-        _ => return None,
-    };
-    Some(if assign { index + 6 } else { index })
 }
 
 /// The arguments of a call, after its receiver: a list from the syntax tree, or an
@@ -581,7 +553,6 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         param_bounds: FxHashMap::default(),
         inferred: FxHashMap::default(),
         library: false,
-        ops: [None; OPS.len()],
         operator: None,
         param_assoc: FxHashMap::default(),
         impl_assoc: Vec::new(),
@@ -646,8 +617,6 @@ struct Checker<'a> {
     inferred: FxHashMap<Ty, Vec<(TraitId, Span)>>,
     /// Whether the package being compiled is a library: it has no `fn main`.
     library: bool,
-    /// `std::ops`'s traits, in the order of [`OPS`], when the program uses them.
-    ops: [Option<TraitId>; OPS.len()],
     /// While an operator's call is checked, how it is written and where it is, so a bound
     /// it does not meet is reported as the operator's (and one of a call in its operands is
     /// not).
@@ -776,9 +745,9 @@ impl<'a> Checker<'a> {
                 self.t.types.measure = Some(id.0);
             }
             if Some(ast.module(self.module).package) == ast.std_package()
-                && let Some(op) = OPS.iter().position(|&(n, _)| n == ast.name(name))
+                && let Some(op) = OPS.iter().position(|o| o.name == ast.name(name))
             {
-                self.ops[op] = Some(id);
+                self.t.types.ops[op] = Some(id.0);
             }
             for &f in ast.list(fns) {
                 self.t.fn_traits.insert(f, id);
@@ -1603,6 +1572,10 @@ impl<'a> Checker<'a> {
                             })
                     })
                 });
+        }
+        // Built-in types implement `std::ops` by their built-in operators.
+        if types.builtin_op(trait_id.0, ty, args).is_some() {
+            return true;
         }
         if Some(trait_id.0) == types.measure {
             if types.is_measurable(ty) {
@@ -4209,30 +4182,7 @@ impl<'a> Checker<'a> {
                 _ => Ty::ERROR,
             };
         }
-        let result = match op {
-            Or | And => (lhs == Ty::BOOL && rhs == Ty::BOOL).then_some(Ty::BOOL),
-            Eq | NotEq => (lhs == rhs && self.t.types.is_comparable(lhs)).then_some(Ty::BOOL),
-            Lt | Le | Gt | Ge => (lhs == rhs && lhs.is_number()).then_some(Ty::BOOL),
-            BitOr | BitXor | BitAnd => {
-                (lhs == rhs && (lhs.is_integer() || lhs == Ty::BIT)).then_some(lhs)
-            }
-            // The shift amount is the same type, or an `Int`.
-            Shl | Shr => (lhs.is_integer() && (rhs == lhs || rhs == Ty::INT)).then_some(lhs),
-            Add | Sub => match (lhs, rhs) {
-                (a, b) if a == b && (a.is_number() || a.is_complex()) => Some(a),
-                (Ty::OBSERVABLE, Ty::OBSERVABLE) => Some(Ty::OBSERVABLE),
-                _ => None,
-            },
-            Mul => match (lhs, rhs) {
-                (a, b) if a == b && (a.is_number() || a.is_complex()) => Some(a),
-                (Ty::OBSERVABLE | Ty::FLOAT, Ty::OBSERVABLE) | (Ty::OBSERVABLE, Ty::FLOAT) => {
-                    Some(Ty::OBSERVABLE)
-                }
-                _ => None,
-            },
-            Div => (lhs == rhs && (lhs.is_number() || lhs.is_complex())).then_some(lhs),
-            Rem => (lhs == rhs && lhs.is_number()).then_some(lhs),
-        };
+        let result = self.t.types.builtin_binary(op, lhs, rhs);
         if let Some(ty) = result {
             return ty;
         }
@@ -4257,7 +4207,7 @@ impl<'a> Checker<'a> {
         } else if lhs.is_number() && rhs.is_number() {
             Some("Noev does not convert between number types implicitly; convert one side, as in `i64(x)` or `Int(x)`".to_string())
         } else if let Some(index) = op_index(op, false)
-            && let name = OPS[index].0
+            && let name = OPS[index].name
             && matches!(self.t.types.kind(lhs), TyKind::Struct(_) | TyKind::Param(_))
         {
             Some(format!(
@@ -4949,8 +4899,8 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         span: Span,
     ) -> Option<Ty> {
-        let trait_id = self.ops[index]?;
-        let word = OPS[index].1;
+        let trait_id = TraitId(self.t.types.ops[index]?);
+        let word = OPS[index].word;
         let base = self.t.types.deref(receiver_ty);
         if !matches!(
             self.t.types.kind(base),

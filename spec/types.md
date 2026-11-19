@@ -553,8 +553,12 @@ impl Mul<Int> for V {                  // `v * 2`
   `impl AddAssign<ref Reg> for Reg` makes `a += b` lend `b`.
 - In generic code the bound is written: `T: Add<T, Output = T>`. Operators do not infer
   bounds, since their traits have parameters.
-- Built-in types keep their built-in operators. They do not implement the `std::ops` traits
-  yet, so a `T: Add<T>` cannot be given an `Int`.
+- Built-in types implement the traits by their built-in operators, with the same rules:
+  `Int: Add<Int, Output = Int>`, `Float: Mul<Observable, Output = Observable>`,
+  `Int: AddAssign<Int>`, but no `Int: Add<Float>`. So `fn sum<T: Add<T, Output = T>>` takes
+  numbers and types of the program's own alike, and each copy for a built-in type runs the
+  built-in operator. An operator on two values of built-in types is always the built-in
+  one.
 - The traits are not in the prelude: `use std::ops::Add` to implement or bound one.
 
 ### Built-in generic types
@@ -579,7 +583,7 @@ there; a `rev` one cannot measure, so it keeps a run a circuit.)
 Subtraction and other arithmetic in sizes beyond `+` and `*` by a number; `From` beyond the
 built-in conversions; `impl Trait` arguments;
 closures; the quantum interfaces `Oracle`, `Ansatz` and `Observable` in the standard library.
-The `std::ops` traits for built-in types, defaults for trait parameters (`Add<Rhs = Self>`),
+Defaults for trait parameters (`Add<Rhs = Self>`),
 and traits for comparisons and the bit operators.
 
 ## 7. Printing and formatting

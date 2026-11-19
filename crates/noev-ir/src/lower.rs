@@ -8,6 +8,7 @@
 
 use noev_sema::check::{Adjust, Callee, LocalId, Res};
 use noev_sema::prelude::{Builtin, Gate};
+use noev_sema::ty::OpKind;
 use noev_sema::{Circuits, Ty, TyKind, Typed, Types};
 use noev_syntax::ast::{self as ast, ExprId, ExprKind, OwnKind, StmtKind};
 use noev_syntax::state::{Label, labels};
@@ -505,6 +506,20 @@ impl<'a> Builder<'a> {
 
     /// For a call `call` of `Measure::measure` whose `Self` has no `impl` of its own (a
     /// qubit, an array, a tuple), `Self`.
+    /// For a call `call` of a `std::ops` trait's function on a built-in type (in a copy of
+    /// generic code, `T: Add<T>` given `Int`), the operator it is (`spec/types.md` §6).
+    fn builtin_operator(&mut self, f: ast::FnId, call: ExprId) -> Option<OpKind> {
+        let &t = self.typed.fn_traits.get(&f)?;
+        let kind = self.types.op_trait(t.index() as u32)?;
+        let args: Vec<Ty> = self.typed.type_args.get(&call)?.clone();
+        let args: Vec<Ty> = args.into_iter().map(|a| self.subst(a)).collect();
+        let (&self_ty, rest) = args.split_first()?;
+        let n = self.typed.traits[t.index()].params.len();
+        self.types
+            .builtin_op(t.index() as u32, self_ty, Some(rest.get(..n)?))
+            .map(|_| kind)
+    }
+
     fn measured_by_parts(&mut self, f: ast::FnId, call: ExprId) -> Option<Ty> {
         let &t = self.typed.fn_traits.get(&f)?;
         if Some(t.index() as u32) != self.types.measure {
@@ -1900,6 +1915,38 @@ impl Builder<'_> {
                 .first()
                 .expect("`measure`");
             return self.measure_into(dest, source, self_ty, measure);
+        }
+        // A `std::ops` trait's function on a built-in type is its built-in operator.
+        if let Callee::Fn(f) = callee
+            && let Some(kind) = self.builtin_operator(f, id)
+        {
+            let (first, rest) = match receiver {
+                Some(r) => (r, args),
+                None => (args[0], &args[1..]),
+            };
+            match kind {
+                OpKind::Neg => {
+                    let x = self.operand(first);
+                    self.set(&dest, Rvalue::Unary(UnOp::Neg, x));
+                }
+                OpKind::Binary(op) => {
+                    let (a, b) = (self.operand(first), self.operand(rest[0]));
+                    self.set(&dest, Rvalue::Binary(op, a, b));
+                }
+                OpKind::Assign(op) => {
+                    let place = match ast.expr(first).kind {
+                        ExprKind::Own { place, .. } => place,
+                        _ => first,
+                    };
+                    let value = self.operand(rest[0]);
+                    let target = self.place_deref(place);
+                    self.assign(
+                        target.clone(),
+                        Rvalue::Binary(op, Operand::Copy(target), value),
+                    );
+                }
+            }
+            return;
         }
         match callee {
             Callee::Fn(f) => {

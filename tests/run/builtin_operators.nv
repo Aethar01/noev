@@ -1,0 +1,20 @@
+// Built-in types implement `std::ops` by their built-in operators (spec/types.md §6), so
+// generic code bound on an operator trait can be given numbers.
+
+use std::ops::{Add, AddAssign, Mul, Neg}
+
+fn sum3<T: Add<T, Output = T>>(a: T, b: T, c: T) -> T { mv a + mv b + mv c }
+fn scale<T: Mul<Float, Output = T>>(x: T, k: Float) -> T { mv x * k }
+fn negate<T: Neg<Output = T>>(x: T) -> T { -(mv x) }
+fn bump<T: AddAssign<T>>(x: mut T, by: T) { x += mv by }
+
+fn main() {
+    print(sum3(1, 2, 3))
+    print(sum3(1.5, 2.0, 0.25))
+    print(scale(2.0, 1.5))
+    print(negate(5))
+    let mut n = 40
+    bump(mut n, 2)
+    print(n)
+    print(Add::add(1, 2) * Mul::mul(2, 3))
+}

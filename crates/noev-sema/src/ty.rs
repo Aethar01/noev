@@ -1,6 +1,64 @@
 //! Types, interned so that comparing two types is comparing two integers.
 
+use noev_syntax::ast::BinaryOp;
 use noev_syntax::{Ast, FxHashMap, Span, Symbol};
+
+/// What a `std::ops` trait stands for (`spec/types.md` §6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpKind {
+    /// A binary operator: `Add` for `a + b`.
+    Binary(BinaryOp),
+    /// Unary `-`.
+    Neg,
+    /// A compound assignment: `AddAssign` for `a += b`.
+    Assign(BinaryOp),
+}
+
+/// A `std::ops` trait: its name, how its operator is written, and what it stands for.
+#[derive(Clone, Copy, Debug)]
+pub struct OpTrait {
+    /// The trait's name.
+    pub name: &'static str,
+    /// How the operator is written.
+    pub word: &'static str,
+    /// What it stands for.
+    pub kind: OpKind,
+}
+
+const fn op(name: &'static str, word: &'static str, kind: OpKind) -> OpTrait {
+    OpTrait { name, word, kind }
+}
+
+/// `std::ops`'s traits, in the order of [`Types::ops`].
+pub const OPS: [OpTrait; 11] = [
+    op("Add", "+", OpKind::Binary(BinaryOp::Add)),
+    op("Sub", "-", OpKind::Binary(BinaryOp::Sub)),
+    op("Mul", "*", OpKind::Binary(BinaryOp::Mul)),
+    op("Div", "/", OpKind::Binary(BinaryOp::Div)),
+    op("Rem", "%", OpKind::Binary(BinaryOp::Rem)),
+    op("Neg", "-", OpKind::Neg),
+    op("AddAssign", "+=", OpKind::Assign(BinaryOp::Add)),
+    op("SubAssign", "-=", OpKind::Assign(BinaryOp::Sub)),
+    op("MulAssign", "*=", OpKind::Assign(BinaryOp::Mul)),
+    op("DivAssign", "/=", OpKind::Assign(BinaryOp::Div)),
+    op("RemAssign", "%=", OpKind::Assign(BinaryOp::Rem)),
+];
+
+/// [`OPS`]'s `Neg`.
+pub const NEG: usize = 5;
+
+/// The `std::ops` trait for a binary operator, or for its compound assignment, by position
+/// in [`OPS`].
+pub fn op_index(op: BinaryOp, assign: bool) -> Option<usize> {
+    OPS.iter().position(|o| {
+        o.kind
+            == if assign {
+                OpKind::Assign(op)
+            } else {
+                OpKind::Binary(op)
+            }
+    })
+}
 
 /// An interned type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -207,6 +265,9 @@ pub struct Types {
     /// The standard library's `Measure` trait, by its position in the checker's table of
     /// traits, once a program names it.
     pub measure: Option<u32>,
+    /// `std::ops`'s traits, in the order of [`OPS`], by their positions in the checker's
+    /// table of traits, once a program uses them.
+    pub ops: [Option<u32>; OPS.len()],
 }
 
 macro_rules! basic {
@@ -231,6 +292,7 @@ macro_rules! basic {
                     params: Vec::new(),
                     instances: FxHashMap::default(),
                     measure: None,
+                    ops: [None; OPS.len()],
                 }
             }
         }
@@ -949,6 +1011,85 @@ impl Types {
         self.linearity(ty) == Kind::Copyable
             && !matches!(self.kind(ty), TyKind::Ref { .. })
             && !self.has_params(ty)
+    }
+
+    /// What the built-in operator `op` gives on `lhs` and `rhs`, if it applies.
+    pub fn builtin_binary(&self, op: BinaryOp, lhs: Ty, rhs: Ty) -> Option<Ty> {
+        use BinaryOp::*;
+        match op {
+            Or | And => (lhs == Ty::BOOL && rhs == Ty::BOOL).then_some(Ty::BOOL),
+            Eq | NotEq => (lhs == rhs && self.is_comparable(lhs)).then_some(Ty::BOOL),
+            Lt | Le | Gt | Ge => (lhs == rhs && lhs.is_number()).then_some(Ty::BOOL),
+            BitOr | BitXor | BitAnd => {
+                (lhs == rhs && (lhs.is_integer() || lhs == Ty::BIT)).then_some(lhs)
+            }
+            // The shift amount is the same type, or an `Int`.
+            Shl | Shr => (lhs.is_integer() && (rhs == lhs || rhs == Ty::INT)).then_some(lhs),
+            Add | Sub => match (lhs, rhs) {
+                (a, b) if a == b && (a.is_number() || a.is_complex()) => Some(a),
+                (Ty::OBSERVABLE, Ty::OBSERVABLE) => Some(Ty::OBSERVABLE),
+                _ => None,
+            },
+            Mul => match (lhs, rhs) {
+                (a, b) if a == b && (a.is_number() || a.is_complex()) => Some(a),
+                (Ty::OBSERVABLE | Ty::FLOAT, Ty::OBSERVABLE) | (Ty::OBSERVABLE, Ty::FLOAT) => {
+                    Some(Ty::OBSERVABLE)
+                }
+                _ => None,
+            },
+            Div => (lhs == rhs && (lhs.is_number() || lhs.is_complex())).then_some(lhs),
+            Rem => (lhs == rhs && lhs.is_number()).then_some(lhs),
+        }
+    }
+
+    /// What built-in unary `-` gives on `ty`, if it applies.
+    pub fn builtin_neg(&self, ty: Ty) -> Option<Ty> {
+        let ok = matches!(ty, Ty::INT | Ty::OBSERVABLE)
+            || ty.is_float()
+            || ty.is_complex()
+            || ty.width().is_some_and(|w| w.signed);
+        ok.then_some(ty)
+    }
+
+    /// The `std::ops` trait `trait_index` is, if it is one.
+    pub fn op_trait(&self, trait_index: u32) -> Option<OpKind> {
+        let i = self.ops.iter().position(|&t| t == Some(trait_index))?;
+        Some(OPS[i].kind)
+    }
+
+    /// For a built-in type, what its built-in operator gives as the `std::ops` trait
+    /// `trait_index` with the arguments `args` (any right side if `None`): the `Output`, or
+    /// `()` for a compound assignment. `None` when the built-in operator does not apply, or
+    /// the trait is not an operator's (`spec/types.md` §6).
+    pub fn builtin_op(&self, trait_index: u32, self_ty: Ty, args: Option<&[Ty]>) -> Option<Ty> {
+        if !self.is_builtin_value(self_ty) {
+            return None;
+        }
+        match self.op_trait(trait_index)? {
+            OpKind::Neg => self.builtin_neg(self_ty),
+            OpKind::Binary(op) => {
+                let rhs = match args {
+                    Some(&[rhs]) => rhs,
+                    Some(_) => return None,
+                    None => self_ty,
+                };
+                self.builtin_binary(op, self_ty, rhs)
+            }
+            OpKind::Assign(op) => {
+                let rhs = match args {
+                    Some(&[rhs]) => rhs,
+                    Some(_) => return None,
+                    None => self_ty,
+                };
+                (self.builtin_binary(op, self_ty, rhs) == Some(self_ty)).then_some(Ty::UNIT)
+            }
+        }
+    }
+
+    /// Whether `ty` is a built-in type with operators of its own: a number, a complex
+    /// number, `Bit`, `Bool` or `Observable`.
+    fn is_builtin_value(&self, ty: Ty) -> bool {
+        ty.is_number() || ty.is_complex() || matches!(ty, Ty::BIT | Ty::BOOL | Ty::OBSERVABLE)
     }
 
     /// Whether `==` and `!=` work on values of `ty`: numbers, logic, strings, and arrays,

@@ -646,3 +646,28 @@ fn compound_assignment_traits() {
         ["`-=` cannot be applied to `R`: it does not implement `SubAssign`"]
     );
 }
+
+/// Built-in types implement `std::ops` by their built-in operators, with their `Output`s.
+#[test]
+fn builtin_types_implement_operator_traits() {
+    let sum = "use std::ops::{Add, Mul}\nfn sum<T: Add<T, Output = T>>(a: T, b: T) -> T { mv a + mv b }\n";
+    ok(&format!(
+        "{sum}fn f() -> (Int, Float, u8) {{ (sum(1, 2), sum(1.0, 2.0), sum(u8(1), u8(2))) }}\n\
+         fn g() -> Int {{ Add::add(1, 2) }}"
+    ));
+    // `Float * Observable` is an `Observable`.
+    ok(
+        "use std::ops::Mul\nfn s<T: Mul<Observable, Output = Observable>>(k: T) -> Observable { mv k * Z(0) }\n\
+        fn f() -> Observable { s(2.0) }",
+    );
+    assert_eq!(
+        errors(&format!("{sum}fn f() -> Bool {{ sum(true, false) }}")),
+        ["`sum` needs `T: Add<Bool>`, but `Bool` does not implement `Add<Bool>`"]
+    );
+    assert_eq!(
+        errors(&format!(
+            "{sum}fn s<T: Mul<Float, Output = T>>(x: T) -> T {{ mv x * 2.0 }}\nfn f() -> Int {{ s(3) }}"
+        )),
+        ["`s` needs `T: Mul<Float>`, but `Int` does not implement `Mul<Float>`"]
+    );
+}
