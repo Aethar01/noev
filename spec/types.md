@@ -336,11 +336,11 @@ where it matters: any place a linear value changes hands has an explicit `mv`.
 ## 6. Traits and generics
 
 Status: **Implemented** for type parameters of functions, structs and enums, bounds (`Copy`
-and traits), inference of type arguments, `::<…>`, traits without type parameters,
-associated types (with `Copy` as their only bound), `impl`s (generic ones too) and
-monomorphisation, `Trait::f(x)`, `Measure` (for qubits, and tuples and arrays of
-measurable types), and size parameters. Not implemented yet: generic traits, and bounds
-inferred from bodies. The syntax is in [grammar.md](grammar.md) §2.
+and traits), inference of type arguments, `::<…>`, traits with and without type and size
+parameters, associated types (with `Copy` as their only bound, and not yet in generic
+traits), `impl`s (generic ones too) and monomorphisation, `Trait::f(x)`, `Measure` (for
+qubits, and tuples and arrays of measurable types), and size parameters. Not implemented
+yet: bounds inferred from bodies. The syntax is in [grammar.md](grammar.md) §2.
 
 ### Generic parameters
 
@@ -441,6 +441,11 @@ impl Oracle<4> for Parity {
 - A trait declares functions, with or without default bodies, and associated types
   (`type Result`). An `impl` provides them for a type, and can itself be generic:
   `impl<T: Measure> Measure for Pair<T, T>`.
+- A trait can take type and size parameters, which its functions see after `Self`. A type
+  can implement one trait several times with different arguments (`Oracle<2>` and
+  `Oracle<4>`), and a call picks the `impl` by them: they are inferred from the call's
+  arguments, as a function's are; if that leaves one open, it is the trait's only arguments
+  for the type (from its bounds, for a type parameter); otherwise the call is an error.
 - Methods are written inside structs and enums, so `impl` is only for traits.
 - **Coherence**, as in Rust: an `impl` must be in the package of the trait or of the type, so
   two packages can never provide the same one.

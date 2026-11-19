@@ -136,9 +136,20 @@ fn fn_name(syntax: &Ast, typed: &Typed, f: ast::FnId) -> String {
             syntax.name(typed.types.structs[s.index()].name)
         )
     } else if let Some(&index) = typed.fn_impls.get(&f) {
-        // `<Pair<T, T> as Measure>::measure`, as Rust writes it.
+        // `<Pair<T, T> as Measure>::measure` and `<Parity as Oracle<4>>::apply`, as Rust
+        // writes them.
         let i = &typed.impls[index];
-        let trait_name = syntax.name(typed.traits[i.trait_id.index()].name);
+        let mut trait_name = syntax
+            .name(typed.traits[i.trait_id.index()].name)
+            .to_string();
+        if !i.trait_args.is_empty() {
+            let args: Vec<String> = i
+                .trait_args
+                .iter()
+                .map(|&a| typed.types.display(a, syntax).to_string())
+                .collect();
+            trait_name = format!("{trait_name}<{}>", args.join(", "));
+        }
         format!(
             "<{} as {trait_name}>::{own}",
             typed.types.display(i.self_ty, syntax)

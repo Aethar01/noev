@@ -108,6 +108,9 @@ pub struct TraitInfo {
     pub item: ItemId,
     /// `Self` in its functions: a type parameter, the first of each function's.
     pub self_param: Ty,
+    /// Its own type and size parameters (`trait Oracle<const N: Int>`), after `Self` in each
+    /// of its functions' parameters.
+    pub params: Vec<Ty>,
     /// Its functions, with or without default bodies.
     pub fns: Vec<FnId>,
     /// Its associated types, each with whether it must be `Copy`.
@@ -119,6 +122,9 @@ pub struct TraitInfo {
 pub struct ImplInfo {
     /// The trait.
     pub trait_id: TraitId,
+    /// The trait's arguments, which can mention the `impl`'s type parameters: the `4` of
+    /// `impl Oracle<4> for Parity`.
+    pub trait_args: Vec<Ty>,
     /// The type, which can mention the `impl`'s type parameters.
     pub self_ty: Ty,
     /// The `impl`'s type parameters: `impl<T> … for Pair<T, T>`.
@@ -129,6 +135,35 @@ pub struct ImplInfo {
     pub assoc: Vec<(Symbol, Ty)>,
     /// Where it is.
     pub span: Span,
+}
+
+impl ImplInfo {
+    /// Whether this `impl` is for `ty` and, if given, the trait arguments `trait_args`, with
+    /// what that makes each of its type parameters (`None` for one neither fixes).
+    pub fn matches(
+        &self,
+        types: &Types,
+        ty: Ty,
+        trait_args: Option<&[Ty]>,
+    ) -> Option<Vec<Option<Ty>>> {
+        let mut found = vec![None; self.generics.len()];
+        if !types.match_params(self.self_ty, ty, &self.generics, &mut found) {
+            return None;
+        }
+        if let Some(args) = trait_args {
+            if args.len() != self.trait_args.len() {
+                return None;
+            }
+            for (&pattern, &arg) in self.trait_args.iter().zip(args) {
+                if !types.is_wildcard(arg)
+                    && !types.match_params(pattern, arg, &self.generics, &mut found)
+                {
+                    return None;
+                }
+            }
+        }
+        Some(found)
+    }
 }
 
 /// `ty` with each associated type whose base has an `impl` replaced by what the `impl` says
@@ -307,17 +342,21 @@ impl Typed {
         &self.locals[id.index()]
     }
 
-    /// The `impl` of `trait_id` for `ty`, a type without parameters in `types` (this
-    /// table's, or one made from it), and the `impl`'s type arguments, if there is one.
-    pub fn impl_for(&self, types: &Types, trait_id: TraitId, ty: Ty) -> Option<(usize, Vec<Ty>)> {
+    /// The `impl` of `trait_id` with the arguments `trait_args` for `ty`, all without
+    /// parameters in `types` (this table's, or one made from it), and the `impl`'s type
+    /// arguments, if there is one.
+    pub fn impl_for(
+        &self,
+        types: &Types,
+        trait_id: TraitId,
+        trait_args: &[Ty],
+        ty: Ty,
+    ) -> Option<(usize, Vec<Ty>)> {
         self.impls.iter().enumerate().find_map(|(index, i)| {
             if i.trait_id != trait_id {
                 return None;
             }
-            let mut found = vec![None; i.generics.len()];
-            if !types.match_params(i.self_ty, ty, &i.generics, &mut found) {
-                return None;
-            }
+            let found = i.matches(types, ty, Some(trait_args))?;
             let args = found.into_iter().collect::<Option<Vec<Ty>>>()?;
             Some((index, args))
         })
@@ -330,7 +369,9 @@ impl Typed {
     pub fn dispatch(&self, types: &Types, f: FnId, args: &[Ty]) -> Option<(FnId, Vec<Ty>)> {
         let &trait_id = self.fn_traits.get(&f)?;
         let (&self_ty, rest) = args.split_first()?;
-        let (index, impl_args) = self.impl_for(types, trait_id, self_ty)?;
+        let n = self.traits[trait_id.index()].params.len();
+        let (trait_args, rest) = rest.split_at_checked(n)?;
+        let (index, impl_args) = self.impl_for(types, trait_id, trait_args, self_ty)?;
         let provided = self.impls[index]
             .fns
             .iter()
@@ -481,7 +522,7 @@ struct Checker<'a> {
     /// The trait each trait item declares.
     item_traits: FxHashMap<ItemId, TraitId>,
     /// The traits each type parameter is bound by.
-    param_bounds: FxHashMap<Ty, Vec<TraitId>>,
+    param_bounds: FxHashMap<Ty, Vec<(TraitId, Vec<Ty>)>>,
     /// The associated types bounds fix, as `T: Measure<Result = Bit>`, by parameter, trait
     /// and name.
     param_assoc: FxHashMap<(Ty, TraitId, Symbol), Ty>,
@@ -570,15 +611,19 @@ impl<'a> Checker<'a> {
             else {
                 continue;
             };
-            if !generics.params.is_empty() {
-                self.error(ast.item(item).span, "generic traits are not supported yet")
-                    .help = Some("see spec/types.md §6 for what is planned".into());
+            if !generics.params.is_empty() && !ast.list(types).is_empty() {
+                self.error(
+                    ast.item(item).span,
+                    "associated types in generic traits are not supported yet",
+                )
+                .help = Some("see spec/types.md §6 for what is planned".into());
             }
             let id = TraitId(self.t.traits.len() as u32);
-            // `Self` in the trait's functions: a type parameter bound by the trait.
+            // `Self` in the trait's functions: a type parameter bound by the trait. The
+            // trait's own parameters are made once struct names are known.
             let self_name = ast.symbols.get("Self").unwrap_or(name);
             let self_param = self.t.types.param(self_name, false);
-            self.param_bounds.insert(self_param, vec![id]);
+            self.param_bounds.insert(self_param, vec![(id, Vec::new())]);
             self.item_traits.insert(item, id);
             self.module = self.scopes.item_module(item);
             let assoc = ast
@@ -602,6 +647,7 @@ impl<'a> Checker<'a> {
                 name,
                 item,
                 self_param,
+                params: Vec::new(),
                 fns: ast.list(fns).to_vec(),
                 assoc,
             });
@@ -674,6 +720,27 @@ impl<'a> Checker<'a> {
         aliases.sort_by_key(|a| self.aliases[a].1.start);
         for alias in aliases {
             self.alias_type(alias);
+        }
+
+        // Each trait's own parameters: `Self: Oracle<N>` in its functions.
+        for &item in items {
+            let ItemKind::Trait { generics, .. } = ast.item(item).kind else {
+                continue;
+            };
+            if generics.params.is_empty() {
+                continue;
+            }
+            let id = self.item_traits[&item];
+            self.module = self.scopes.item_module(item);
+            let params: Vec<Ty> = self
+                .generic_params(generics)
+                .into_iter()
+                .map(|(_, t)| t)
+                .collect();
+            let self_param = self.t.traits[id.index()].self_param;
+            self.param_bounds
+                .insert(self_param, vec![(id, params.clone())]);
+            self.t.traits[id.index()].params = params;
         }
 
         self.t.fns = ast
@@ -810,16 +877,14 @@ impl<'a> Checker<'a> {
                 }
                 ItemKind::Trait { fns, .. } => {
                     let id = self.item_traits[&item_id];
-                    let self_param = self.t.traits[id.index()].self_param;
-                    let self_name = self.t.types.params[self
-                        .t
-                        .types
-                        .as_param(self_param)
-                        .expect("a parameter")
-                        .index()]
-                    .name;
+                    let info = &self.t.traits[id.index()];
+                    let prefix: Vec<(Symbol, Ty)> = std::iter::once(info.self_param)
+                        .chain(info.params.iter().copied())
+                        .map(|t| (self.t.types.param_name(t), t))
+                        .collect();
+                    let self_param = info.self_param;
                     for &f in ast.list(fns) {
-                        self.collect_fn(f, None, vec![(self_name, self_param)], Some(self_param));
+                        self.collect_fn(f, None, prefix.clone(), Some(self_param));
                     }
                 }
                 ItemKind::Impl {
@@ -831,7 +896,8 @@ impl<'a> Checker<'a> {
                 } => {
                     let params = self.generic_params(generics);
                     self.type_params = params.clone();
-                    let trait_id = self.bound_trait(&bound);
+                    let trait_ref = self.bound_trait(&bound);
+                    let trait_id = trait_ref.as_ref().map(|(t, _)| *t);
                     let self_ty = self.resolve_type(ty);
                     self.type_params.clear();
                     self.type_params = params.clone();
@@ -856,6 +922,7 @@ impl<'a> Checker<'a> {
                         }
                         self.t.impls.push(ImplInfo {
                             trait_id,
+                            trait_args: trait_ref.map(|(_, a)| a).unwrap_or_default(),
                             self_ty,
                             generics: params.iter().map(|&(_, t)| t).collect(),
                             fns: ast.list(fns).to_vec(),
@@ -876,8 +943,9 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The trait `bound` names, reporting one that is not a trait or is not supported yet.
-    fn bound_trait(&mut self, bound: &Bound) -> Option<TraitId> {
+    /// The trait `bound` names, with its arguments (the `4` of `Oracle<4>`), reporting one
+    /// that is not a trait or is given the wrong number of arguments.
+    fn bound_trait(&mut self, bound: &Bound) -> Option<(TraitId, Vec<Ty>)> {
         let span = bound.span;
         let (at, rest) = self.qualify(bound.path, span)?;
         let [name] = *rest else {
@@ -901,16 +969,42 @@ impl<'a> Checker<'a> {
             self.error(span, message);
             return None;
         };
-        if self
-            .ast
+        let ast = self.ast;
+        let given: Vec<TypeId> = ast
             .list(bound.args)
             .iter()
-            .any(|a| matches!(a, BoundArg::Type(_)))
-        {
-            self.error(span, "generic traits are not supported yet")
-                .help = Some("see spec/types.md §6 for what is planned".into());
+            .filter_map(|a| match *a {
+                BoundArg::Type(t) => Some(t),
+                BoundArg::Assoc { .. } => None,
+            })
+            .collect();
+        // Counted from the declaration, so a bound can come before the trait's parameters
+        // are made.
+        let ItemKind::Trait { generics, .. } = ast.item(self.t.traits[trait_id.index()].item).kind
+        else {
+            unreachable!("a trait's item")
+        };
+        let wanted = ast.list(generics.params).len();
+        if given.len() != wanted {
+            let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
+            let message = format!(
+                "`{trait_name}` takes {wanted} argument{}, but {} {} given",
+                if wanted == 1 { "" } else { "s" },
+                given.len(),
+                if given.len() == 1 { "is" } else { "are" }
+            );
+            self.error(span, message);
+            return None;
         }
-        Some(trait_id)
+        let args: Vec<Ty> = given
+            .into_iter()
+            .map(|t| self.resolve_type_arg(t))
+            .collect();
+        let params = self.t.traits[trait_id.index()].params.clone();
+        if params.len() == args.len() && !self.check_arg_kinds(&params, &args, span) {
+            return None;
+        }
+        Some((trait_id, args))
     }
 
     /// The associated types `bound` fixes, as `Measure<Result = Bit>`, reporting names the
@@ -1030,7 +1124,7 @@ impl<'a> Checker<'a> {
             self.error(info.span, message).help =
                 Some("so two packages can never give the same one".into());
         }
-        // No two `impl`s of the trait for the same type.
+        // No two `impl`s of the trait, with the same arguments, for the same type.
         for earlier in 0..index {
             let other = &self.t.impls[earlier];
             if other.trait_id != info.trait_id {
@@ -1038,18 +1132,19 @@ impl<'a> Checker<'a> {
             }
             let mut params = info.generics.clone();
             params.extend(&other.generics);
-            let mut found = vec![None; params.len()];
-            let overlap =
-                self.t
-                    .types
-                    .match_params(other.self_ty, info.self_ty, &params, &mut found)
-                    || {
-                        let mut found = vec![None; params.len()];
-                        self.t
-                            .types
-                            .match_params(info.self_ty, other.self_ty, &params, &mut found)
-                    };
+            let types = &self.t.types;
+            let one_way = |a: &ImplInfo, b: &ImplInfo| {
+                let mut found = vec![None; params.len()];
+                types.match_params(a.self_ty, b.self_ty, &params, &mut found)
+                    && a.trait_args.len() == b.trait_args.len()
+                    && a.trait_args
+                        .iter()
+                        .zip(&b.trait_args)
+                        .all(|(&p, &t)| types.match_params(p, t, &params, &mut found))
+            };
+            let overlap = one_way(other, &info) || one_way(&info, other);
             if overlap {
+                let trait_name = self.trait_text(info.trait_id, &info.trait_args);
                 let message = format!("`{trait_name}` is implemented for {shown} twice");
                 let span = other.span;
                 self.error(info.span, message)
@@ -1066,20 +1161,23 @@ impl<'a> Checker<'a> {
         let impl_sig = self.t.fns[g.index()].sig.clone();
         let trait_generics = self.t.fns[f.index()].generics.clone();
         let impl_generics = self.t.fns[g.index()].generics.clone();
-        // `Self`, then the trait function's own parameters, for the `impl`'s.
+        // `Self` and the trait's arguments, then the trait function's own parameters, for
+        // the `impl`'s.
         let own = &impl_generics[info.generics.len()..];
         let span = self.ast.function(g).name_span;
         let name = self.name(self.ast.function(f).name).to_string();
-        if own.len() + 1 != trait_generics.len() {
+        let before = 1 + info.trait_args.len();
+        if own.len() + before != trait_generics.len() {
+            let wanted = trait_generics.len().saturating_sub(before);
             let message = format!(
-                "`{name}` takes {} type parameter{} in `{trait_name}`",
-                trait_generics.len() - 1,
-                if trait_generics.len() == 2 { "" } else { "s" }
+                "`{name}` takes {wanted} type parameter{} in `{trait_name}`",
+                if wanted == 1 { "" } else { "s" }
             );
             self.error(span, message);
             return;
         }
         let mut to = vec![info.self_ty];
+        to.extend_from_slice(&info.trait_args);
         to.extend_from_slice(own);
         let impls = std::slice::from_ref(info);
         let types = &mut self.t.types;
@@ -1108,7 +1206,12 @@ impl<'a> Checker<'a> {
     /// Makes the type and size parameters of `generics`, written in the current module.
     fn generic_params(&mut self, generics: Generics) -> Vec<(Symbol, Ty)> {
         let ast = self.ast;
+        let is_copy = |bound: &Bound| {
+            matches!(ast.list(bound.path), [n] if ast.name(*n) == "Copy") && bound.args.is_empty()
+        };
+        // The parameters first, so a bound can name any of them: `T: Oracle<N>`.
         let mut params = Vec::new();
+        let mut typed = Vec::new();
         for param in ast.list(generics.params) {
             if params.iter().any(|&(n, _)| n == param.name) {
                 let message = format!(
@@ -1136,35 +1239,44 @@ impl<'a> Checker<'a> {
                     params.push((param.name, self.t.types.size_param(param.name)));
                 }
                 GenericKind::Type { bounds } => {
-                    let (mut copy, mut traits) = self.bounds_of(bounds);
                     let mut lists = vec![bounds];
-                    for pred in ast.list(generics.wheres) {
-                        if pred.name == param.name {
-                            let (c, t) = self.bounds_of(pred.bounds);
-                            copy |= c;
-                            traits.extend(t);
-                            lists.push(pred.bounds);
-                        }
-                    }
+                    lists.extend(
+                        ast.list(generics.wheres)
+                            .iter()
+                            .filter(|pred| pred.name == param.name)
+                            .map(|pred| pred.bounds),
+                    );
+                    let copy = lists.iter().any(|&l| ast.list(l).iter().any(is_copy));
                     let ty = self.t.types.param(param.name, copy);
-                    if !traits.is_empty() {
-                        self.param_bounds.insert(ty, traits);
-                    }
-                    // `T: Measure<Result = Bit>`: the associated types the bounds fix.
-                    for list in lists {
-                        for bound in ast.list(list) {
-                            let Some(trait_id) = self.trait_named(bound) else {
-                                continue;
-                            };
-                            for (name, fixed) in self.bound_assoc(bound, trait_id) {
-                                self.param_assoc.insert((ty, trait_id, name), fixed);
-                            }
-                        }
-                    }
                     params.push((param.name, ty));
+                    typed.push((ty, lists));
                 }
             }
         }
+        let outer = self.type_params.len();
+        self.type_params.extend(params.iter().copied());
+        for (ty, lists) in typed {
+            let mut traits = Vec::new();
+            for &list in &lists {
+                for bound in ast.list(list) {
+                    if is_copy(bound) {
+                        continue;
+                    }
+                    let Some((trait_id, args)) = self.bound_trait(bound) else {
+                        continue;
+                    };
+                    // `T: Measure<Result = Bit>`: the associated types the bound fixes.
+                    for (name, fixed) in self.bound_assoc(bound, trait_id) {
+                        self.param_assoc.insert((ty, trait_id, name), fixed);
+                    }
+                    traits.push((trait_id, args));
+                }
+            }
+            if !traits.is_empty() {
+                self.param_bounds.insert(ty, traits);
+            }
+        }
+        self.type_params.truncate(outer);
         for pred in ast.list(generics.wheres) {
             if !ast
                 .list(generics.params)
@@ -1176,45 +1288,6 @@ impl<'a> Checker<'a> {
             }
         }
         params
-    }
-
-    /// Whether `bounds` include `Copy`, and the traits they name.
-    fn bounds_of(&mut self, bounds: List<Bound>) -> (bool, Vec<TraitId>) {
-        let mut copy = false;
-        let mut traits = Vec::new();
-        for bound in self.ast.list(bounds) {
-            if let [name] = self.ast.list(bound.path)
-                && self.name(*name) == "Copy"
-                && bound.args.is_empty()
-            {
-                copy = true;
-            } else if let Some(t) = self.bound_trait(bound) {
-                traits.push(t);
-            }
-        }
-        (copy, traits)
-    }
-
-    /// The trait `bound` names, quietly: `None` for `Copy`, or a name already reported.
-    fn trait_named(&mut self, bound: &Bound) -> Option<TraitId> {
-        let ast = self.ast;
-        let [name] = *ast.list(bound.path) else {
-            return None;
-        };
-        if ast.name(name) == "Copy" {
-            return None;
-        }
-        let found = self
-            .scopes
-            .lexical(self.module, name, Ns::Type)
-            .or_else(|| self.prelude_trait(name))?;
-        match found {
-            Found::Entry(Entry {
-                binding: Binding::Item(item),
-                ..
-            }) => self.item_traits.get(&item).copied(),
-            _ => None,
-        }
     }
 
     /// A trait of the prelude named `name`: one in the standard library's root module, such
@@ -1271,7 +1344,7 @@ impl<'a> Checker<'a> {
     fn assoc_type(&mut self, base: Ty, name: Symbol, span: Span) -> Ty {
         let found = (0..self.t.traits.len())
             .map(|t| TraitId(t as u32))
-            .filter(|&t| self.implements(base, t))
+            .filter(|&t| self.implements(base, t, None))
             .find_map(|t| {
                 let &(_, copy) = self.t.traits[t.index()]
                     .assoc
@@ -1297,45 +1370,85 @@ impl<'a> Checker<'a> {
         self.resolve_assoc(ty)
     }
 
-    /// Whether `ty` implements `trait_id`: a type parameter bound by it, or a type with an
-    /// `impl` of it.
-    fn implements(&self, ty: Ty, trait_id: TraitId) -> bool {
-        if self.t.types.is_wildcard(ty) {
+    /// Whether `ty` implements `trait_id`, with the arguments `args` if given (any if not):
+    /// a type parameter bound by it, or a type with an `impl` of it.
+    fn implements(&self, ty: Ty, trait_id: TraitId, args: Option<&[Ty]>) -> bool {
+        let types = &self.t.types;
+        if types.is_wildcard(ty) {
             return true;
         }
-        if self.t.types.as_param(ty).is_some() {
-            return self
-                .param_bounds
-                .get(&ty)
-                .is_some_and(|b| b.contains(&trait_id));
+        if types.as_param(ty).is_some() {
+            return self.param_bounds.get(&ty).is_some_and(|bounds| {
+                bounds.iter().any(|(t, given)| {
+                    *t == trait_id
+                        && args.is_none_or(|args| {
+                            args.len() == given.len()
+                                && args
+                                    .iter()
+                                    .zip(given)
+                                    .all(|(&a, &g)| a == g || types.is_wildcard(a))
+                        })
+                })
+            });
         }
-        if Some(trait_id.0) == self.t.types.measure {
-            if self.t.types.is_measurable(ty) {
+        if Some(trait_id.0) == types.measure {
+            if types.is_measurable(ty) {
                 return true;
             }
             // Tuples and arrays measure element by element.
-            match self.t.types.kind(ty) {
+            match types.kind(ty) {
                 TyKind::Tuple(elems) => {
-                    let elems = elems.clone();
                     return !elems.is_empty()
-                        && elems.iter().all(|&e| self.implements(e, trait_id));
+                        && elems.iter().all(|&e| self.implements(e, trait_id, args));
                 }
                 &TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _) => {
-                    return self.implements(elem, trait_id);
+                    return self.implements(elem, trait_id, args);
                 }
                 _ => {}
             }
         }
         // An `impl` for a generic type matches instances whose arguments are parameters too.
-        self.t.impls.iter().any(|i| {
-            if i.trait_id != trait_id {
-                return false;
+        self.t
+            .impls
+            .iter()
+            .any(|i| i.trait_id == trait_id && i.matches(types, ty, args).is_some())
+    }
+
+    /// The arguments with which `ty` implements `trait_id`, when there is exactly one list
+    /// of them: from its bounds, or its `impl`s. `None` if there are none or several, or an
+    /// `impl` leaves one open.
+    fn only_trait_args(&mut self, ty: Ty, trait_id: TraitId) -> Option<Vec<Ty>> {
+        let mut lists: Vec<Vec<Ty>> = Vec::new();
+        if self.t.types.as_param(ty).is_some() {
+            for (t, args) in self.param_bounds.get(&ty).into_iter().flatten() {
+                if *t == trait_id && !lists.contains(args) {
+                    lists.push(args.clone());
+                }
             }
-            let mut found = vec![None; i.generics.len()];
-            self.t
-                .types
-                .match_params(i.self_ty, ty, &i.generics, &mut found)
-        })
+        } else {
+            for i in 0..self.t.impls.len() {
+                let info = &self.t.impls[i];
+                if info.trait_id != trait_id {
+                    continue;
+                }
+                let Some(found) = info.matches(&self.t.types, ty, None) else {
+                    continue;
+                };
+                let found: Vec<Ty> = found.into_iter().collect::<Option<_>>()?;
+                let (from, args) = (info.generics.clone(), info.trait_args.clone());
+                let args: Vec<Ty> = args
+                    .iter()
+                    .map(|&a| self.t.types.subst(a, &from, &found))
+                    .collect();
+                if !lists.contains(&args) {
+                    lists.push(args);
+                }
+            }
+        }
+        match <[Vec<Ty>; 1]>::try_from(lists) {
+            Ok([only]) => Some(only),
+            Err(_) => None,
+        }
     }
 
     /// The type the alias `item` names, if it is one (`spec/types.md` §2).
@@ -2802,8 +2915,22 @@ impl<'a> Checker<'a> {
                 );
                 self.error(span, message);
             }
-            for trait_id in self.param_bounds.get(&p).cloned().unwrap_or_default() {
-                let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
+            for (trait_id, trait_args) in self.param_bounds.get(&p).cloned().unwrap_or_default() {
+                // `T: Oracle<N>`: the trait's arguments, in terms of the call's.
+                let trait_args: Vec<Ty> = trait_args
+                    .iter()
+                    .map(|&t| self.t.types.subst(t, params, args))
+                    .collect();
+                if !self.implements(arg, trait_id, Some(&trait_args)) {
+                    let trait_name = self.trait_text(trait_id, &trait_args);
+                    let message = format!(
+                        "`{callee}` needs `{}: {trait_name}`, but {} does not implement `{trait_name}`",
+                        self.name(def.name),
+                        self.show(arg)
+                    );
+                    self.error(span, message);
+                    continue;
+                }
                 let fixed: Vec<(Symbol, Ty)> = self
                     .param_assoc
                     .iter()
@@ -2811,9 +2938,6 @@ impl<'a> Checker<'a> {
                     .map(|((_, _, n), &ty)| (*n, ty))
                     .collect();
                 for (name, want) in fixed {
-                    if !self.implements(arg, trait_id) {
-                        break;
-                    }
                     let want = self.t.types.subst(want, params, args);
                     let found = self.assoc_type(arg, name, span);
                     if found != want && !self.t.types.is_wildcard(found) {
@@ -2827,18 +2951,21 @@ impl<'a> Checker<'a> {
                         self.error(span, message);
                     }
                 }
-                let _ = &trait_name;
-                if !self.implements(arg, trait_id) {
-                    let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
-                    let message = format!(
-                        "`{callee}` needs `{}: {trait_name}`, but {} does not implement `{trait_name}`",
-                        self.name(def.name),
-                        self.show(arg)
-                    );
-                    self.error(span, message);
-                }
             }
         }
+    }
+
+    /// A trait as written with its arguments: `Oracle<4>`, or `Shape`.
+    fn trait_text(&self, trait_id: TraitId, args: &[Ty]) -> String {
+        let name = self.name(self.t.traits[trait_id.index()].name);
+        if args.is_empty() {
+            return name.to_string();
+        }
+        let args: Vec<String> = args
+            .iter()
+            .map(|&a| self.t.types.display(a, self.ast).to_string())
+            .collect();
+        format!("{name}<{}>", args.join(", "))
     }
 
     /// For `ty`, a generic enum named without arguments (`Maybe::Nothing`), the instance the
@@ -4129,7 +4256,7 @@ impl<'a> Checker<'a> {
     fn trait_fn(&mut self, ty: Ty, name: Symbol, span: Span) -> Option<FnId> {
         let ast = self.ast;
         let candidates: Vec<FnId> = (0..self.t.traits.len())
-            .filter(|&t| self.implements(ty, TraitId(t as u32)))
+            .filter(|&t| self.implements(ty, TraitId(t as u32), None))
             .filter_map(|t| {
                 self.t.traits[t]
                     .fns
@@ -4236,9 +4363,26 @@ impl<'a> Checker<'a> {
             }
         }
         let name = self.name(self.ast.function(f).name).to_string();
-        let found = self.infer(&generics, known, |this| {
+        let mut found = self.infer(&generics, known, |this| {
             this.check_args(sig, receiver, args, span);
         });
+        // A generic trait's arguments the call leaves open are the only ones `Self`
+        // implements it with: `Oracle<4>` for a `Parity` with only that `impl`.
+        if let Some(&trait_id) = self.t.fn_traits.get(&f) {
+            let n = self.t.traits[trait_id.index()].params.len();
+            if found[1..=n].iter().any(Option::is_none)
+                && let Some(self_ty) = found[0]
+                && let Some(only) = self.only_trait_args(self_ty, trait_id)
+                && found[1..=n]
+                    .iter()
+                    .zip(&only)
+                    .all(|(f, &o)| f.is_none_or(|f| f == o))
+            {
+                for (slot, o) in found[1..=n].iter_mut().zip(only) {
+                    *slot = Some(o);
+                }
+            }
+        }
         let type_args = self.settle(&generics, found, "call", span);
         self.check_bounds(&generics, &type_args, &name, span);
         let ret = self.t.types.subst(sig.ret, &generics, &type_args);
@@ -4560,7 +4704,7 @@ impl<'a> Checker<'a> {
         // `measure(x)` for anything that implements `Measure`: the trait's function.
         if let Some(m) = self.t.types.measure
             && !self.t.types.is_measurable(ty)
-            && self.implements(ty, TraitId(m))
+            && self.implements(ty, TraitId(m), None)
         {
             let f = self.t.traits[m as usize].fns[0];
             self.t.callees[id.index()] = Some(Callee::Fn(f));

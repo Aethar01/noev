@@ -14,6 +14,9 @@ before 1.0.
   prelude, so `State`, `amplitudes`, `fft`, `ifft`, `P` and `PX` will need a `use`.
 - C interop follows Rust: arrays by reference, `extern "C" struct` for C layout, and
   `extern "C" fn` callbacks. Host functions can call back into the program.
+- A type can implement a generic trait several times with different arguments; a call picks
+  the `impl` by the arguments inferred from it, or by the type's only `impl` or bound when
+  they leave one open, and is an error otherwise. Associated types in generic traits wait.
 - Being a circuit is decided across modules and packages by the compiler, as within one;
   only reversibility needs a declaration (`rev fn`) to cross a module.
 - Backends are libraries implementing `std::backend::Backend`, in Noev, Rust or C. Every
@@ -85,6 +88,12 @@ before 1.0.
   expected of the call: `let r: [Qubit; 2] = fresh()`, `let x: Option<Int> = none()`.
 - An `impl` for a generic type (`impl<const N: Int> Measure for Reg<N>`) finds its own
   associated types in its signatures.
+- Generic traits: `trait Oracle<const N: Int>`, `trait Scale<T>`, bounds such as
+  `T: Oracle<N>`, and one type implementing a trait with several arguments (`impl Oracle<2>
+  for Flip` and `impl Oracle<3> for Flip`), the call picking by its arguments, or the only
+  `impl` or bound when they leave it open. Defaults see the trait's parameters. The IR names
+  each `impl`'s functions with the arguments: `<Flip as Oracle<2>>::apply`. Associated
+  types in generic traits are not supported yet.
 
 - ketrs 0.2.0. Noev uses none of its new features (symmetric MPS, batched MPS
   expectations), and nothing changes for programs.

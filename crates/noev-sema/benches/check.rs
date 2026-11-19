@@ -112,6 +112,7 @@ fn main() {
         time.as_secs_f64() * 1e3,
     );
 
+    impls(400);
     modules("modules", 2000, |i| {
         // Each module uses the one before it by path, by import and by glob.
         let mut text =
@@ -161,5 +162,41 @@ fn modules(phase: &str, count: usize, source: impl Fn(usize) -> String) {
         count as f64 / time.as_secs_f64(),
         lines as f64 / time.as_secs_f64(),
         time.as_secs_f64() * 1e3,
+    );
+}
+
+/// Checks a program with `count` `impl`s of one generic trait for one type, each called once
+/// with its own argument: finding an `impl` looks through the trait's `impl`s.
+fn impls(count: usize) {
+    let mut text = String::from(
+        "trait Width<const N: Int> { fn width(ref self, r: ref [Int; N]) -> Int }\nstruct W {}\n",
+    );
+    for i in 1..=count {
+        text.push_str(&format!(
+            "impl Width<{i}> for W {{ fn width(ref self, r: ref [Int; {i}]) -> Int {{ {i} }} }}\n"
+        ));
+    }
+    text.push_str("fn main() {\n let w = W {}\n");
+    for i in 1..=count {
+        text.push_str(&format!(
+            " let r{i}: [Int; {i}] = [0; {i}]\n print(w.width(ref r{i}))\n"
+        ));
+    }
+    text.push_str("}\n");
+    let parsed = noev_syntax::parse(&text);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let (_, errors) = noev_sema::check(&parsed.ast);
+    assert!(errors.is_empty(), "{errors:?}");
+    let repeats = 5;
+    let time = fastest(10, || {
+        for _ in 0..repeats {
+            black_box(noev_sema::check(black_box(&parsed.ast)));
+        }
+    });
+    println!(
+        "{:<9} {:>10.0} calls/s  ({:.2} ms for {count} impls and calls)",
+        "impls",
+        (count * repeats) as f64 / time.as_secs_f64(),
+        time.as_secs_f64() * 1e3 / repeats as f64,
     );
 }

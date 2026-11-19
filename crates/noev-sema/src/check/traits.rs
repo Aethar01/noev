@@ -274,3 +274,81 @@ fn impls_over_sizes() {
         fn measure(mv self) -> [Bit; N] { mv self.qs.measure() }\n}\n\
         fn f(r: Reg<4>) -> [Bit; 4] { measure(mv r) }");
 }
+
+const ORACLE: &str = "trait Oracle<const N: Int> {\n rev fn apply(ref self, r: mut [Qubit; N])\n \
+                      fn width(ref self) -> Int { N }\n}\nstruct Flip {}\n\
+                      impl Oracle<2> for Flip { rev fn apply(ref self, r: mut [Qubit; 2]) { r[1].x() } }\n";
+
+#[test]
+fn generic_traits() {
+    // Several `impl`s of one trait for one type, told apart by the arguments.
+    ok(&format!(
+        "{ORACLE}impl Oracle<3> for Flip {{ rev fn apply(ref self, r: mut [Qubit; 3]) {{ r[2].x() }} }}\n\
+         fn f(o: ref Flip, r: mut [Qubit; 3]) {{ o.apply(mut r) }}"
+    ));
+    // With one `impl`, its arguments are the call's.
+    ok(&format!("{ORACLE}fn f(o: ref Flip) -> Int {{ o.width() }}"));
+    ok(&format!(
+        "{ORACLE}fn f(o: ref Flip) -> Int {{ Oracle::width(o) }}"
+    ));
+    // Through a bound, from the bound.
+    ok(&format!(
+        "{ORACLE}fn f<T: Oracle<N>, const N: Int>(o: ref T, r: mut [Qubit; N]) {{ adj o.apply(mut r) }}\n\
+         fn g<T: Oracle<N>, const N: Int>(o: ref T, r: ref [Qubit; N]) -> Int {{ o.width() }}"
+    ));
+    ok(&format!(
+        "{ORACLE}fn f<T, const N: Int>(o: ref T, r: mut [Qubit; N]) where T: Oracle<N> {{ o.apply(mut r) }}\n\
+         fn g(o: ref Flip, r: mut [Qubit; 2]) {{ f(o, mut r) }}"
+    ));
+    // A trait over a type, and a generic `impl`.
+    ok(
+        "trait Scale<T> { fn scale(ref self, x: T) -> T }\nstruct Twice {}\n\
+         impl Scale<Int> for Twice { fn scale(ref self, x: Int) -> Int { 2 * x } }\n\
+         impl Scale<Float> for Twice { fn scale(ref self, x: Float) -> Float { 2.0 * x } }\n\
+         struct Id {}\nimpl<T> Scale<T> for Id { fn scale(ref self, x: T) -> T { mv x } }\n\
+         fn f(t: Twice, i: Id) -> (Int, Float, Bool) { (t.scale(1), t.scale(1.0), i.scale(true)) }",
+    );
+}
+
+#[test]
+fn generic_trait_errors() {
+    assert_eq!(
+        errors(&format!("{ORACLE}impl Oracle for Flip {{}}")),
+        ["`Oracle` takes 1 argument, but 0 are given"]
+    );
+    assert_eq!(
+        errors(&format!("{ORACLE}fn f<T: Oracle<2, 3>>(o: ref T) {{}}")),
+        ["`Oracle` takes 1 argument, but 2 are given"]
+    );
+    assert_eq!(
+        errors(&format!("{ORACLE}fn f<T: Oracle<Int>>(o: ref T) {{}}")),
+        ["`N` is a size, but `Int` is a type"]
+    );
+    assert_eq!(
+        errors(&format!(
+            "{ORACLE}impl Oracle<2> for Flip {{ rev fn apply(ref self, r: mut [Qubit; 2]) {{}} }}"
+        )),
+        ["`Oracle<2>` is implemented for `Flip` twice"]
+    );
+    assert_eq!(
+        errors(&format!(
+            "{ORACLE}impl Oracle<3> for Flip {{ rev fn apply(ref self, r: mut [Qubit; 2]) {{}} }}"
+        )),
+        ["`apply` has a different signature than in `Oracle`"]
+    );
+    // A call meeting a bound with other arguments.
+    assert_eq!(
+        errors(&format!(
+            "{ORACLE}fn f<T: Oracle<3>>(o: ref T) {{}}\nfn g(o: ref Flip) {{ f(o) }}"
+        )),
+        ["`f` needs `T: Oracle<3>`, but `Flip` does not implement `Oracle<3>`"]
+    );
+    // Two `impl`s, and nothing to choose between them.
+    assert_eq!(
+        errors(&format!(
+            "{ORACLE}impl Oracle<3> for Flip {{ rev fn apply(ref self, r: mut [Qubit; 3]) {{}} }}\n\
+             fn f(o: ref Flip) -> Int {{ o.width() }}"
+        )),
+        ["cannot tell what `N` is in this call"]
+    );
+}

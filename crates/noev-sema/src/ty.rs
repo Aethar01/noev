@@ -406,6 +406,12 @@ impl Types {
         self.intern(TyKind::Param(id))
     }
 
+    /// The name of the type or size parameter `ty`.
+    pub fn param_name(&self, ty: Ty) -> Symbol {
+        let id = self.as_param(ty).expect("a parameter");
+        self.params[id.index()].name
+    }
+
     /// A new size parameter, `const N: Int`, and its type.
     pub fn size_param(&mut self, name: Symbol) -> Ty {
         let id = ParamId(u32::try_from(self.params.len()).expect("fewer than 2³² parameters"));

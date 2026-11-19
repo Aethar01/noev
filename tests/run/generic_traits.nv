@@ -1,0 +1,59 @@
+// Generic traits (spec/types.md §6): a trait over a size, implemented twice for one type,
+// a default that uses the size, and `adj` and `ctrl` through a bound `T: Oracle<N>`.
+
+trait Oracle<const N: Int> {
+    rev fn apply(ref self, r: mut [Qubit; N])
+    fn width(ref self) -> Int { N }
+}
+
+struct Flip {}
+
+impl Oracle<2> for Flip {
+    rev fn apply(ref self, r: mut [Qubit; 2]) { r[1].x() }
+}
+
+impl Oracle<3> for Flip {
+    rev fn apply(ref self, r: mut [Qubit; 3]) { r[2].x() }
+}
+
+trait Scale<T> {
+    fn scale(ref self, x: T) -> T
+}
+
+struct Twice {}
+
+impl Scale<Int> for Twice {
+    fn scale(ref self, x: Int) -> Int { 2 * x }
+}
+
+impl Scale<Float> for Twice {
+    fn scale(ref self, x: Float) -> Float { 2.0 * x }
+}
+
+fn run_twice<T: Oracle<N>, const N: Int>(o: ref T, r: mut [Qubit; N]) {
+    o.apply(mut r)
+    adj o.apply(mut r)
+    o.apply(mut r)
+}
+
+fn controlled<T: Oracle<N>, const N: Int>(o: ref T, c: mut Qubit, r: mut [Qubit; N]) {
+    ctrl c { o.apply(mut r) }
+}
+
+fn width_of<T: Oracle<N>, const N: Int>(o: ref T, r: ref [Qubit; N]) -> Int { o.width() }
+
+fn main() {
+    let f = Flip {}
+    let r2: [Qubit; 2] = [|0>; 2]
+    run_twice(ref f, mut r2)
+    print(mv r2.measure())
+    let c = |1>
+    let r3: [Qubit; 3] = [|0>; 3]
+    controlled(ref f, mut c, mut r3)
+    print(width_of(ref f, ref r3))
+    print(mv r3.measure())
+    print(mv c.measure())
+    let t = Twice {}
+    print(t.scale(21))
+    print(t.scale(1.5))
+}
