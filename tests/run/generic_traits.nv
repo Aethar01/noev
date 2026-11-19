@@ -1,5 +1,6 @@
 // Generic traits (spec/types.md §6): a trait over a size, implemented twice for one type,
-// a default that uses the size, and `adj` and `ctrl` through a bound `T: Oracle<N>`.
+// a default that uses the size, `adj` and `ctrl` through a bound `T: Oracle<N>`, and an
+// associated type that depends on the trait's argument.
 
 trait Oracle<const N: Int> {
     rev fn apply(ref self, r: mut [Qubit; N])
@@ -17,18 +18,24 @@ impl Oracle<3> for Flip {
 }
 
 trait Scale<T> {
-    fn scale(ref self, x: T) -> T
+    type Out
+    fn scale(ref self, x: T) -> Self::Out
 }
 
 struct Twice {}
 
 impl Scale<Int> for Twice {
+    type Out = Int
     fn scale(ref self, x: Int) -> Int { 2 * x }
 }
 
 impl Scale<Float> for Twice {
-    fn scale(ref self, x: Float) -> Float { 2.0 * x }
+    type Out = String
+    fn scale(ref self, x: Float) -> String { "twice {x} is {2.0 * x}" }
 }
+
+// The associated type of the arguments the bound gives.
+fn scaled<S: Scale<Int>>(s: ref S, x: Int) -> S::Out { s.scale(x) }
 
 fn run_twice<T: Oracle<N>, const N: Int>(o: ref T, r: mut [Qubit; N]) {
     o.apply(mut r)
@@ -56,4 +63,5 @@ fn main() {
     let t = Twice {}
     print(t.scale(21))
     print(t.scale(1.5))
+    print(scaled(ref t, 5) + 1)
 }

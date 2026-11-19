@@ -337,8 +337,7 @@ where it matters: any place a linear value changes hands has an explicit `mv`.
 
 Status: **Implemented**: type parameters of functions, structs and enums, bounds (`Copy` and
 traits) written or inferred, inference of type arguments, `::<…>`, traits with and without
-type and size parameters, associated types (with `Copy` as their only bound, and not yet in
-generic traits), `impl`s (generic ones too) and monomorphisation, `Trait::f(x)`, `Measure`
+type and size parameters, associated types (with `Copy` as their only bound), `impl`s (generic ones too) and monomorphisation, `Trait::f(x)`, `Measure`
 (for qubits, and tuples and arrays of measurable types), and size parameters. The syntax is
 in [grammar.md](grammar.md) §2.
 
@@ -469,6 +468,11 @@ impl Oracle<4> for Parity {
   `Oracle<4>`), and a call picks the `impl` by them: they are inferred from the call's
   arguments, as a function's are; if that leaves one open, it is the trait's only arguments
   for the type (from its bounds, for a type parameter); otherwise the call is an error.
+- A generic trait's associated types depend on its arguments: `Scale<Int>` and
+  `Scale<Float>` can each give `Twice` a different `Out`. `S::Out` takes the arguments of
+  `S`'s bound (`S: Scale<Int>`), or of the type's only `impl`s of the trait; when a type
+  implements it with several, `Twice::Out` is an error. A bound can fix one as for any
+  trait: `S: Scale<Int, Out = Int>`.
 - Methods are written inside structs and enums, so `impl` is only for traits.
 - **Coherence**, as in Rust: an `impl` must be in the package of the trait or of the type, so
   two packages can never provide the same one.

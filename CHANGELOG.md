@@ -23,7 +23,8 @@ before 1.0.
   functions' bounds, so copying a `T: Measure` is still N001.
 - A type can implement a generic trait several times with different arguments; a call picks
   the `impl` by the arguments inferred from it, or by the type's only `impl` or bound when
-  they leave one open, and is an error otherwise. Associated types in generic traits wait.
+  they leave one open, and is an error otherwise. A generic trait's associated types depend
+  on its arguments (`Scale<Int>` and `Scale<Float>` can each give a type its own `Out`).
 - Being a circuit is decided across modules and packages by the compiler, as within one;
   only reversibility needs a declaration (`rev fn`) to cross a module.
 - Backends are libraries implementing `std::backend::Backend`, in Noev, Rust or C. Every

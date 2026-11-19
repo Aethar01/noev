@@ -507,3 +507,39 @@ fn unknown_trait_function_is_not_a_circuit() {
     assert_eq!(why("run").as_deref(), Some(direct));
     assert_eq!(why("outer"), Some(format!("in `run`, {direct}")));
 }
+
+/// A generic trait's associated type depends on its arguments: `<Twice as Scale<Int>>::Out`
+/// and `<Twice as Scale<Float>>::Out` differ, and a bound picks one.
+const SCALE: &str = "trait Scale<T> { type Out\n fn scale(ref self, x: T) -> Self::Out }\n\
+                     struct Twice {}\n\
+                     impl Scale<Int> for Twice { type Out = Int\n fn scale(ref self, x: Int) -> Int { 2 * x } }\n\
+                     impl Scale<Float> for Twice { type Out = String\n fn scale(ref self, x: Float) -> String { \"{x}\" } }\n";
+
+#[test]
+fn associated_types_in_generic_traits() {
+    ok(&format!(
+        "{SCALE}fn f(t: ref Twice) -> (Int, String) {{ (t.scale(2), t.scale(1.5)) }}"
+    ));
+    // Through a bound, which gives the arguments.
+    ok(&format!(
+        "{SCALE}fn g<S: Scale<Int>>(s: ref S) -> S::Out {{ s.scale(3) }}\n\
+         fn h(t: ref Twice) -> Int {{ g(t) }}"
+    ));
+    ok(&format!(
+        "{SCALE}fn g<S: Scale<Float, Out = String>>(s: ref S) -> String {{ s.scale(3.0) }}\n\
+         fn h(t: ref Twice) -> String {{ g(t) }}"
+    ));
+    assert_eq!(
+        errors(&format!(
+            "{SCALE}fn g<S: Scale<Float, Out = Int>>(s: ref S) -> Int {{ s.scale(3.0) }}\n\
+             fn h(t: ref Twice) -> Int {{ g(t) }}"
+        )),
+        ["`g` needs `Twice::Out` to be `Int`, but it is `String`"]
+    );
+    assert_eq!(
+        errors(&format!("{SCALE}fn k(t: ref Twice) -> Twice::Out {{ 1 }}")),
+        [
+            "`Twice` implements `Scale` with several arguments, so `Twice::Out` could be several types"
+        ]
+    );
+}

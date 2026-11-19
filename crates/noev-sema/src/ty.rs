@@ -99,6 +99,8 @@ pub enum TyKind {
         base: Ty,
         /// The trait, by its position in the checker's table of traits.
         trait_index: u32,
+        /// The trait's arguments: the `Int` of `<T as Add<Int>>::Output`.
+        args: Box<[Ty]>,
         /// The associated type's name.
         name: Symbol,
         /// Whether the trait requires it to be `Copy`.
@@ -555,13 +557,16 @@ impl Types {
             TyKind::Assoc {
                 base,
                 trait_index,
+                args,
                 name,
                 copy,
             } => {
                 let base = self.subst(base, from, to);
+                let args = args.iter().map(|&a| self.subst(a, from, to)).collect();
                 self.intern(TyKind::Assoc {
                     base,
                     trait_index,
+                    args,
                     name,
                     copy,
                 })
@@ -684,16 +689,24 @@ impl Types {
                 TyKind::Assoc {
                     base: p,
                     trait_index: a,
+                    args: pa,
                     name: n,
                     ..
                 },
                 TyKind::Assoc {
                     base: t,
                     trait_index: b,
+                    args: ta,
                     name: m,
                     ..
                 },
-            ) if a == b && n == m => self.match_params(*p, *t, params, found),
+            ) if a == b && n == m && pa.len() == ta.len() => {
+                self.match_params(*p, *t, params, found)
+                    && pa
+                        .iter()
+                        .zip(ta.iter())
+                        .all(|(&p, &t)| self.match_params(p, t, params, found))
+            }
             (TyKind::Struct(a), TyKind::Struct(b)) => {
                 let (da, db) = (&self.structs[a.index()], &self.structs[b.index()]);
                 da.template.unwrap_or(*a) == db.template.unwrap_or(*b)
@@ -712,7 +725,9 @@ impl Types {
     pub fn has_params(&self, ty: Ty) -> bool {
         match self.kind(ty) {
             TyKind::Param(_) => true,
-            TyKind::Assoc { base, .. } => self.has_params(*base),
+            TyKind::Assoc { base, args, .. } => {
+                self.has_params(*base) || args.iter().any(|&a| self.has_params(a))
+            }
             TyKind::Tuple(elems) => elems.iter().any(|&t| self.has_params(t)),
             TyKind::Array(elem, _) | TyKind::Distribution(elem) => self.has_params(*elem),
             TyKind::SizedArray(..) => true,
@@ -775,7 +790,12 @@ impl Types {
                 self.collect_params(len, found);
             }
             &TyKind::Ref { inner, .. } => self.collect_params(inner, found),
-            &TyKind::Assoc { base, .. } => self.collect_params(base, found),
+            TyKind::Assoc { base, args, .. } => {
+                self.collect_params(*base, found);
+                for &a in args.iter() {
+                    self.collect_params(a, found);
+                }
+            }
             &TyKind::Struct(id) => {
                 for &a in &self.structs[id.index()].args {
                     self.collect_params(a, found);

@@ -207,10 +207,6 @@ fn main_takes_nothing_and_returns_unit() {
 #[test]
 fn reserved_items() {
     assert_eq!(
-        one_error("trait T<U> { type R\n fn m(ref self) }"),
-        "associated types in generic traits are not supported yet"
-    );
-    assert_eq!(
         one_error("fn f() { with { } do { } }"),
         "`with`/`do` is not supported yet"
     );

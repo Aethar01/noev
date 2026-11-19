@@ -173,10 +173,12 @@ pub fn normalize(impls: &[ImplInfo], types: &mut Types, ty: Ty) -> Ty {
         TyKind::Assoc {
             base,
             trait_index,
+            args,
             name,
             copy,
         } => {
             let base = normalize(impls, types, base);
+            let args: Box<[Ty]> = args.iter().map(|&a| normalize(impls, types, a)).collect();
             // Qubits measure to bits by the built-in measurement, and tuples and arrays
             // element by element.
             if Some(trait_index) == types.measure {
@@ -187,6 +189,7 @@ pub fn normalize(impls: &[ImplInfo], types: &mut Types, ty: Ty) -> Ty {
                     let assoc = types.intern(TyKind::Assoc {
                         base: elem,
                         trait_index,
+                        args: Box::new([]),
                         name,
                         copy,
                     });
@@ -212,10 +215,7 @@ pub fn normalize(impls: &[ImplInfo], types: &mut Types, ty: Ty) -> Ty {
                 if i.trait_id.0 != trait_index {
                     return None;
                 }
-                let mut found = vec![None; i.generics.len()];
-                if !types.match_params(i.self_ty, base, &i.generics, &mut found) {
-                    return None;
-                }
+                let found = i.matches(types, base, Some(&args))?;
                 let args = found.into_iter().collect::<Option<Vec<Ty>>>()?;
                 let &(_, given) = i.assoc.iter().find(|(n, _)| *n == name)?;
                 Some((given, i.generics.clone(), args))
@@ -228,6 +228,7 @@ pub fn normalize(impls: &[ImplInfo], types: &mut Types, ty: Ty) -> Ty {
                 None => types.intern(TyKind::Assoc {
                     base,
                     trait_index,
+                    args,
                     name,
                     copy,
                 }),
@@ -553,16 +554,17 @@ struct Checker<'a> {
     inferred: FxHashMap<Ty, Vec<(TraitId, Span)>>,
     /// Whether the package being compiled is a library: it has no `fn main`.
     library: bool,
-    /// The associated types bounds fix, as `T: Measure<Result = Bit>`, by parameter, trait
-    /// and name.
-    param_assoc: FxHashMap<(Ty, TraitId, Symbol), Ty>,
-    /// While `impl`s are collected, what each says its associated types are, so their
+    /// The associated types bounds fix, as `T: Measure<Result = Bit>`, by parameter, trait,
+    /// trait arguments and name.
+    param_assoc: FxHashMap<(Ty, TraitId, Vec<Ty>, Symbol), Ty>,
+    /// While an `impl` is collected, what it says its associated types are, so its
     /// signatures can name them through `Self`.
     impl_assoc: Vec<ImplAssoc>,
 }
 
-/// An `impl`'s type, trait and associated types, while `impl`s are collected.
-type ImplAssoc = (Ty, TraitId, Vec<(Symbol, Ty)>);
+/// An `impl`'s type, trait, trait arguments and associated types, while `impl`s are
+/// collected.
+type ImplAssoc = (Ty, TraitId, Vec<Ty>, Vec<(Symbol, Ty)>);
 
 /// The type parameters of a generic call or literal, and what each is found to be so far.
 struct Inference {
@@ -632,22 +634,11 @@ impl<'a> Checker<'a> {
         // Traits first, so any bound can name one.
         for &item in items {
             let ItemKind::Trait {
-                name,
-                generics,
-                fns,
-                types,
-                ..
+                name, fns, types, ..
             } = ast.item(item).kind
             else {
                 continue;
             };
-            if !generics.params.is_empty() && !ast.list(types).is_empty() {
-                self.error(
-                    ast.item(item).span,
-                    "associated types in generic traits are not supported yet",
-                )
-                .help = Some("see spec/types.md §6 for what is planned".into());
-            }
             let id = TraitId(self.t.traits.len() as u32);
             // `Self` in the trait's functions: a type parameter bound by the trait. The
             // trait's own parameters are made once struct names are known.
@@ -942,9 +933,10 @@ impl<'a> Checker<'a> {
                         .map(|a| (a.name, self.resolve_type(a.ty)))
                         .collect();
                     self.type_params.clear();
-                    if let Some(trait_id) = trait_id {
+                    if let Some((trait_id, args)) = &trait_ref {
                         // Signatures can name the associated types, through `Self`.
-                        self.impl_assoc.push((self_ty, trait_id, assoc.clone()));
+                        self.impl_assoc
+                            .push((self_ty, *trait_id, args.clone(), assoc.clone()));
                     }
                     for &f in ast.list(fns) {
                         self.collect_fn(f, None, params.clone(), Some(self_ty));
@@ -965,6 +957,8 @@ impl<'a> Checker<'a> {
                             span: item.span,
                         });
                     }
+                    // Finished `impl`s are found through `self.t.impls`.
+                    self.impl_assoc.clear();
                 }
                 ItemKind::Use(_) | ItemKind::Type { .. } | ItemKind::Error => {}
             }
@@ -1302,7 +1296,8 @@ impl<'a> Checker<'a> {
                     };
                     // `T: Measure<Result = Bit>`: the associated types the bound fixes.
                     for (name, fixed) in self.bound_assoc(bound, trait_id) {
-                        self.param_assoc.insert((ty, trait_id, name), fixed);
+                        self.param_assoc
+                            .insert((ty, trait_id, args.clone(), name), fixed);
                     }
                     traits.push((trait_id, args));
                 }
@@ -1358,24 +1353,33 @@ impl<'a> Checker<'a> {
         let TyKind::Assoc {
             base,
             trait_index,
+            ref args,
             name,
             ..
         } = *self.t.types.kind(ty)
         else {
             return ty;
         };
-        if let Some(&fixed) = self.param_assoc.get(&(base, TraitId(trait_index), name)) {
+        let key = (base, TraitId(trait_index), args.to_vec(), name);
+        if let Some(&fixed) = self.param_assoc.get(&key) {
             return fixed;
         }
-        let found = self.impl_assoc.iter().find_map(|(self_ty, t, assoc)| {
-            (*self_ty == base && t.0 == trait_index)
-                .then(|| assoc.iter().find(|(n, _)| *n == name).map(|&(_, t)| t))
-                .flatten()
-        });
+        // The latest first: in an `impl`'s own signatures, `Self::Output` is its own.
+        let found = self
+            .impl_assoc
+            .iter()
+            .rev()
+            .find_map(|(self_ty, t, a, assoc)| {
+                (*self_ty == base && t.0 == trait_index && *a == key.2)
+                    .then(|| assoc.iter().find(|(n, _)| *n == name).map(|&(_, t)| t))
+                    .flatten()
+            });
         found.unwrap_or(ty)
     }
 
-    /// The associated type `name` of `base`, through the traits it implements.
+    /// The associated type `name` of `base`, through the traits it implements. For a generic
+    /// trait, the arguments are those of `base`'s bound, of the `impl` being collected, or of
+    /// `base`'s only `impl`s of it.
     fn assoc_type(&mut self, base: Ty, name: Symbol, span: Span) -> Ty {
         let found = (0..self.t.traits.len())
             .map(|t| TraitId(t as u32))
@@ -1396,13 +1400,78 @@ impl<'a> Checker<'a> {
             self.error(span, message);
             return Ty::ERROR;
         };
+        let args = match self.assoc_args(base, trait_id) {
+            Ok(args) => args,
+            Err(()) => {
+                let message = format!(
+                    "{} implements `{}` with several arguments, so `{}::{}` could be several types",
+                    self.show(base),
+                    self.name(self.t.traits[trait_id.index()].name),
+                    self.show(base).trim_matches('`'),
+                    self.name(name)
+                );
+                self.error(span, message).help =
+                    Some("name it through a bound that gives the arguments".into());
+                return Ty::ERROR;
+            }
+        };
         let ty = self.t.types.intern(TyKind::Assoc {
             base,
             trait_index: trait_id.0,
+            args: args.into(),
             name,
             copy,
         });
         self.resolve_assoc(ty)
+    }
+
+    /// The arguments of `trait_id` that `base` implements it with, when that is one list: an
+    /// error when there are several.
+    fn assoc_args(&mut self, base: Ty, trait_id: TraitId) -> Result<Vec<Ty>, ()> {
+        if self.t.traits[trait_id.index()].params.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some((_, _, args, _)) = self
+            .impl_assoc
+            .iter()
+            .rev()
+            .find(|(t, id, ..)| *t == base && *id == trait_id)
+        {
+            return Ok(args.clone());
+        }
+        let mut lists: Vec<Vec<Ty>> = self
+            .param_bounds
+            .get(&base)
+            .into_iter()
+            .flatten()
+            .filter(|(t, _)| *t == trait_id)
+            .map(|(_, args)| args.clone())
+            .collect();
+        for index in 0..self.t.impls.len() {
+            let i = &self.t.impls[index];
+            if i.trait_id != trait_id {
+                continue;
+            }
+            let Some(found) = i.matches(&self.t.types, base, None) else {
+                continue;
+            };
+            let Some(to) = found.into_iter().collect::<Option<Vec<Ty>>>() else {
+                continue;
+            };
+            let (from, pattern) = (i.generics.clone(), i.trait_args.clone());
+            let args: Vec<Ty> = pattern
+                .iter()
+                .map(|&a| self.t.types.subst(a, &from, &to))
+                .collect();
+            if !lists.contains(&args) {
+                lists.push(args);
+            }
+        }
+        lists.dedup();
+        match lists.len() {
+            1 => Ok(lists.pop().expect("one")),
+            _ => Err(()),
+        }
     }
 
     /// Whether `ty` implements `trait_id`, with the arguments `args` if given (any if not):
@@ -2988,9 +3057,9 @@ impl<'a> Checker<'a> {
                 );
                 self.error(span, message);
             }
-            for (trait_id, trait_args) in self.param_bounds.get(&p).cloned().unwrap_or_default() {
+            for (trait_id, bound_args) in self.param_bounds.get(&p).cloned().unwrap_or_default() {
                 // `T: Oracle<N>`: the trait's arguments, in terms of the call's.
-                let trait_args: Vec<Ty> = trait_args
+                let trait_args: Vec<Ty> = bound_args
                     .iter()
                     .map(|&t| self.t.types.subst(t, params, args))
                     .collect();
@@ -3009,12 +3078,23 @@ impl<'a> Checker<'a> {
                 let fixed: Vec<(Symbol, Ty)> = self
                     .param_assoc
                     .iter()
-                    .filter(|((q, t, _), _)| *q == p && *t == trait_id)
-                    .map(|((_, _, n), &ty)| (*n, ty))
+                    .filter(|((q, t, a, _), _)| *q == p && *t == trait_id && *a == bound_args)
+                    .map(|((_, _, _, n), &ty)| (*n, ty))
                     .collect();
                 for (name, want) in fixed {
                     let want = self.t.types.subst(want, params, args);
-                    let found = self.assoc_type(arg, name, span);
+                    let copy = self.t.traits[trait_id.index()]
+                        .assoc
+                        .iter()
+                        .any(|&(n, c)| n == name && c);
+                    let found = self.t.types.intern(TyKind::Assoc {
+                        base: arg,
+                        trait_index: trait_id.0,
+                        args: trait_args.clone().into(),
+                        name,
+                        copy,
+                    });
+                    let found = self.resolve_assoc(found);
                     if found != want && !self.t.types.is_wildcard(found) {
                         let message = format!(
                             "`{callee}` needs `{}::{}` to be {}, but it is {}",
@@ -4948,6 +5028,7 @@ impl<'a> Checker<'a> {
             let ret = self.t.types.intern(TyKind::Assoc {
                 base: ty,
                 trait_index: m,
+                args: Box::new([]),
                 name: result,
                 copy: true,
             });

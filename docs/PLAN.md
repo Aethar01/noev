@@ -428,7 +428,7 @@ gets a compile-fail test under `tests/ui/`.
 | -- | ----------------------------- | -------------------------------------------------------------------- | ------- |
 | 1  | Per-file span offsets         | Spans address a source map of several files, so diagnostics name the file; needed by modules | ☑ Done: `noev_syntax::SourceMap`; the CLI still reads one file |
 | 2  | Modules and packages          | Files are modules, `use` imports, `pub` visibility, the prelude, `noev.toml` packages (`spec/modules.md`) | ☑ Done |
-| 3  | Traits and generics           | `trait`, `impl Trait for Type`, generic functions and types; generic code assumes values may be linear; `Copy` and `Measure`; `Option` and `Result` become ordinary generic enums (`spec/types.md` §6) | ☑ Done: associated types are not yet allowed in generic traits |
+| 3  | Traits and generics           | `trait`, `impl Trait for Type`, generic functions and types; generic code assumes values may be linear; `Copy` and `Measure`; `Option` and `Result` become ordinary generic enums (`spec/types.md` §6) | ☑ Done |
 | 4  | ~~Quantum integers~~          | Dropped on 2026-11-19: a library can define them on generics and size parameters (§11, 0.3) | Dropped |
 | 4a | Operator traits               | `std::ops` (`Add`, `Sub`, `Mul`, `Neg` and the `…Assign` forms) so a program's own types use `+`; needs associated types in generic traits | ☐ |
 | 4b | Arithmetic in sizes           | `[Qubit; N + 1]`, `2 * N`: linear size expressions, compared after normalising | ☐ |
