@@ -86,6 +86,9 @@ before 1.0.
 - An `impl` for a generic type (`impl<const N: Int> Measure for Reg<N>`) finds its own
   associated types in its signatures.
 
+- ketrs 0.2.0. Noev uses none of its new features (symmetric MPS, batched MPS
+  expectations), and nothing changes for programs.
+
 ### Tools
 
 - The tree-sitter grammar and Neovim highlights know visibilities, `use` and generics; an

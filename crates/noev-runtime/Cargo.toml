@@ -10,7 +10,7 @@ publish.workspace = true
 
 [dependencies]
 # The ketrs simulator, one backend among possible others.
-ketrs = { version = "0.1.2", optional = true }
+ketrs = { version = "0.2.0", optional = true }
 noev-ir = { path = "../noev-ir" }
 noev-sema = { path = "../noev-sema" }
 noev-syntax = { path = "../noev-syntax" }
