@@ -319,6 +319,28 @@ pub struct Typed {
     pub fn_impls: FxHashMap<FnId, usize>,
     /// The name of each trait and `impl` function, to match one with the other.
     impl_names: FxHashMap<FnId, Symbol>,
+    /// The type parameters whose bounds are inferred from their function's body, which
+    /// writes none and is not visible to other packages (`spec/types.md` §6), with that
+    /// function.
+    pub inferable: FxHashMap<Ty, FnId>,
+    /// Types given to a parameter declared `Copy` that are copyable only if inferable
+    /// parameters in them are: checked with the other inferred `Copy` bounds, by the
+    /// ownership checker.
+    pub copy_needs: Vec<CopyNeed>,
+}
+
+/// A type that must be copyable for a call to be allowed: what a parameter `T: Copy` is
+/// given, in terms of the calling function's inferable parameters.
+#[derive(Clone, Debug)]
+pub struct CopyNeed {
+    /// The type given.
+    pub ty: Ty,
+    /// The call.
+    pub span: Span,
+    /// The function called, and its parameter, as shown in messages.
+    pub callee: String,
+    /// The parameter, as shown in messages.
+    pub param: String,
 }
 
 /// The block of a `sample` expression, which is run separately from the code around it.
@@ -466,11 +488,14 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         inference: Vec::new(),
         item_traits: FxHashMap::default(),
         param_bounds: FxHashMap::default(),
+        inferred: FxHashMap::default(),
+        library: false,
         param_assoc: FxHashMap::default(),
         impl_assoc: Vec::new(),
     };
     checker.collect();
     checker.check_bodies();
+    checker.check_inferred_bounds();
     (checker.t, checker.diagnostics)
 }
 
@@ -523,6 +548,11 @@ struct Checker<'a> {
     item_traits: FxHashMap<ItemId, TraitId>,
     /// The traits each type parameter is bound by.
     param_bounds: FxHashMap<Ty, Vec<(TraitId, Vec<Ty>)>>,
+    /// The trait bounds inferred for each inferable parameter so far, each with where it is
+    /// needed.
+    inferred: FxHashMap<Ty, Vec<(TraitId, Span)>>,
+    /// Whether the package being compiled is a library: it has no `fn main`.
+    library: bool,
     /// The associated types bounds fix, as `T: Measure<Result = Bit>`, by parameter, trait
     /// and name.
     param_assoc: FxHashMap<(Ty, TraitId, Symbol), Ty>,
@@ -765,6 +795,11 @@ impl<'a> Checker<'a> {
 
         let mut next_struct = std_types;
         let main_root = ast.packages().first().map(|p| p.root);
+        self.library = !items.iter().any(|&item| {
+            matches!(ast.item(item).kind, ItemKind::Fn(f)
+                if ast.name(ast.function(f).name) == "main"
+                    && Some(self.scopes.item_module(item)) == main_root)
+        });
         for &item_id in items {
             let item = ast.item(item_id);
             self.module = self.scopes.item_module(item_id);
@@ -1378,18 +1413,24 @@ impl<'a> Checker<'a> {
             return true;
         }
         if types.as_param(ty).is_some() {
-            return self.param_bounds.get(&ty).is_some_and(|bounds| {
-                bounds.iter().any(|(t, given)| {
-                    *t == trait_id
-                        && args.is_none_or(|args| {
-                            args.len() == given.len()
-                                && args
-                                    .iter()
-                                    .zip(given)
-                                    .all(|(&a, &g)| a == g || types.is_wildcard(a))
-                        })
-                })
-            });
+            let inferred = args.is_none_or(<[Ty]>::is_empty)
+                && self
+                    .inferred
+                    .get(&ty)
+                    .is_some_and(|b| b.iter().any(|&(t, _)| t == trait_id));
+            return inferred
+                || self.param_bounds.get(&ty).is_some_and(|bounds| {
+                    bounds.iter().any(|(t, given)| {
+                        *t == trait_id
+                            && args.is_none_or(|args| {
+                                args.len() == given.len()
+                                    && args
+                                        .iter()
+                                        .zip(given)
+                                        .all(|(&a, &g)| a == g || types.is_wildcard(a))
+                            })
+                    })
+                });
         }
         if Some(trait_id.0) == types.measure {
             if types.is_measurable(ty) {
@@ -1525,6 +1566,25 @@ impl<'a> Checker<'a> {
         scope.extend(prefix);
         self.type_params = scope;
         let own = self.generic_params(decl.generics);
+        // A function's own type parameters with no bounds written have them inferred, unless
+        // the function is a trait's or an `impl`'s, or other packages can call it.
+        let package = self.ast.module(self.module).package;
+        let exported = decl.vis == Vis::Pub && (package.index() != 0 || self.library);
+        if self_ty.is_none() && !exported {
+            let ast = self.ast;
+            for &(name, ty) in &own {
+                let written = ast.list(decl.generics.params).iter().any(|p| {
+                    p.name == name
+                        && matches!(p.kind, GenericKind::Type { bounds } if !bounds.is_empty())
+                }) || ast
+                    .list(decl.generics.wheres)
+                    .iter()
+                    .any(|w| w.name == name);
+                if !self.t.types.is_size(ty) && !written {
+                    self.t.inferable.insert(ty, f);
+                }
+            }
+        }
         self.type_params.extend(own);
         let params = self
             .ast
@@ -2918,6 +2978,7 @@ impl<'a> Checker<'a> {
             if def.copy
                 && !self.t.types.is_wildcard(arg)
                 && self.t.types.linearity(arg) != Kind::Copyable
+                && !self.copy_inferred(arg, callee, def.name, span)
             {
                 let message = format!(
                     "`{callee}` needs `{}: Copy`, but here `{}` is {}",
@@ -2933,7 +2994,9 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|&t| self.t.types.subst(t, params, args))
                     .collect();
-                if !self.implements(arg, trait_id, Some(&trait_args)) {
+                if !self.implements(arg, trait_id, Some(&trait_args))
+                    && !(trait_args.is_empty() && self.infer_bound(arg, trait_id, span))
+                {
                     let trait_name = self.trait_text(trait_id, &trait_args);
                     let message = format!(
                         "`{callee}` needs `{}: {trait_name}`, but {} does not implement `{trait_name}`",
@@ -2965,6 +3028,31 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+    }
+
+    /// For a type given to a parameter declared `Copy` that is copyable once the inferable
+    /// parameters in it are, records it for the ownership checker, which infers their `Copy`
+    /// bounds. Returns whether it did.
+    fn copy_inferred(&mut self, ty: Ty, callee: &str, param: Symbol, span: Span) -> bool {
+        let inferable: Vec<Ty> = self
+            .t
+            .types
+            .params_in(ty)
+            .into_iter()
+            .filter(|p| self.t.inferable.contains_key(p))
+            .collect();
+        if inferable.is_empty() || self.t.types.linearity_assuming(ty, &inferable) != Kind::Copyable
+        {
+            return false;
+        }
+        let param = self.name(param).to_string();
+        self.t.copy_needs.push(CopyNeed {
+            ty,
+            span,
+            callee: callee.to_string(),
+            param,
+        });
+        true
     }
 
     /// A trait as written with its arguments: `Oracle<4>`, or `Shape`.
@@ -4277,6 +4365,9 @@ impl<'a> Checker<'a> {
                     .find(|&f| ast.function(f).name == name)
             })
             .collect();
+        if candidates.is_empty() && self.t.inferable.contains_key(&ty) {
+            return self.inferred_trait_fn(ty, name, span);
+        }
         if candidates.len() > 1 {
             let traits: Vec<String> = candidates
                 .iter()
@@ -4298,6 +4389,138 @@ impl<'a> Checker<'a> {
             self.error(span, message).help = Some(help);
         }
         candidates.first().copied()
+    }
+
+    /// For `x.f()` on an inferable parameter `T`, the function `f` of the one trait without
+    /// parameters that has one, recording that `T` needs that trait.
+    fn inferred_trait_fn(&mut self, ty: Ty, name: Symbol, span: Span) -> Option<FnId> {
+        let ast = self.ast;
+        let candidates: Vec<(TraitId, FnId)> = self
+            .t
+            .traits
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.params.is_empty())
+            .filter_map(|(i, t)| {
+                let f = t
+                    .fns
+                    .iter()
+                    .copied()
+                    .find(|&f| ast.function(f).name == name)?;
+                Some((TraitId(i as u32), f))
+            })
+            .collect();
+        match *candidates.as_slice() {
+            [] => None,
+            [(trait_id, f)] => {
+                self.infer_bound(ty, trait_id, span);
+                Some(f)
+            }
+            [(first, first_fn), ..] => {
+                let traits: Vec<String> = candidates
+                    .iter()
+                    .map(|&(t, _)| format!("`{}`", self.name(self.t.traits[t.index()].name)))
+                    .collect();
+                let param = self.t.types.display(ty, ast).to_string();
+                let message = format!(
+                    "`{}` is a function of {}, so `{param}` needs a bound saying which",
+                    self.name(name),
+                    traits.join(" and "),
+                );
+                let help = format!(
+                    "write `{param}: {}`, or another of them",
+                    self.name(self.t.traits[first.index()].name)
+                );
+                self.error(span, message).help = Some(help);
+                // Reported: carry on with the first, so nothing else is.
+                self.infer_bound(ty, first, span);
+                Some(first_fn)
+            }
+        }
+    }
+
+    /// Records that the inferable parameter `ty` needs `trait_id`, here, if it does not
+    /// already. Returns whether `ty` is inferable.
+    fn infer_bound(&mut self, ty: Ty, trait_id: TraitId, span: Span) -> bool {
+        if !self.t.inferable.contains_key(&ty) || !self.t.traits[trait_id.index()].params.is_empty()
+        {
+            return false;
+        }
+        let needs = self.inferred.entry(ty).or_default();
+        if !needs.iter().any(|&(t, _)| t == trait_id) {
+            needs.push((trait_id, span));
+        }
+        true
+    }
+
+    /// After every body: the trait bounds inferred for each parameter, followed through the
+    /// calls that pass it on, and checked at each call that gives a type (`spec/types.md`
+    /// §6).
+    fn check_inferred_bounds(&mut self) {
+        if self.inferred.is_empty() {
+            return;
+        }
+        let mut calls: Vec<(ExprId, FnId, Vec<Ty>)> = self
+            .t
+            .type_args
+            .iter()
+            .filter_map(|(&e, args)| match self.t.callees[e.index()] {
+                Some(Callee::Fn(g)) => Some((e, g, args.clone())),
+                _ => None,
+            })
+            .collect();
+        calls.sort_by_key(|c| c.0.index());
+        // A parameter passed on to one that needs a trait needs it too, through any number
+        // of calls: each call is an edge from the callee's parameter to the caller's.
+        let mut edges: FxHashMap<Ty, Vec<(Ty, Span)>> = FxHashMap::default();
+        for (e, g, args) in &calls {
+            for (&p, &arg) in self.t.fns[g.index()].generics.iter().zip(args) {
+                if arg != p && self.t.inferable.contains_key(&arg) {
+                    edges
+                        .entry(p)
+                        .or_default()
+                        .push((arg, self.ast.expr(*e).span));
+                }
+            }
+        }
+        let mut work: Vec<(Ty, TraitId)> = self
+            .inferred
+            .iter()
+            .flat_map(|(&p, needs)| needs.iter().map(move |&(t, _)| (p, t)))
+            .collect();
+        while let Some((p, t)) = work.pop() {
+            for &(arg, span) in edges.get(&p).into_iter().flatten() {
+                if !self.implements(arg, t, Some(&[])) {
+                    self.infer_bound(arg, t, span);
+                    work.push((arg, t));
+                }
+            }
+        }
+        for (e, g, args) in &calls {
+            let span = self.ast.expr(*e).span;
+            let generics = self.t.fns[g.index()].generics.clone();
+            for (&p, &arg) in generics.iter().zip(args) {
+                if self.t.inferable.contains_key(&arg) || self.t.types.is_wildcard(arg) {
+                    continue;
+                }
+                let needs = self.inferred.get(&p).cloned().unwrap_or_default();
+                for (t, at) in needs {
+                    if self.implements(arg, t, Some(&[])) {
+                        continue;
+                    }
+                    let trait_name = self.name(self.t.traits[t.index()].name).to_string();
+                    let param = self.t.types.display(p, self.ast).to_string();
+                    let message = format!(
+                        "`{}` needs `{param}: {trait_name}`, but {} does not implement `{trait_name}`",
+                        self.name(self.ast.function(*g).name),
+                        self.show(arg)
+                    );
+                    self.error(span, message)
+                        .labels
+                        .push((at, format!("`{param}: {trait_name}` is needed here")));
+                }
+            }
+        }
     }
 
     fn method_call(
@@ -4716,7 +4939,7 @@ impl<'a> Checker<'a> {
         // `measure(x)` for anything that implements `Measure`: the trait's function.
         if let Some(m) = self.t.types.measure
             && !self.t.types.is_measurable(ty)
-            && self.implements(ty, TraitId(m), None)
+            && (self.implements(ty, TraitId(m), None) || self.infer_bound(ty, TraitId(m), span))
         {
             let f = self.t.traits[m as usize].fns[0];
             self.t.callees[id.index()] = Some(Callee::Fn(f));

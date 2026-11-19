@@ -31,9 +31,8 @@ P(11) = 0.493
 
 Status: 0.4, with 0.5 in progress. The language is specified in [`spec/`](spec/), and this
 compiler implements all of it apart from the parts marked *Reserved* there. Modules,
-packages, traits and generics are in, apart from bounds inferred from bodies; `with`/`do`,
-lifetimes, native code and interop are still to come ([`docs/PLAN.md`](docs/PLAN.md) §11).
-Expect changes before 1.0.
+packages, traits and generics are in; `with`/`do`, lifetimes, native code and interop are
+still to come ([`docs/PLAN.md`](docs/PLAN.md) §11). Expect changes before 1.0.
 
 ## What it does
 

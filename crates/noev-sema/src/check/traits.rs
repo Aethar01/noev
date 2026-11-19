@@ -103,8 +103,11 @@ fn impl_errors() {
 
 #[test]
 fn bounds() {
+    // A bound written is a promise: `T: Copy` says nothing of `Shape`.
     assert_eq!(
-        errors(&format!("{SHAPE}fn f<T>(s: ref T) -> Float {{ s.area() }}")),
+        errors(&format!(
+            "{SHAPE}fn f<T: Copy>(s: ref T) -> Float {{ s.area() }}"
+        )),
         ["`T` has no method `area`"]
     );
     assert_eq!(
@@ -351,4 +354,128 @@ fn generic_trait_errors() {
         )),
         ["cannot tell what `N` is in this call"]
     );
+}
+
+/// Errors from type checking and then ownership, as messages, with the labels of each.
+fn all_errors(source: &str) -> Vec<String> {
+    let parsed = parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let (typed, mut diagnostics) = check(&parsed.ast);
+    if diagnostics.is_empty() {
+        diagnostics = crate::check_ownership(&parsed.ast, &typed);
+    }
+    diagnostics
+        .into_iter()
+        .filter(|d| d.severity == noev_syntax::Severity::Error)
+        .map(|d| {
+            let labels: Vec<String> = d
+                .labels
+                .iter()
+                .map(|(span, text)| {
+                    format!(
+                        "{text} at {}",
+                        &source[span.start as usize..span.end as usize]
+                    )
+                })
+                .collect();
+            if labels.is_empty() {
+                d.message
+            } else {
+                format!("{} ({})", d.message, labels.join(", "))
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn inferred_trait_bounds() {
+    // From a method, and through a function that passes the parameter on.
+    ok(&format!(
+        "{SHAPE}impl Shape for Square {{ fn area(ref self) -> Float {{ self.side }} }}\n\
+         fn f<T>(s: ref T) -> Float {{ s.area() }}\n\
+         fn g<U>(s: ref U) -> Float {{ f(s) + f(s) }}\n\
+         fn h(s: Square) -> Float {{ g(ref s) }}"
+    ));
+    // From a function whose bound is written, and from `measure`.
+    ok(&format!(
+        "{SHAPE}fn f<T: Shape>(s: ref T) -> Float {{ s.area() }}\nfn g<U>(s: ref U) -> Float {{ f(s) }}"
+    ));
+    ok("fn f<T>(x: T) { let b = mv x.measure() }\nfn g(q: Qubit) { f(mv q) }");
+    // Recursion.
+    ok(&format!(
+        "{SHAPE}fn f<T>(s: ref T, n: Int) -> Float {{ if n == 0 {{ s.area() }} else {{ f(s, n - 1) }} }}"
+    ));
+    assert_eq!(
+        all_errors(&format!(
+            "{SHAPE}fn f<T>(s: ref T) -> Float {{ s.area() }}\n\
+             fn g<U>(s: ref U) -> Float {{ f(s) }}\nfn h(n: Int) -> Float {{ g(ref n) }}"
+        )),
+        [
+            "`g` needs `U: Shape`, but `Int` does not implement `Shape` (`U: Shape` is needed here at f(s))"
+        ]
+    );
+    assert_eq!(
+        all_errors(&format!(
+            "{SHAPE}trait Solid {{ fn area(ref self) -> Float }}\nfn f<T>(s: ref T) -> Float {{ s.area() }}"
+        )),
+        ["`area` is a function of `Shape` and `Solid`, so `T` needs a bound saying which"]
+    );
+    // Other packages see only the bounds written: a library's `pub` function infers none.
+    assert_eq!(
+        all_errors(&format!(
+            "{SHAPE}pub fn f<T>(s: ref T) -> Float {{ s.area() }}"
+        )),
+        ["`T` has no method `area`"]
+    );
+}
+
+#[test]
+fn inferred_copy() {
+    ok_owned("fn twice<T>(x: T) -> (T, T) { (x, x) }\nfn f() -> (Int, Int) { twice(1) }");
+    ok_owned("fn drop<T>(x: T) {}\nfn pass<U>(x: U) { drop(x) }\nfn f() { pass(1.5) }");
+    // A parameter declared `Copy` given a `T`.
+    ok_owned(
+        "fn twice<T: Copy>(x: T) -> (T, T) { (x, x) }\nfn pass<U>(x: U) -> (U, U) { twice(x) }",
+    );
+    // Only the parameters copied.
+    assert_eq!(
+        all_errors(
+            "fn first<A, B>(a: A, b: B) -> (A, A, B) { (a, a, mv b) }\n\
+             fn f(q: Qubit) -> (Int, Int, Qubit) { first(1, mv q) }\n\
+             fn g(q: Qubit) -> (Qubit, Qubit, Int) { first(mv q, 1) }"
+        ),
+        ["`first` needs `A: Copy`, but here `A` is `Qubit` (`A: Copy` is needed here at a)"]
+    );
+    assert_eq!(
+        all_errors(
+            "fn drop<T>(x: T) {}\nfn pass<U>(x: U) { drop(x) }\nfn f(q: Qubit) { pass(mv q) }"
+        ),
+        ["`pass` needs `U: Copy`, but here `U` is `Qubit` (`U: Copy` is needed here at x)"]
+    );
+    // Moved on every turn of a loop, as only a copyable value can be.
+    assert_eq!(
+        all_errors(
+            "fn each<T>(x: T, n: Int) { for i in 0..n { let y = x } }\n\
+             fn f() { each(1.0, 3) }\nfn g(q: Qubit) { each(mv q, 3) }"
+        ),
+        ["`each` needs `T: Copy`, but here `T` is `Qubit` (`T: Copy` is needed here at x)"]
+    );
+    // A bound written is a promise, and so are a library's `pub` function's.
+    assert_eq!(
+        ownership("fn twice<T: Measure>(x: T) -> (T, T) { (x, x) }")[0]
+            .split(' ')
+            .next(),
+        Some("N001")
+    );
+    assert_eq!(
+        ownership("pub fn twice<T>(x: T) -> (T, T) { (x, x) }")[0]
+            .split(' ')
+            .next(),
+        Some("N001")
+    );
+}
+
+fn ok_owned(source: &str) {
+    let errs = all_errors(source);
+    assert!(errs.is_empty(), "{errs:?}");
 }

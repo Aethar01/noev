@@ -113,6 +113,7 @@ fn main() {
     );
 
     impls(400);
+    inferred(2000);
     modules("modules", 2000, |i| {
         // Each module uses the one before it by path, by import and by glob.
         let mut text =
@@ -198,5 +199,42 @@ fn impls(count: usize) {
         "impls",
         (count * repeats) as f64 / time.as_secs_f64(),
         time.as_secs_f64() * 1e3 / repeats as f64,
+    );
+}
+
+/// Checks a chain of `count` generic functions with no bounds written, each passing its `T`
+/// to the one before it, the first calling `x.area()` and copying `x`: their bounds are
+/// inferred. Declared last to first, the worst order for following needs through calls.
+/// (`area` is `rev`: an irreversible chain in this order measures reversibility inference,
+/// which takes a pass over every body per step.)
+fn inferred(count: usize) {
+    let mut text = String::from(
+        "trait Shape { rev fn area(ref self) -> Float }\nstruct Sq {}\n\
+         impl Shape for Sq { rev fn area(ref self) -> Float { 1.0 } }\n\
+         fn main() { print(f%(Sq {})) }\n",
+    )
+    .replace('%', &(count - 1).to_string());
+    for i in (1..count).rev() {
+        text.push_str(&format!("fn f{i}<T>(x: T) -> Float {{ f{}(x) }}\n", i - 1));
+    }
+    text.push_str("fn f0<T>(x: T) -> Float { let y = x\n y.area() + x.area() }\n");
+    let parsed = noev_syntax::parse(&text);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let (typed, errors) = noev_sema::check(&parsed.ast);
+    assert!(errors.is_empty(), "{errors:?}");
+    let errors = noev_sema::check_ownership(&parsed.ast, &typed);
+    assert!(errors.is_empty(), "{errors:?}");
+    let types = fastest(5, || {
+        black_box(noev_sema::check(black_box(&parsed.ast)));
+    });
+    let ownership = fastest(5, || {
+        black_box(noev_sema::check_ownership(black_box(&parsed.ast), &typed));
+    });
+    println!(
+        "{:<9} {:>10.0} fns/s  ({:.2} ms types, {:.2} ms ownership, for a chain of {count} functions)",
+        "inferred",
+        count as f64 / (types + ownership).as_secs_f64(),
+        types.as_secs_f64() * 1e3,
+        ownership.as_secs_f64() * 1e3,
     );
 }

@@ -740,7 +740,12 @@ impl Types {
 
     /// Whether values of `ty` are copyable, affine or linear.
     pub fn linearity(&self, ty: Ty) -> Kind {
-        self.linearity_at(ty, 0)
+        self.linearity_at(ty, &[], 0)
+    }
+
+    /// [`Types::linearity`], with the type parameters `copy` taken to be `Copy`.
+    pub fn linearity_assuming(&self, ty: Ty, copy: &[Ty]) -> Kind {
+        self.linearity_at(ty, copy, 0)
     }
 
     /// The type parameters `ty` mentions, each once.
@@ -780,28 +785,28 @@ impl Types {
         }
     }
 
-    fn linearity_at(&self, ty: Ty, depth: usize) -> Kind {
+    fn linearity_at(&self, ty: Ty, copy: &[Ty], depth: usize) -> Kind {
         // A struct containing itself is reported elsewhere; stop rather than recurse forever.
         if depth > 64 {
             return Kind::Copyable;
         }
         let combine = |types: &mut dyn Iterator<Item = Ty>| {
             types
-                .map(|t| self.linearity_at(t, depth + 1))
+                .map(|t| self.linearity_at(t, copy, depth + 1))
                 .max()
                 .unwrap_or(Kind::Copyable)
         };
         match self.kind(ty) {
             TyKind::Qubit => Kind::Linear,
             // Generic code treats a value as a qubit unless it is known to be `Copy`.
-            TyKind::Param(p) if self.params[p.index()].copy => Kind::Copyable,
+            TyKind::Param(p) if self.params[p.index()].copy || copy.contains(&ty) => Kind::Copyable,
             TyKind::Param(_) => Kind::Linear,
             TyKind::Assoc { copy: true, .. } => Kind::Copyable,
             TyKind::Assoc { .. } => Kind::Linear,
             TyKind::Ref { mutable: true, .. } => Kind::Affine,
             TyKind::Tuple(elems) => combine(&mut elems.iter().copied()),
             TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) => {
-                self.linearity_at(*elem, depth + 1)
+                self.linearity_at(*elem, copy, depth + 1)
             }
             TyKind::Struct(id) => {
                 let def = &self.structs[id.index()];

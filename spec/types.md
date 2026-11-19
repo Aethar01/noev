@@ -335,12 +335,12 @@ where it matters: any place a linear value changes hands has an explicit `mv`.
 
 ## 6. Traits and generics
 
-Status: **Implemented** for type parameters of functions, structs and enums, bounds (`Copy`
-and traits), inference of type arguments, `::<…>`, traits with and without type and size
-parameters, associated types (with `Copy` as their only bound, and not yet in generic
-traits), `impl`s (generic ones too) and monomorphisation, `Trait::f(x)`, `Measure` (for
-qubits, and tuples and arrays of measurable types), and size parameters. Not implemented
-yet: bounds inferred from bodies. The syntax is in [grammar.md](grammar.md) §2.
+Status: **Implemented**: type parameters of functions, structs and enums, bounds (`Copy` and
+traits) written or inferred, inference of type arguments, `::<…>`, traits with and without
+type and size parameters, associated types (with `Copy` as their only bound, and not yet in
+generic traits), `impl`s (generic ones too) and monomorphisation, `Trait::f(x)`, `Measure`
+(for qubits, and tuples and arrays of measurable types), and size parameters. The syntax is
+in [grammar.md](grammar.md) §2.
 
 ### Generic parameters
 
@@ -373,10 +373,10 @@ struct Pair<T, U> {
 
 ### What generic code can do with a value
 
-A type parameter with no bound accepts **any** type, classical or quantum: `swap((1, 2))` and
-`swap((|0>, |1>))` both work. The body is checked once for every type it may be given, so it
-treats a value of type `T` as it would a qubit: it moves it with `mv` and consumes it, and
-never copies or drops it (N001, N003). For a classical value, that costs nothing.
+A type parameter whose body needs nothing of it accepts **any** type, classical or quantum:
+`swap((1, 2))` and `swap((|0>, |1>))` both work. Such a body treats a value of type `T` as it
+would a qubit: it moves it with `mv` and consumes it. For a classical value, that costs
+nothing. A body that copies or drops a `T` needs `T: Copy`, written or inferred (below).
 
 **`T: Copy`** is the one bound about values themselves: `T` is copyable (§5), so the body can
 copy and drop its values:
@@ -415,15 +415,38 @@ measures to one bit.
 ### Bounds are inferred within a package
 
 As with reversibility ([modules.md](modules.md) §5), the compiler works out what a generic
-function needs from its body, within its package: a body that copies or drops a `T` needs
-`T: Copy`, and one that calls `x.measure()` on a `T` needs `T: Measure`. A call that
+function needs from its body, within its package: a body that copies or drops a `T`, or
+otherwise uses one as only a copyable value can be (moving it on every turn of a loop, or in
+reversible code), needs `T: Copy`, and one that calls `x.measure()` on a `T` needs
+`T: Measure`. A call that
 gives a type without what the function needs is an error at the call, naming the line that
-needs it. Writing a bound is always allowed; it turns the inference into a promise, checked
-in the body.
+needs it:
 
-A generic function visible to other packages states its bounds: they are part of its
-signature, so a library's update cannot break a program by changing a body, and a compiled
-library's signatures are fixed.
+```noev
+fn twice<T>(x: T) -> (T, T) { (x, x) }     // needs `T: Copy`
+
+twice(1)                                    // fine
+twice(|0>)      // error: `twice` needs `T: Copy`, but here `T` is `Qubit`
+                //   line 1, at the second `x`: `T: Copy` is needed here
+```
+
+- What a body needs comes from what it does with its own values, and from the functions it
+  calls: passing a `T` to `twice` needs what `twice` needs, so needs follow calls through
+  any number of functions, recursion included.
+- A method called on a `T` (`x.f()`) needs the one trait with a function `f`; when several
+  traits have one, the bound must be written. Traits with parameters are not inferred.
+- Writing a bound is always allowed; it turns the inference into a promise, checked in the
+  body: a parameter with any bound written, inline or in `where`, has exactly the bounds
+  written, so copying a `T: Measure` is N001. A struct's or enum's parameters, and those of
+  traits and `impl`s, are always written.
+- An associated type in a signature (`T::Result`) needs its trait written as a bound, since
+  signatures are read before bodies; so do `Distribution<T>` and `sample` returning a `T`,
+  which need `T: Copy` written.
+
+A generic function visible to other packages (`pub` in a library) states its bounds: they
+are part of its signature, so a library's update cannot break a program by changing a body,
+and a compiled library's signatures are fixed. Its body is checked against the bounds
+written, as if each were a promise.
 
 ### Traits
 

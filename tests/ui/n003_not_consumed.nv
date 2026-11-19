@@ -70,6 +70,8 @@ fn alias_not_consumed() {
     let p: Pair = |01>
 }                                   //~ N003
 
-// A generic `T` may be a qubit, so a value of it must be consumed too.
-fn generic_dropped<T>(x: T) {
+// A generic `T` with bounds written has exactly those, so without `Copy` it may be a qubit,
+// and a value of it must be consumed too. (Without bounds written, dropping it would infer
+// `T: Copy`.)
+fn generic_dropped<T: Measure>(x: T) {
 }                                   //~ N003

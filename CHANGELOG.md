@@ -14,6 +14,11 @@ before 1.0.
   prelude, so `State`, `amplitudes`, `fft`, `ifft`, `P` and `PX` will need a `use`.
 - C interop follows Rust: arrays by reference, `extern "C" struct` for C layout, and
   `extern "C" fn` callbacks. Host functions can call back into the program.
+- Bounds are inferred from bodies within a package, `Copy` included: a body that copies or
+  drops a `T` needs `T: Copy`, one that calls `x.measure()` needs `T: Measure`, and needs
+  follow calls. A call giving a type without what a function needs is an error at the call,
+  pointing at the line that needs it. A bound written is a promise, as are a library's `pub`
+  functions' bounds, so copying a `T: Measure` is still N001.
 - A type can implement a generic trait several times with different arguments; a call picks
   the `impl` by the arguments inferred from it, or by the type's only `impl` or bound when
   they leave one open, and is an error otherwise. Associated types in generic traits wait.
@@ -96,6 +101,12 @@ before 1.0.
   `impl` or bound when they leave it open. Defaults see the trait's parameters. The IR names
   each `impl`'s functions with the arguments: `<Flip as Oracle<2>>::apply`. Associated
   types in generic traits are not supported yet.
+- Inferred bounds: a generic function whose parameter has no bound written, and that other
+  packages cannot call, infers `T: Copy` when its body only checks with `T` copyable (the
+  copy or drop that needs it is shown at a call that gives a qubit), and the trait of a
+  method called on a `T` (`x.area()`) or of a bound it is passed to; needs follow calls,
+  through recursion too, and are checked at each call once every body is. A method two
+  traits share needs the bound written.
 
 - ketrs 0.2.0. Noev uses none of its new features (symmetric MPS, batched MPS
   expectations), and nothing changes for programs.

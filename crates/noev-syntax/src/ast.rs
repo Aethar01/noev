@@ -431,10 +431,13 @@ impl Ast {
 
     /// Makes [`Ast::root`] every module's items, after the modules are parsed, and adds the
     /// standard library's package, whose modules have no items of their own, if any module
-    /// names `std`: none can reach it otherwise.
+    /// names `std`: none can reach it otherwise. Its `Measure` trait is added when a module
+    /// names it, or when a generic function may infer it as a bound by calling `measure`
+    /// (`spec/types.md` §6).
     pub fn collect_root(&mut self) {
         let named = |text| self.symbols.get(text).is_some();
-        let measure = named("Measure");
+        let generic = self.all_fns().iter().any(|f| !f.generics.is_empty());
+        let measure = named("Measure") || (generic && named("measure"));
         if self.std.is_none() && (named("std") || measure) {
             let std = self.add_package("std");
             let root = self.package(std).root;

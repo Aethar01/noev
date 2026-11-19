@@ -11,7 +11,7 @@
 //! - whether the code is in a reversible context.
 
 use noev_syntax::ast::*;
-use noev_syntax::{Diagnostic, Severity, Span, Symbol};
+use noev_syntax::{Diagnostic, FxHashMap, Severity, Span, Symbol};
 
 use crate::check::{Adjust, Callee, LocalId, Res, Typed};
 use crate::facts::{self, Fact, Linear, Var};
@@ -42,12 +42,15 @@ pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
         diverged: false,
         returns_ref: false,
         lent_match: false,
+        assume_copy: Vec::new(),
     };
+    let mut copy_needs = FxHashMap::default();
     for (index, decl) in ast.all_fns().iter().enumerate() {
         if let Some(body) = decl.body {
-            checker.function(FnId::from_index(index), body);
+            checker.function_inferring(FnId::from_index(index), body, &mut copy_needs);
         }
     }
+    checker.check_copy_needs(copy_needs);
     // A library's public function that acts on qubits and is reversible only by inference
     // cannot be used as reversible by the packages that depend on it (`spec/modules.md` §5).
     // Only the library being compiled is warned about: a program has no dependents, and a
@@ -226,6 +229,9 @@ struct Owner<'a> {
     returns_ref: bool,
     /// While binding the pattern of a `match` on a lent value, where nothing is taken.
     lent_match: bool,
+    /// The inferable type parameters taken to be `Copy` while checking this body
+    /// (`spec/types.md` §6).
+    assume_copy: Vec<Ty>,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -589,6 +595,155 @@ impl Owner<'_> {
         self.ast.name(self.typed.local(local).name)
     }
 
+    /// Checks `f`, inferring `Copy` for its inferable type parameters where copying or
+    /// dropping their values is all that stands between the body and no errors: each such
+    /// parameter goes into `needs`, with where the body first needs it.
+    fn function_inferring(&mut self, f: FnId, body: BlockId, needs: &mut FxHashMap<Ty, Span>) {
+        let typed = self.typed;
+        let own: Vec<Ty> = typed.fns[f.index()]
+            .generics
+            .iter()
+            .copied()
+            .filter(|t| typed.inferable.get(t) == Some(&f))
+            .collect();
+        let start = self.diagnostics.len();
+        self.assume_copy.clear();
+        self.function(f, body);
+        let errors = |d: &[Diagnostic]| d.iter().filter(|d| d.severity == Severity::Error).count();
+        if own.is_empty() || errors(&self.diagnostics[start..]) == 0 {
+            return;
+        }
+        let linear = self.diagnostics.split_off(start);
+        self.assume_copy = own.clone();
+        self.function(f, body);
+        let copy = self.diagnostics.split_off(start);
+        if errors(&copy) >= errors(&linear) {
+            self.assume_copy.clear();
+            self.diagnostics.extend(linear);
+            return;
+        }
+        // Only the parameters some copy or drop needs: without one, the errors it removed
+        // come back, and the first of them is where it is needed.
+        let mut needed = own.clone();
+        for &p in &own {
+            self.assume_copy = needed.iter().copied().filter(|&q| q != p).collect();
+            self.function(f, body);
+            let without = self.diagnostics.split_off(start);
+            if errors(&without) == errors(&copy) {
+                needed.retain(|&q| q != p);
+                continue;
+            }
+            let at = without
+                .iter()
+                .find(|d| {
+                    d.severity == Severity::Error
+                        && !copy.iter().any(|c| c.span == d.span && c.code == d.code)
+                })
+                .map_or(self.ast.function(f).name_span, |d| d.span);
+            needs.insert(p, at);
+        }
+        if needed == own {
+            self.diagnostics.extend(copy);
+        } else {
+            self.assume_copy = needed;
+            self.function(f, body);
+        }
+        self.assume_copy.clear();
+    }
+
+    /// `ty`'s linearity, with the inferable parameters being checked as `Copy` taken to be.
+    fn lin(&self, ty: Ty) -> Kind {
+        self.typed.types.linearity_assuming(ty, &self.assume_copy)
+    }
+
+    /// After every body: the `Copy` bounds inferred for each parameter, followed through
+    /// the calls that pass it on, and checked at each call that gives a type
+    /// (`spec/types.md` §6).
+    fn check_copy_needs(&mut self, mut needs: FxHashMap<Ty, Span>) {
+        let (ast, typed) = (self.ast, self.typed);
+        let types = &typed.types;
+        // The inferable parameters in `ty`, and those of them it cannot do without being
+        // `Copy` to be copyable.
+        let inferable_in = |ty: Ty| -> Vec<Ty> {
+            types
+                .params_in(ty)
+                .into_iter()
+                .filter(|p| typed.inferable.contains_key(p))
+                .collect()
+        };
+        let required = |ty: Ty, inferable: &[Ty]| -> Vec<Ty> {
+            inferable
+                .iter()
+                .copied()
+                .filter(|&q| {
+                    let others: Vec<Ty> = inferable.iter().copied().filter(|&o| o != q).collect();
+                    types.linearity_assuming(ty, &others) != Kind::Copyable
+                })
+                .collect()
+        };
+        for need in &typed.copy_needs {
+            for q in required(need.ty, &inferable_in(need.ty)) {
+                needs.entry(q).or_insert(need.span);
+            }
+        }
+        if needs.is_empty() {
+            return;
+        }
+        let mut calls: Vec<(ExprId, FnId, &Vec<Ty>)> = typed
+            .type_args
+            .iter()
+            .filter_map(|(&e, args)| match typed.callees[e.index()] {
+                Some(Callee::Fn(g)) => Some((e, g, args)),
+                _ => None,
+            })
+            .collect();
+        calls.sort_by_key(|c| c.0.index());
+        // A parameter passed on to one that needs `Copy` needs it too, through any number of
+        // calls: each call is an edge from the callee's parameter to the caller's it needs.
+        let mut edges: FxHashMap<Ty, Vec<(Ty, Span)>> = FxHashMap::default();
+        for &(e, g, args) in &calls {
+            for (&p, &arg) in typed.fns[g.index()].generics.iter().zip(args) {
+                if arg == p {
+                    continue;
+                }
+                for q in required(arg, &inferable_in(arg)) {
+                    edges.entry(p).or_default().push((q, ast.expr(e).span));
+                }
+            }
+        }
+        let mut work: Vec<Ty> = needs.keys().copied().collect();
+        while let Some(p) = work.pop() {
+            for &(q, span) in edges.get(&p).into_iter().flatten() {
+                if let std::collections::hash_map::Entry::Vacant(slot) = needs.entry(q) {
+                    slot.insert(span);
+                    work.push(q);
+                }
+            }
+        }
+        for &(e, g, args) in &calls {
+            for (p, &arg) in typed.fns[g.index()].generics.iter().zip(args) {
+                let Some(&at) = needs.get(p) else {
+                    continue;
+                };
+                if types.is_wildcard(arg)
+                    || types.linearity_assuming(arg, &inferable_in(arg)) == Kind::Copyable
+                {
+                    continue;
+                }
+                let param = types.display(*p, ast).to_string();
+                let message = format!(
+                    "`{}` needs `{param}: Copy`, but here `{param}` is `{}`",
+                    ast.name(ast.function(g).name),
+                    types.display(arg, ast)
+                );
+                self.diagnostics.push(
+                    Diagnostic::error(ast.expr(e).span, message)
+                        .with_label(at, format!("`{param}: Copy` is needed here")),
+                );
+            }
+        }
+    }
+
     fn function(&mut self, f: FnId, body: BlockId) {
         self.module = self.typed.fn_modules[f.index()];
         let info = &self.typed.fns[f.index()];
@@ -807,7 +962,7 @@ impl Owner<'_> {
             }
             PatKind::Wildcard => {
                 // In a lent `match`, `_` takes nothing.
-                if !poisoned && !self.lent_match && types.linearity(ty) == Kind::Linear {
+                if !poisoned && !self.lent_match && self.lin(ty) == Kind::Linear {
                     let span = self.ast.pat(pat).span;
                     self.error("N003", span, "`_` would throw away qubits").help =
                         Some("bind them to a name and consume them, or measure them".into());
@@ -906,9 +1061,7 @@ impl Owner<'_> {
             .with_label_mut(lend_span, "lent here");
         }
         let ty = self.typed.ty(place_expr);
-        if !self.is_reference(root)
-            && self.typed.types.linearity(ty) == Kind::Linear
-            && !self.fully_moved(&place, ty)
+        if !self.is_reference(root) && self.lin(ty) == Kind::Linear && !self.fully_moved(&place, ty)
         {
             self.error(
                 "N003",
@@ -1005,7 +1158,7 @@ impl Owner<'_> {
                 let moved: Vec<Moved> = self.moved[before..].to_vec();
                 for m in moved {
                     let ty = self.place_ty(&m.place);
-                    if self.typed.types.linearity(ty) == Kind::Copyable {
+                    if self.lin(ty) == Kind::Copyable {
                         continue;
                     }
                     let name = self.place_text(&m.place);
@@ -1155,7 +1308,7 @@ impl Owner<'_> {
             return;
         }
         let ty = self.typed.ty(id);
-        if self.typed.types.linearity(ty) == Kind::Linear {
+        if self.lin(ty) == Kind::Linear {
             let span = self.ast.expr(id).span;
             self.error(
                 "N003",
@@ -1319,9 +1472,7 @@ impl Owner<'_> {
                     merged.push(m.clone());
                 }
                 let ty = self.place_ty(&m.place);
-                if self.typed.types.linearity(ty) == Kind::Copyable
-                    || reported.contains(&m.place.root)
-                {
+                if self.lin(ty) == Kind::Copyable || reported.contains(&m.place.root) {
                     continue;
                 }
                 reported.push(m.place.root);
@@ -1535,6 +1686,7 @@ impl Owner<'_> {
         let first = run.first_local as usize;
         let ast = self.ast;
         let typed = self.typed;
+        let assume = self.assume_copy.clone();
         let outside = |e: ExprId| match ast.expr(e).kind {
             ExprKind::Name(_) => match typed.res[e.index()] {
                 Res::Local(l) if l.index() < first => Some(l),
@@ -1552,7 +1704,7 @@ impl Owner<'_> {
             Node::Expr(e) => {
                 if let Some(l) = outside(e) {
                     let ty = typed.local(l).ty;
-                    if typed.types.linearity(ty) != Kind::Copyable {
+                    if typed.types.linearity_assuming(ty, &assume) != Kind::Copyable {
                         problems.push((l, ast.expr(e).span, "uses"));
                     } else if matches!(typed.types.kind(ty), TyKind::Ref { .. }) {
                         problems.push((l, ast.expr(e).span, "uses the reference"));
@@ -1588,7 +1740,7 @@ impl Owner<'_> {
             reported.push(local);
             // Qubits cannot be shared between runs at all, however they are used.
             let ty = self.typed.local(local).ty;
-            let what = if self.typed.types.linearity(ty) == Kind::Copyable {
+            let what = if self.lin(ty) == Kind::Copyable {
                 what
             } else {
                 "uses"
@@ -1654,7 +1806,7 @@ impl Owner<'_> {
                     ..
                 }
             );
-            if self.typed.types.linearity(ty) != Kind::Copyable || lends_mut || owns {
+            if self.lin(ty) != Kind::Copyable || lends_mut || owns {
                 let span = self.ast.expr(arg).span;
                 let text = self.expr_text(arg);
                 self.error("N020", span, format!("this call is repeated many times, but `{text}` is not a classical value it can be given each time"))
@@ -1679,7 +1831,7 @@ impl Owner<'_> {
             root: local,
             proj: Vec::new(),
         };
-        if self.typed.types.linearity(ty) == Kind::Copyable {
+        if self.lin(ty) == Kind::Copyable {
             self.read(&place, span);
         } else {
             let text = self.ast.name(name).to_string();
@@ -1743,7 +1895,7 @@ impl Owner<'_> {
             }
             Adjust::Deref => {
                 let target = self.typed.types.deref(ty);
-                if use_ == Use::Value && self.typed.types.linearity(target) != Kind::Copyable {
+                if use_ == Use::Value && self.lin(target) != Kind::Copyable {
                     let text = self.expr_text(id);
                     self.error(
                         "N007",
@@ -1757,7 +1909,7 @@ impl Owner<'_> {
             }
             Adjust::None => {}
         }
-        let copyable = self.typed.types.linearity(ty) == Kind::Copyable
+        let copyable = self.lin(ty) == Kind::Copyable
             || matches!(self.typed.types.kind(ty), TyKind::Ref { .. });
         if use_ == Use::Value && !copyable {
             let text = self.expr_text(id);
@@ -1885,7 +2037,7 @@ impl Owner<'_> {
                     let Some(place) = self.place_of(receiver) else {
                         return Vec::new();
                     };
-                    if self.typed.types.linearity(ty) == Kind::Copyable {
+                    if self.lin(ty) == Kind::Copyable {
                         self.read(&place, receiver_expr.span);
                     } else {
                         let text = self.expr_text(receiver);
@@ -2029,7 +2181,7 @@ impl Owner<'_> {
             TyKind::SizedArray(elem, size) => (elem, i64::MAX, Some(size)),
             _ => return,
         };
-        if types.linearity(elem) != Kind::Linear {
+        if self.lin(elem) != Kind::Linear {
             return;
         }
         let form = facts::linear(self.ast, self.typed, index);
@@ -2122,7 +2274,7 @@ impl Owner<'_> {
             return true;
         }
         let types = &self.typed.types;
-        if types.linearity(ty) != Kind::Linear {
+        if self.lin(ty) != Kind::Linear {
             return true;
         }
         let child = |proj: Proj| {
@@ -2268,7 +2420,7 @@ impl Owner<'_> {
             )
             .with_label_mut(lend_span, "lent here");
         }
-        let linear = self.typed.types.linearity(ty) != Kind::Copyable;
+        let linear = self.lin(ty) != Kind::Copyable;
         if linear && self.locals[place.root.index()].loop_depth < self.loops.len() as u32 {
             self.error(
                 "N010",
@@ -2277,7 +2429,7 @@ impl Owner<'_> {
             )
             .help = Some("move it after the loop, or create it inside the loop".into());
         }
-        if self.typed.types.linearity(ty) == Kind::Linear && !self.reversible.is_empty() {
+        if self.lin(ty) == Kind::Linear && !self.reversible.is_empty() {
             self.error("N013", span, format!("moving `{name}` is not reversible"));
         }
         self.moved.push(Moved {

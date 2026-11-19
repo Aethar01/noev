@@ -132,7 +132,11 @@ let b = a               // error[N001]: qubits cannot be copied
                         //   help: write `let b = mv a` to move it
 ```
 
-Applies to every move point in §3.
+Applies to every move point in §3. A value of a generic type `T` is treated like a qubit
+unless `T: Copy`; within a package, a function whose bounds are not written infers `T: Copy`
+from a copy instead, and the error moves to a call that gives it a type that is not
+copyable ([types.md](types.md) §6). The same goes for any rule a `Copy` value would meet,
+such as N010 and N013.
 
 ### N002: use after move
 
@@ -159,7 +163,8 @@ At the end of every scope, and at every `return` and `break`, each linear place 
 that scope must have been moved. A qubit is consumed by `measure`, `discard`, moving it into
 something that is itself consumed, or returning it. Discarding a linear value as a block's
 unused final expression is also N003, and so is binding one to `_`, alone or inside a tuple
-or array pattern (`let [a, _] = mv pair`).
+or array pattern (`let [a, _] = mv pair`). Dropping a value of a generic type `T` infers
+`T: Copy` where a copy would (N001).
 
 There is never an implicit measure or discard. If `q` is entangled with a qubit the program
 keeps, discarding `q` acts as a measurement and collapses the kept qubit. The programmer has
