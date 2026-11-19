@@ -466,6 +466,27 @@ for i in 0..4 { ctrl r[i] { r[i + 1].x() } }
 A runtime out-of-range failure halfway through a circuit, with qubits entangled, is as bad
 as an ownership failure, so it is ruled out at compile time.
 
+### N024: size not proven at least 0
+
+A size that subtracts, such as `N - 1` in `[Qubit; N - 1]`, exists only when it is at least
+0 ([types.md](types.md) §6). A function whose signature has one may assume it, as a fact for
+its indices and calls; each call must prove it for the sizes it gives, from the facts where it
+is (an `assert`, a loop, or its own signature), and so must `[x; N - 1]`:
+
+```noev
+fn drop_top<const N: Int>(r: [Qubit; N]) -> [Qubit; N - 1] { … }
+
+fn f(r: [Qubit; 0]) { drop_top(mv r) }      // error[N024]: `drop_top` needs `N - 1` to be at
+                                            //   least 0, but here it is -1
+fn g<const N: Int>(r: [Qubit; N]) {
+    drop_top(mv r)                          // error[N024]: … which is not proven here
+}
+fn h<const N: Int>(r: [Qubit; N]) {
+    assert 1 <= N
+    drop_top(mv r)                          // fine
+}
+```
+
 ### Later
 
 `split`-style functions for unusual patterns, and facts from more sources (such as `while`
@@ -651,3 +672,4 @@ linear value's every case is handled, and its qubits consumed, on every path.
 | N021 | A `circuit fn` is not a circuit ([execution.md](execution.md) §4) |
 | N022 | A repeated run prints ([execution.md](execution.md) §3) |
 | N023 | A bra's preparation is not reversible (§12)        |
+| N024 | A size that subtracts is not proven at least 0 (§10) |

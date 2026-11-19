@@ -36,7 +36,9 @@ before 1.0.
   normalising and solved by calls (`[Qubit; 5]` for `[Qubit; N + 1]` makes `N` 4), so a
   quantum integer can be a library type (`tests/run/qint.nv`). A call also infers a parameter
   that only a bound's associated type fixes (`U` in `T: Add<T, Output = U>`), and index
-  proofs know a size is never negative.
+  proofs know a size is never negative. Sizes can subtract (`[Qubit; N - 1]`): a signature
+  with one requires it to be at least 0, which each call proves from the sizes it gives and
+  the facts where it is (N024).
 - Being a circuit is decided across modules and packages by the compiler, as within one;
   only reversibility needs a declaration (`rev fn`) to cross a module.
 - Backends are libraries implementing `std::backend::Backend`, in Noev, Rust or C. Every

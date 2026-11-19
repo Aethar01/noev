@@ -1837,13 +1837,26 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::Binary {
-                op: BinaryOp::Sub, ..
+                op: BinaryOp::Sub,
+                lhs,
+                rhs,
             } => {
-                self.error(expr.span, "subtracting sizes is not supported yet")
-                    .help = Some(
-                    "take the larger size as the parameter: `[Qubit; N]` and `[Qubit; N + 1]`, not `N - 1` and `N`".into(),
-                );
-                return None;
+                let (a, b) = (self.size_expr(lhs)?, self.size_expr(rhs)?);
+                match self.t.types.size_sub(a, b) {
+                    Ok(size) => Some(size),
+                    Err(true) => {
+                        self.error(
+                            expr.span,
+                            "a size can only subtract a number, or sizes it adds",
+                        )
+                        .help = Some("such as `N - 1` or `N + M - M`, not `N - M`".into());
+                        return None;
+                    }
+                    Err(false) => {
+                        self.error(expr.span, "this size is negative");
+                        return None;
+                    }
+                }
             }
             _ => {
                 self.error(
@@ -3171,7 +3184,7 @@ impl<'a> Checker<'a> {
         };
         // What is left of `found` once the constant and the known terms are taken away must
         // be `k` times the unknown parameter.
-        let Some(mut constant) = d.checked_sub(c) else {
+        let Some(mut constant) = d.checked_sub(c).filter(|&c| c >= 0) else {
             return false;
         };
         for (p, j) in known {
@@ -3184,10 +3197,13 @@ impl<'a> Checker<'a> {
             rest[at].1 = left;
         }
         rest.retain(|&(_, j)| j != 0);
-        if constant % k != 0 || rest.iter().any(|&(_, j)| j % k != 0) {
+        let Ok(k_signed) = i64::try_from(k) else {
+            return false;
+        };
+        if constant % k_signed != 0 || rest.iter().any(|&(_, j)| j % k != 0) {
             return false;
         }
-        constant /= k;
+        constant /= k_signed;
         for term in &mut rest {
             term.1 /= k;
         }

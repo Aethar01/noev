@@ -137,12 +137,13 @@ pub enum TyKind {
     /// A size given as a type argument: the `4` of `Reg<4>`.
     Size(u64),
     /// A size computed from size parameters, `constant + k·N + …`, such as the `N + 1` of
-    /// `[Qubit; N + 1]` (`spec/types.md` §6). Made only by [`Types::size_sum`], so it has at
-    /// least one term and is not a parameter alone, its terms are sorted and their factors
-    /// positive, and equal sums are the same type.
+    /// `[Qubit; N + 1]` or the `N - 1` of `[Qubit; N - 1]` (`spec/types.md` §6). Made only by
+    /// [`Types::size_sum`], so it has at least one term and is not a parameter alone, its
+    /// terms are sorted and their factors positive, and equal sums are the same type. A
+    /// negative constant makes it a requirement on its parameters (N024).
     SizeSum {
         /// The constant.
-        constant: u64,
+        constant: i64,
         /// Each size parameter, with its factor.
         terms: Box<[(Ty, u64)]>,
     },
@@ -507,10 +508,10 @@ impl Types {
         }
     }
 
-    /// A size as `constant + Σ k·N`: `None` if `ty` is not a size.
-    pub fn size_parts(&self, ty: Ty) -> Option<(u64, Vec<(Ty, u64)>)> {
+    /// A size as `constant + Σ k·N`: `None` if `ty` is not a size, or too large.
+    pub fn size_parts(&self, ty: Ty) -> Option<(i64, Vec<(Ty, u64)>)> {
         match self.kind(ty) {
-            &TyKind::Size(n) => Some((n, Vec::new())),
+            &TyKind::Size(n) => Some((i64::try_from(n).ok()?, Vec::new())),
             TyKind::Param(p) if self.params[p.index()].size => Some((0, vec![(ty, 1)])),
             TyKind::SizeSum { constant, terms } => Some((*constant, terms.to_vec())),
             _ => None,
@@ -518,8 +519,9 @@ impl Types {
     }
 
     /// The size `constant + Σ k·N`, normalised: a fixed size without terms, the parameter
-    /// itself for `1·N`, otherwise a [`TyKind::SizeSum`]. `None` if it overflows.
-    pub fn size_sum(&mut self, constant: u64, mut terms: Vec<(Ty, u64)>) -> Option<Ty> {
+    /// itself for `1·N`, otherwise a [`TyKind::SizeSum`]. `None` if it overflows, or has no
+    /// terms and is negative.
+    pub fn size_sum(&mut self, constant: i64, mut terms: Vec<(Ty, u64)>) -> Option<Ty> {
         terms.sort_unstable_by_key(|&(p, _)| p);
         let mut merged: Vec<(Ty, u64)> = Vec::with_capacity(terms.len());
         for (p, k) in terms {
@@ -530,7 +532,7 @@ impl Types {
         }
         merged.retain(|&(_, k)| k != 0);
         Some(match merged[..] {
-            [] => self.intern(TyKind::Size(constant)),
+            [] => self.intern(TyKind::Size(u64::try_from(constant).ok()?)),
             [(p, 1)] if constant == 0 => p,
             _ => self.intern(TyKind::SizeSum {
                 constant,
@@ -554,7 +556,52 @@ impl Types {
             .into_iter()
             .map(|(p, j)| Some((p, j.checked_mul(k)?)))
             .collect::<Option<Vec<_>>>()?;
-        self.size_sum(c.checked_mul(k)?, terms)
+        self.size_sum(c.checked_mul(i64::try_from(k).ok()?)?, terms)
+    }
+
+    /// `a - b` for sizes, where `b` is a number or takes away only terms `a` has: `N - 1`,
+    /// `N + M - M`. `Err(true)` when `b` has a term `a` lacks, `Err(false)` when either is not
+    /// a size, it overflows, or it is a negative number.
+    pub fn size_sub(&mut self, a: Ty, b: Ty) -> Result<Ty, bool> {
+        let (c, mut terms) = self.size_parts(a).ok_or(false)?;
+        let (d, less) = self.size_parts(b).ok_or(false)?;
+        for (p, k) in less {
+            let at = terms.iter().position(|&(q, _)| q == p).ok_or(true)?;
+            terms[at].1 = terms[at].1.checked_sub(k).ok_or(true)?;
+        }
+        self.size_sum(c.checked_sub(d).ok_or(false)?, terms)
+            .ok_or(false)
+    }
+
+    /// The sizes in `ty` that subtract (`N - 1`): each must be at least 0 where `ty` is
+    /// used with values for its parameters (N024).
+    pub fn size_requirements(&self, ty: Ty, found: &mut Vec<Ty>) {
+        match self.kind(ty) {
+            TyKind::SizeSum { constant, .. } if *constant < 0 => {
+                if !found.contains(&ty) {
+                    found.push(ty);
+                }
+            }
+            TyKind::Tuple(elems) => {
+                for &e in elems.iter() {
+                    self.size_requirements(e, found);
+                }
+            }
+            &TyKind::Array(elem, _) | &TyKind::Distribution(elem) => {
+                self.size_requirements(elem, found)
+            }
+            &TyKind::SizedArray(elem, len) => {
+                self.size_requirements(elem, found);
+                self.size_requirements(len, found);
+            }
+            &TyKind::Ref { inner, .. } => self.size_requirements(inner, found),
+            TyKind::Struct(id) => {
+                for &a in &self.structs[id.index()].args {
+                    self.size_requirements(a, found);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// `[elem; len]` for a size `len`: a fixed length, or a size parameter.
@@ -670,16 +717,32 @@ impl Types {
                 self.sized_array(elem, len)
             }
             TyKind::SizeSum { constant, terms } => {
-                let mut sum = self.intern(TyKind::Size(constant));
+                // The constant on its own may be negative: add it last.
+                let mut sum = Ty::ERROR;
+                let mut first = true;
                 for &(p, k) in terms.iter() {
                     let p = self.subst(p, from, to);
-                    let Some(next) = self.size_scale(k, p).and_then(|t| self.size_add(sum, t))
-                    else {
+                    let next = self.size_scale(k, p).and_then(|t| {
+                        if first {
+                            Some(t)
+                        } else {
+                            self.size_add(sum, t)
+                        }
+                    });
+                    let Some(next) = next else {
                         return Ty::ERROR;
                     };
                     sum = next;
+                    first = false;
                 }
-                sum
+                // A size made negative is found by the ownership checker (N024).
+                let Some((c, terms)) = self.size_parts(sum) else {
+                    return Ty::ERROR;
+                };
+                match c.checked_add(constant) {
+                    Some(c) => self.size_sum(c, terms).unwrap_or(Ty::ERROR),
+                    None => Ty::ERROR,
+                }
             }
             TyKind::Distribution(elem) => {
                 let elem = self.subst(elem, from, to);
@@ -1192,17 +1255,22 @@ impl Types {
             }
             TyKind::Size(n) => n.to_string(),
             TyKind::SizeSum { constant, terms } => {
-                let mut parts: Vec<String> = terms
+                let parts: Vec<String> = terms
                     .iter()
                     .map(|&(p, k)| match k {
                         1 => self.display(p, ast),
                         _ => format!("{k} * {}", self.display(p, ast)),
                     })
                     .collect();
-                if *constant != 0 {
-                    parts.push(constant.to_string());
+                let mut text = parts.join(" + ");
+                match constant.cmp(&0) {
+                    std::cmp::Ordering::Greater => text.push_str(&format!(" + {constant}")),
+                    std::cmp::Ordering::Less => {
+                        text.push_str(&format!(" - {}", constant.unsigned_abs()))
+                    }
+                    std::cmp::Ordering::Equal => {}
                 }
-                parts.join(" + ")
+                text
             }
             TyKind::Distribution(elem) => format!("Distribution<{}>", self.display(*elem, ast)),
             TyKind::Struct(id) => {

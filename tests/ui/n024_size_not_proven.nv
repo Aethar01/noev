@@ -1,0 +1,36 @@
+// N024: a size that subtracts (`N - 1`) is not proven to be at least 0.
+
+fn drop_top<const N: Int>(r: [Qubit; N]) -> [Qubit; N - 1] {
+    mv r.measure()
+    [|0>; N - 1]
+}
+
+fn from_empty(r: [Qubit; 0]) {
+    let s = drop_top(mv r)          //~ N024
+    mv s.measure()
+}
+
+fn unproven<const N: Int>(r: [Qubit; N]) {
+    let s = drop_top(mv r)          //~ N024
+    mv s.measure()
+}
+
+fn fresh<const N: Int>() {
+    let r: [Qubit; N - 1] = [|0>; N - 1]    //~ N024
+    mv r.measure()
+}
+
+// Proven by an `assert`, or by the caller's own signature.
+fn asserted<const N: Int>(r: [Qubit; N]) {
+    assert 1 <= N
+    let s = drop_top(mv r)
+    mv s.measure()
+}
+
+fn by_signature<const N: Int>(r: [Qubit; N], s: [Qubit; N - 1]) {
+    let t = drop_top(mv r)
+    mv s.measure()
+    mv t.measure()
+}
+
+fn main() {}

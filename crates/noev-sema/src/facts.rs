@@ -116,11 +116,39 @@ pub fn constant_form(value: i64) -> Linear {
 /// fit.
 pub fn size_form(types: &Types, size: Ty) -> Option<Linear> {
     let (constant, terms) = types.size_parts(size)?;
-    let mut form = Linear::constant(i64::try_from(constant).ok()?);
+    let mut form = Linear::constant(constant);
     for (p, k) in terms {
         form = form.add(&Linear::var(Var::Size(p)).scale(i64::try_from(k).ok()?)?)?;
     }
     Some(form)
+}
+
+/// The form of `size` with the size parameters `from` replaced by the sizes `to`: what a
+/// callee's `N - 1` is at a call. `None` if it does not fit.
+pub fn size_form_in(types: &Types, size: Ty, from: &[Ty], to: &[Ty]) -> Option<Linear> {
+    let (constant, terms) = types.size_parts(size)?;
+    let mut form = Linear::constant(constant);
+    for (p, k) in terms {
+        let part = match from.iter().position(|&q| q == p) {
+            Some(i) => size_form(types, *to.get(i)?)?,
+            None => Linear::var(Var::Size(p)),
+        };
+        form = form.add(&part.scale(i64::try_from(k).ok()?)?)?;
+    }
+    Some(form)
+}
+
+/// Whether the facts prove `form ≥ 0`.
+pub fn at_least_zero(facts: &[Fact], form: &Linear) -> bool {
+    match form.as_constant() {
+        Some(c) => c >= 0,
+        None => below(facts, &Linear::constant(-1), form),
+    }
+}
+
+/// The fact `form ≥ 0`, as a function knows of the sizes its signature subtracts in.
+pub fn assume_at_least_zero(form: &Linear) -> Option<Fact> {
+    Some(Fact::NonPositive(Linear::constant(0).sub(form)?))
 }
 
 /// The linear form of an integer expression, if it has one.

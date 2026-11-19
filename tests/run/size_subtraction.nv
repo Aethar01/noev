@@ -1,0 +1,36 @@
+// Subtraction in sizes (spec/types.md §6): `N - 1` in a signature is a requirement that
+// `N - 1 ≥ 0`, which each call proves (N024) and the function itself knows.
+
+// The top qubit split off: an array one shorter, and the qubit.
+fn split<const N: Int>(r: [Qubit; N]) -> ([Qubit; N - 1], Qubit) {
+    let rest: [Qubit; N - 1] = [|0>; N - 1]
+    for i in 0..N - 1 {
+        ctrl r[i] { rest[i].x() }
+    }
+    let top = |0>
+    ctrl r[N - 1] { top.x() }
+    mv r.measure()
+    (mv rest, mv top)
+}
+
+fn shorter<const N: Int>(r: ref [Qubit; N - 1]) -> Int { N }
+
+// Its own `N - 2` proves the `N - 1` each `split` needs.
+fn twice_split<const N: Int>(r: [Qubit; N]) -> [Qubit; N - 2] {
+    let (a, x) = split(mv r)
+    let (b, y) = split(mv a)
+    mv x.measure()
+    mv y.measure()
+    mv b
+}
+
+fn main() {
+    let r: [Qubit; 4] = |1011>
+    let (rest, top) = split(mv r)
+    print(shorter(ref rest))
+    print(mv top.measure())
+    print(mv rest.measure())
+    let s: [Qubit; 3] = |110>
+    let t = twice_split(mv s)
+    print(mv t.measure())
+}

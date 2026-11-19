@@ -837,6 +837,15 @@ impl Owner<'_> {
         for local in params {
             self.declare(local, false);
         }
+        // The sizes its signature subtracts in are at least 0: each call proves it (N024).
+        for size in self.size_requirements(f) {
+            if let Some(fact) = facts::size_form(&self.typed.types, size)
+                .as_ref()
+                .and_then(facts::assume_at_least_zero)
+            {
+                self.facts.push(fact);
+            }
+        }
         if info.sig.reversible == Reversible::Yes {
             self.reversible.push(self.order);
         }
@@ -995,6 +1004,7 @@ impl Owner<'_> {
                 if self.typed.callees[place.index()].is_some() =>
             {
                 self.callee_rules(self.typed.callees[place.index()], stmt.span);
+                self.check_size_requirements(place, stmt.span);
                 let mut carried = self.expr(value, Use::Value);
                 carried.extend(self.receiver(place, place));
                 self.release(&carried);
@@ -1203,6 +1213,23 @@ impl Owner<'_> {
             ExprKind::ArrayRepeat { value, count } => {
                 self.expr(value, Use::Value);
                 self.expr(count, Use::Read);
+                // `[|0>; N - 1]` needs `N - 1 ≥ 0`.
+                if let TyKind::SizedArray(_, len) = *self.typed.types.kind(self.typed.ty(id))
+                    && let Some(form) = facts::size_form(&self.typed.types, len)
+                    && form.as_constant().is_none()
+                    && !facts::at_least_zero(&self.facts, &form)
+                    && matches!(self.typed.types.kind(len), TyKind::SizeSum { constant, .. } if *constant < 0)
+                {
+                    let shown = self.typed.types.display(len, self.ast);
+                    self.error(
+                        "N024",
+                        self.ast.expr(count).span,
+                        format!("cannot prove `{shown}` is at least 0"),
+                    )
+                    .help = Some(format!(
+                        "`assert 0 <= {shown}` first, or take a larger size as the parameter"
+                    ));
+                }
                 self.discarded(id, use_);
                 Vec::new()
             }
@@ -2021,6 +2048,7 @@ impl Owner<'_> {
         let span = self.ast.expr(id).span;
         let callee = self.typed.callees[id.index()];
         self.callee_rules(callee, span);
+        self.check_size_requirements(id, span);
         let mut receiver_carried = Vec::new();
         if let Some(receiver) = receiver {
             receiver_carried = self.receiver(id, receiver);
@@ -2051,6 +2079,61 @@ impl Owner<'_> {
             self.discarded(id, use_);
         }
         carried
+    }
+
+    /// The sizes `f`'s signature subtracts in (`N - 1`), each of which must be at least 0.
+    fn size_requirements(&self, f: FnId) -> Vec<Ty> {
+        let info = &self.typed.fns[f.index()];
+        let mut found = Vec::new();
+        // Only a size parameter can be subtracted from.
+        if info.generics.is_empty() {
+            return found;
+        }
+        let sig = &info.sig;
+        for &ty in sig.params.iter().chain([&sig.ret]) {
+            self.typed.types.size_requirements(ty, &mut found);
+        }
+        found
+    }
+
+    /// N024: the sizes a call's callee subtracts in must be proven at least 0, from the
+    /// sizes given and the facts here.
+    fn check_size_requirements(&mut self, call: ExprId, span: Span) {
+        let Some(Callee::Fn(f)) = self.typed.callees[call.index()] else {
+            return;
+        };
+        let required = self.size_requirements(f);
+        if required.is_empty() {
+            return;
+        }
+        let types = &self.typed.types;
+        let generics = &self.typed.fns[f.index()].generics;
+        let given = self
+            .typed
+            .type_args
+            .get(&call)
+            .map_or(&[][..], Vec::as_slice);
+        for size in required {
+            let Some(form) = facts::size_form_in(types, size, generics, given) else {
+                continue;
+            };
+            if facts::at_least_zero(&self.facts, &form) {
+                continue;
+            }
+            let name = self.ast.name(self.ast.function(f).name).to_string();
+            let shown = types.display(size, self.ast);
+            let (message, help) = match form.as_constant() {
+                Some(value) => (
+                    format!("`{name}` needs `{shown}` to be at least 0, but here it is {value}"),
+                    "give it larger sizes",
+                ),
+                None => (
+                    format!("`{name}` needs `{shown}` to be at least 0, which is not proven here"),
+                    "prove it first with `assert`, as in `assert 1 <= N`, or say it in this function's signature",
+                ),
+            };
+            self.error("N024", span, message).help = Some(help.into());
+        }
     }
 
     /// N013 and N019 for what is called.

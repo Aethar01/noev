@@ -337,7 +337,7 @@ where it matters: any place a linear value changes hands has an explicit `mv`.
 
 Status: **Implemented**: type parameters of functions, structs and enums, bounds (`Copy` and
 traits) written or inferred, inference of type arguments, `::<…>`, traits with and without
-type and size parameters, operator traits (`std::ops`), sums of sizes (`N + 1`), associated types (with `Copy` as their only bound), `impl`s (generic ones too) and monomorphisation, `Trait::f(x)`, `Measure`
+type and size parameters, operator traits (`std::ops`), arithmetic in sizes (`N + 1`, `N - 1`), associated types (with `Copy` as their only bound), `impl`s (generic ones too) and monomorphisation, `Trait::f(x)`, `Measure`
 (for qubits, and tuples and arrays of measurable types), and size parameters. The syntax is
 in [grammar.md](grammar.md) §2.
 
@@ -367,9 +367,12 @@ struct Pair<T, U> {
 - A size can be computed from size parameters and numbers with `+`, and `*` with a number
   on one side: `[Qubit; N + 1]`, `[Bit; 2 * N]`, `[Int; N + M]`. As a type argument it goes in
   braces, so its `+` is not read as part of a type: `Reg<{N + 1}>`. Sizes are compared after
-  normalising, so `1 + N` and `N + 1` are the same, as are `N + N` and `2 * N`. Subtraction
-  is not allowed yet, since `N - 1` could be negative: take the larger size as the
-  parameter.
+  normalising, so `1 + N` and `N + 1` are the same, as are `N + N` and `2 * N`.
+- A size can subtract a number, or sizes it adds: `[Qubit; N - 1]`, `N + M - M`, but not
+  `N - M`. Such a size must be at least 0: a signature that has one states it as a
+  requirement, which the function may assume and each call must prove from the sizes it
+  gives and what is known where it is, such as an `assert` (N024,
+  [ownership.md](ownership.md) §10).
 - A call infers a size parameter from a sum when it is the only one unknown: given
   `[Qubit; 5]` for `[Qubit; N + 1]`, `N` is 4; given `[Bit; 6]` for `[Bit; 2 * N]`, `N` is 3.
   When none fits (`[Bit; 5]` for `2 * N`), the types do not match.
@@ -580,7 +583,8 @@ there; a `rev` one cannot measure, so it keeps a run a circuit.)
 
 ### Not yet
 
-Subtraction and other arithmetic in sizes beyond `+` and `*` by a number; `From` beyond the
+Arithmetic in sizes beyond `+`, `*` by a number and subtracting what is added (`N - M`,
+`N * M`, `N / 2`); `From` beyond the
 built-in conversions; `impl Trait` arguments;
 closures; the quantum interfaces `Oracle`, `Ansatz` and `Observable` in the standard library.
 Defaults for trait parameters (`Add<Rhs = Self>`),

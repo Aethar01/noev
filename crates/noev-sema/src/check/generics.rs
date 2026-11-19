@@ -213,9 +213,20 @@ fn arithmetic_in_sizes() {
         .map(String::as_str),
         Some("mismatched types: expected `ref [Int; 2 * N]`, found `ref [Int; 5]`")
     );
+    // Subtraction takes away a number, or terms the left side has.
+    ok(
+        "fn f<const N: Int>(r: [Int; N + 1 - 1]) -> [Int; N] { r }\n\
+        fn g<const N: Int, const M: Int>(r: [Int; N + M - M]) -> [Int; N] { r }\n\
+        fn h<const N: Int>(r: ref [Int; N - 1]) -> Int { N }\n\
+        fn k(a: [Int; 4]) -> Int { h(ref a) }",
+    );
     assert_eq!(
-        errors("fn f<const N: Int>(r: [Int; N - 1]) {}"),
-        ["subtracting sizes is not supported yet"]
+        errors("fn f<const N: Int, const M: Int>(r: [Int; N - M]) {}"),
+        ["a size can only subtract a number, or sizes it adds"]
+    );
+    assert_eq!(
+        errors("fn f(r: [Int; 1 - 2]) {}"),
+        ["this size is negative"]
     );
     assert_eq!(
         errors("fn f<const N: Int, const M: Int>(r: [Int; N * M]) {}"),
