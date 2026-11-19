@@ -1012,6 +1012,16 @@ impl Parser<'_> {
                 span: start,
             });
         }
+        // `Reg<{N + 1}>`: a size computed from size parameters, in braces so its `+` is not
+        // read as part of the type.
+        if self.eat(TokenKind::LBrace) {
+            let expr = self.expr();
+            self.expect(TokenKind::RBrace, "`}`");
+            return self.ast.push_type(TypeExpr {
+                kind: TypeKind::SizeExpr(expr),
+                span: start.to(self.prev_span()),
+            });
+        }
         self.ty()
     }
 
@@ -1086,10 +1096,14 @@ impl Parser<'_> {
                 let elem = self.ty();
                 self.expect(Semi, "`;` and the array's length");
                 let len_span = self.span();
-                let len = if self.eat(Int) {
+                let simple = self.nth(1).kind == RBracket;
+                let len = if simple && self.eat(Int) {
                     Len::Int(self.int_value(len_span).unwrap_or(0))
-                } else if self.at(Ident) {
+                } else if simple && self.at(Ident) {
                     Len::Param(self.name("a size").0)
+                } else if matches!(self.kind(), Int | Ident | LParen) {
+                    // `N + 1`, `2 * N`: the checker reads it as a size.
+                    Len::Expr(self.expr())
                 } else {
                     self.expected("the array's length");
                     Len::Int(0)

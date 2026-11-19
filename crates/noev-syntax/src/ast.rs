@@ -1211,15 +1211,19 @@ pub enum TypeKind {
     },
     /// A size given as a type argument, as in `Register<8>`.
     Size(u64),
+    /// A size computed from size parameters, as a type argument: `Register<{N + 1}>`.
+    SizeExpr(ExprId),
 }
 
-/// An array's length: a number, or a size parameter.
+/// An array's length: a number, a size parameter, or a sum of them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Len {
     /// A fixed length.
     Int(u64),
     /// A size parameter: `N` in `[Qubit; N]`.
     Param(Symbol),
+    /// A size computed from size parameters: `N + 1` in `[Qubit; N + 1]`.
+    Expr(ExprId),
 }
 
 /// A top-level item and where it is.

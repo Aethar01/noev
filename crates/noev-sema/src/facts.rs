@@ -10,7 +10,7 @@
 use noev_syntax::ast::{Ast, BinaryOp, ExprId, ExprKind, UnaryOp};
 
 use crate::check::{LocalId, Res, Typed};
-use crate::ty::Ty;
+use crate::ty::{Ty, Types};
 
 /// A variable of a linear form. Sizes sort first, so forms read `N - 1 - i`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -112,9 +112,15 @@ pub fn constant_form(value: i64) -> Linear {
     Linear::constant(value)
 }
 
-/// The form of a size parameter.
-pub fn size_form(size: Ty) -> Linear {
-    Linear::var(Var::Size(size))
+/// The form of a size: a size parameter, or a sum of them (`N + 1`). `None` if it does not
+/// fit.
+pub fn size_form(types: &Types, size: Ty) -> Option<Linear> {
+    let (constant, terms) = types.size_parts(size)?;
+    let mut form = Linear::constant(i64::try_from(constant).ok()?);
+    for (p, k) in terms {
+        form = form.add(&Linear::var(Var::Size(p)).scale(i64::try_from(k).ok()?)?)?;
+    }
+    Some(form)
 }
 
 /// The linear form of an integer expression, if it has one.
@@ -274,6 +280,12 @@ impl Bounds {
         };
         for i in 0..n {
             bounds.dist[i * n + i] = Some(0);
+        }
+        // A size is never negative: `0 - N ≤ 0`.
+        for (i, &v) in bounds.nodes.iter().enumerate() {
+            if matches!(v, Var::Size(_)) {
+                bounds.dist[(i + 1) * n] = Some(0);
+            }
         }
         for fact in facts {
             let Fact::NonPositive(f) = fact else { continue };

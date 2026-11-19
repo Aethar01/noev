@@ -449,7 +449,8 @@ and the index's range follows from its linear form by interval arithmetic: with 
 containing qubits) must be proven in range at compile time; otherwise it is N018. In an
 array of length `N`, a size parameter, an index is in range when the facts prove it at
 least 0 and less than `N`, as differences: `for i in 0..N - 1` proves `i + 1 < N`, and
-`r[0]` needs `assert 0 < N`, since `N` can be 0. Indexing a
+`r[0]` needs `assert 0 < N`, since `N` can be 0. A size is never negative, and a length that
+is a sum of sizes is used as its sum: in `[Qubit; N + 1]`, `r[N]` is in range. Indexing a
 purely classical array that cannot be proven in range gets a runtime check instead (see
 [types.md](types.md) §2).
 

@@ -124,7 +124,9 @@ module.exports = grammar({
     where_predicate: ($) =>
       seq(field('name', alias($.identifier, $.type_identifier)), ':', $.bounds),
 
-    _type_argument: ($) => choice($._type, $.integer),
+    _type_argument: ($) => choice($._type, $.integer, $.size_expression),
+    // `Reg<{N + 1}>`: a size computed from size parameters.
+    size_expression: ($) => seq('{', $._expression, '}'),
 
     // `type Byte = [Bit; 8]`.
     type_item: ($) =>
@@ -262,7 +264,8 @@ module.exports = grammar({
 
     tuple_type: ($) => seq('(', $._type, ',', sepBy(',', $._type), ')'),
 
-    array_type: ($) => seq('[', $._type, ';', choice($.integer, $.identifier), ']'),
+    // The length: a number, a size parameter, or a sum of them (`N + 1`).
+    array_type: ($) => seq('[', $._type, ';', $._expression, ']'),
 
     // Statements
 

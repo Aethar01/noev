@@ -28,6 +28,11 @@ before 1.0.
 - Operator traits: `+`, `-`, `*` and unary `-` on a program's own types call `std::ops`'s
   `Add`, `Sub`, `Mul` and `Neg`, picked by the right side's type, so `v * 2` and `v * w` can
   differ. Sides holding qubits are moved with `mv`, as arguments are.
+- Arithmetic in sizes: `[Qubit; N + 1]`, `[Bit; 2 * N]` and `Reg<{N + 1}>`, compared after
+  normalising and solved by calls (`[Qubit; 5]` for `[Qubit; N + 1]` makes `N` 4), so a
+  quantum integer can be a library type (`tests/run/qint.nv`). A call also infers a parameter
+  that only a bound's associated type fixes (`U` in `T: Add<T, Output = U>`), and index
+  proofs know a size is never negative.
 - Being a circuit is decided across modules and packages by the compiler, as within one;
   only reversibility needs a declaration (`rev fn`) to cross a module.
 - Backends are libraries implementing `std::backend::Backend`, in Noev, Rust or C. Every

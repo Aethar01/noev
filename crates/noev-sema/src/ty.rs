@@ -78,6 +78,16 @@ pub enum TyKind {
     SizedArray(Ty, Ty),
     /// A size given as a type argument: the `4` of `Reg<4>`.
     Size(u64),
+    /// A size computed from size parameters, `constant + k·N + …`, such as the `N + 1` of
+    /// `[Qubit; N + 1]` (`spec/types.md` §6). Made only by [`Types::size_sum`], so it has at
+    /// least one term and is not a parameter alone, its terms are sorted and their factors
+    /// positive, and equal sums are the same type.
+    SizeSum {
+        /// The constant.
+        constant: u64,
+        /// Each size parameter, with its factor.
+        terms: Box<[(Ty, u64)]>,
+    },
     /// `Distribution<T>`.
     Distribution(Ty),
     /// A struct.
@@ -425,13 +435,64 @@ impl Types {
         self.intern(TyKind::Param(id))
     }
 
-    /// Whether `ty` is a size: a size parameter, or a size given as an argument.
+    /// Whether `ty` is a size: a size parameter, a size given as an argument, or a sum of
+    /// them.
     pub fn is_size(&self, ty: Ty) -> bool {
         match *self.kind(ty) {
-            TyKind::Size(_) => true,
+            TyKind::Size(_) | TyKind::SizeSum { .. } => true,
             TyKind::Param(p) => self.params[p.index()].size,
             _ => false,
         }
+    }
+
+    /// A size as `constant + Σ k·N`: `None` if `ty` is not a size.
+    pub fn size_parts(&self, ty: Ty) -> Option<(u64, Vec<(Ty, u64)>)> {
+        match self.kind(ty) {
+            &TyKind::Size(n) => Some((n, Vec::new())),
+            TyKind::Param(p) if self.params[p.index()].size => Some((0, vec![(ty, 1)])),
+            TyKind::SizeSum { constant, terms } => Some((*constant, terms.to_vec())),
+            _ => None,
+        }
+    }
+
+    /// The size `constant + Σ k·N`, normalised: a fixed size without terms, the parameter
+    /// itself for `1·N`, otherwise a [`TyKind::SizeSum`]. `None` if it overflows.
+    pub fn size_sum(&mut self, constant: u64, mut terms: Vec<(Ty, u64)>) -> Option<Ty> {
+        terms.sort_unstable_by_key(|&(p, _)| p);
+        let mut merged: Vec<(Ty, u64)> = Vec::with_capacity(terms.len());
+        for (p, k) in terms {
+            match merged.last_mut() {
+                Some((q, j)) if *q == p => *j = j.checked_add(k)?,
+                _ => merged.push((p, k)),
+            }
+        }
+        merged.retain(|&(_, k)| k != 0);
+        Some(match merged[..] {
+            [] => self.intern(TyKind::Size(constant)),
+            [(p, 1)] if constant == 0 => p,
+            _ => self.intern(TyKind::SizeSum {
+                constant,
+                terms: merged.into(),
+            }),
+        })
+    }
+
+    /// `a + b` for sizes; `None` if either is not a size or it overflows.
+    pub fn size_add(&mut self, a: Ty, b: Ty) -> Option<Ty> {
+        let (c, mut terms) = self.size_parts(a)?;
+        let (d, more) = self.size_parts(b)?;
+        terms.extend(more);
+        self.size_sum(c.checked_add(d)?, terms)
+    }
+
+    /// `k * a` for a size `a`; `None` if it is not a size or it overflows.
+    pub fn size_scale(&mut self, k: u64, a: Ty) -> Option<Ty> {
+        let (c, terms) = self.size_parts(a)?;
+        let terms = terms
+            .into_iter()
+            .map(|(p, j)| Some((p, j.checked_mul(k)?)))
+            .collect::<Option<Vec<_>>>()?;
+        self.size_sum(c.checked_mul(k)?, terms)
     }
 
     /// `[elem; len]` for a size `len`: a fixed length, or a size parameter.
@@ -545,6 +606,18 @@ impl Types {
                 let elem = self.subst(elem, from, to);
                 let len = self.subst(len, from, to);
                 self.sized_array(elem, len)
+            }
+            TyKind::SizeSum { constant, terms } => {
+                let mut sum = self.intern(TyKind::Size(constant));
+                for &(p, k) in terms.iter() {
+                    let p = self.subst(p, from, to);
+                    let Some(next) = self.size_scale(k, p).and_then(|t| self.size_add(sum, t))
+                    else {
+                        return Ty::ERROR;
+                    };
+                    sum = next;
+                }
+                sum
             }
             TyKind::Distribution(elem) => {
                 let elem = self.subst(elem, from, to);
@@ -730,7 +803,7 @@ impl Types {
             }
             TyKind::Tuple(elems) => elems.iter().any(|&t| self.has_params(t)),
             TyKind::Array(elem, _) | TyKind::Distribution(elem) => self.has_params(*elem),
-            TyKind::SizedArray(..) => true,
+            TyKind::SizedArray(..) | TyKind::SizeSum { .. } => true,
             TyKind::Ref { inner, .. } => self.has_params(*inner),
             TyKind::Struct(id) => self.structs[id.index()]
                 .args
@@ -788,6 +861,11 @@ impl Types {
             &TyKind::SizedArray(elem, len) => {
                 self.collect_params(elem, found);
                 self.collect_params(len, found);
+            }
+            TyKind::SizeSum { terms, .. } => {
+                for &(p, _) in terms.iter() {
+                    self.collect_params(p, found);
+                }
             }
             &TyKind::Ref { inner, .. } => self.collect_params(inner, found),
             TyKind::Assoc { base, args, .. } => {
@@ -972,6 +1050,19 @@ impl Types {
                 )
             }
             TyKind::Size(n) => n.to_string(),
+            TyKind::SizeSum { constant, terms } => {
+                let mut parts: Vec<String> = terms
+                    .iter()
+                    .map(|&(p, k)| match k {
+                        1 => self.display(p, ast),
+                        _ => format!("{k} * {}", self.display(p, ast)),
+                    })
+                    .collect();
+                if *constant != 0 {
+                    parts.push(constant.to_string());
+                }
+                parts.join(" + ")
+            }
             TyKind::Distribution(elem) => format!("Distribution<{}>", self.display(*elem, ast)),
             TyKind::Struct(id) => {
                 let def = &self.structs[id.index()];

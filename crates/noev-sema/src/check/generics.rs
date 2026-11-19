@@ -176,3 +176,53 @@ fn the_type_expected_tells_type_arguments() {
     ok("fn none<T>() -> Option<T> { None }\nfn f() -> Option<Int> { none() }");
     ok("fn none<T>() -> Option<T> { None }\nfn f() { let x: Option<Bit> = none() }");
 }
+
+/// Sizes can be sums of size parameters and numbers, compared after normalising, and a call
+/// solves the one parameter a sum leaves unknown.
+#[test]
+fn arithmetic_in_sizes() {
+    let widen = "fn widen<const N: Int>(r: [Qubit; N]) -> [Qubit; N + 1] { mv r.measure()\n [|0>; N + 1] }\n";
+    ok(&format!(
+        "{widen}fn f(r: [Qubit; 3]) -> [Qubit; 4] {{ widen(mv r) }}"
+    ));
+    // `1 + N` and `N + 1` are the same size, as are `2 * N` and `N + N`.
+    ok(
+        "fn f<const N: Int>(r: [Int; 1 + N]) -> [Int; N + 1] { r }\n\
+        fn g<const N: Int>(r: [Int; N + N]) -> [Int; 2 * N] { r }",
+    );
+    // Solved from an argument: `N + 1` given 5 is 4, `2 * N` given 6 is 3.
+    ok("fn f<const N: Int>(r: ref [Int; N + 1]) -> Int { N }\n\
+        fn g<const N: Int>(r: ref [Int; 2 * N]) -> Int { N }\n\
+        fn h(a: [Int; 5], b: [Int; 6]) -> Int { f(ref a) + g(ref b) }");
+    ok("struct R<const N: Int> { v: [Int; N] }\n\
+        fn f<const N: Int>(r: R<N>) -> R<{N + 1}> { R { v: [0; N + 1] } }\n\
+        fn g(r: R<2>) -> R<3> { f(r) }");
+    assert_eq!(
+        errors(&format!(
+            "{widen}fn f(r: [Qubit; 3]) -> [Qubit; 3] {{ widen(mv r) }}"
+        )),
+        ["mismatched types: expected `[Qubit; 3]`, found `[Qubit; 4]`"]
+    );
+    // No `N` makes `2 * N` odd.
+    assert_eq!(
+        errors(
+            "fn g<const N: Int>(r: ref [Int; 2 * N]) -> Int { N }\n\
+                fn h(b: [Int; 5]) -> Int { g(ref b) }"
+        )
+        .first()
+        .map(String::as_str),
+        Some("mismatched types: expected `ref [Int; 2 * N]`, found `ref [Int; 5]`")
+    );
+    assert_eq!(
+        errors("fn f<const N: Int>(r: [Int; N - 1]) {}"),
+        ["subtracting sizes is not supported yet"]
+    );
+    assert_eq!(
+        errors("fn f<const N: Int, const M: Int>(r: [Int; N * M]) {}"),
+        ["sizes can only be multiplied by a number"]
+    );
+    assert_eq!(
+        errors("fn f<const N: Int>(r: [Int; N + K]) {}"),
+        ["cannot find the size `K`; declare it with `const K: Int`"]
+    );
+}

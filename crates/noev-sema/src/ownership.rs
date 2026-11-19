@@ -2279,7 +2279,8 @@ impl Owner<'_> {
         };
         let below = match (size, &form) {
             (None, _) => hi.is_some_and(|hi| hi < len),
-            (Some(size), Some(form)) => facts::below(&self.facts, form, &facts::size_form(size)),
+            (Some(size), Some(form)) => facts::size_form(&self.typed.types, size)
+                .is_some_and(|size| facts::below(&self.facts, form, &size)),
             (Some(_), None) => false,
         };
         // At least zero: by its interval, or, against a size, by its difference (`N - 1 - i`).

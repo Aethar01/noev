@@ -1764,6 +1764,7 @@ impl<'a> Checker<'a> {
         let ast = self.ast;
         match ast.ty(id).kind {
             TypeKind::Size(n) => self.t.types.intern(TyKind::Size(n)),
+            TypeKind::SizeExpr(e) => self.size_expr(e).unwrap_or(Ty::ERROR),
             TypeKind::Path(segments)
                 if let [name] = *ast.list(segments)
                     && let Some(ty) = self.size_param(name) =>
@@ -1775,6 +1776,79 @@ impl<'a> Checker<'a> {
     }
 
     /// The size parameter `name` names here, if it names one.
+    /// The size an array's length `id` computes: numbers and size parameters joined with
+    /// `+`, and `*` with a number on one side (`spec/types.md` §6). Reports anything else.
+    fn size_expr(&mut self, id: ExprId) -> Option<Ty> {
+        let expr = *self.ast.expr(id);
+        let size = match expr.kind {
+            ExprKind::Int(n) => Some(self.t.types.intern(TyKind::Size(n))),
+            ExprKind::Name(name) => {
+                let found = match self.t.res[id.index()] {
+                    Res::Size(size) => Some(size),
+                    _ => self.size_param(name),
+                };
+                if found.is_none() {
+                    let message = format!(
+                        "cannot find the size `{0}`; declare it with `const {0}: Int`",
+                        self.name(name)
+                    );
+                    self.error(expr.span, message);
+                    return None;
+                }
+                found
+            }
+            ExprKind::Binary {
+                op: BinaryOp::Add,
+                lhs,
+                rhs,
+            } => {
+                let (a, b) = (self.size_expr(lhs)?, self.size_expr(rhs)?);
+                self.t.types.size_add(a, b)
+            }
+            ExprKind::Binary {
+                op: BinaryOp::Mul,
+                lhs,
+                rhs,
+            } => {
+                let (a, b) = (self.size_expr(lhs)?, self.size_expr(rhs)?);
+                let fixed = |t: Ty| match *self.t.types.kind(t) {
+                    TyKind::Size(k) => Some(k),
+                    _ => None,
+                };
+                match (fixed(a), fixed(b)) {
+                    (Some(k), _) => self.t.types.size_scale(k, b),
+                    (_, Some(k)) => self.t.types.size_scale(k, a),
+                    _ => {
+                        self.error(expr.span, "sizes can only be multiplied by a number")
+                            .help = Some("write `2 * N`, not `N * M`".into());
+                        return None;
+                    }
+                }
+            }
+            ExprKind::Binary {
+                op: BinaryOp::Sub, ..
+            } => {
+                self.error(expr.span, "subtracting sizes is not supported yet")
+                    .help = Some(
+                    "take the larger size as the parameter: `[Qubit; N]` and `[Qubit; N + 1]`, not `N - 1` and `N`".into(),
+                );
+                return None;
+            }
+            _ => {
+                self.error(
+                    expr.span,
+                    "the length of an array must be a number, a size parameter, or a sum of them",
+                )
+                .help = Some("such as `4`, `N`, `N + 1` or `2 * N`".into());
+                return None;
+            }
+        };
+        if size.is_none() {
+            self.error(expr.span, "this size is too large");
+        }
+        size
+    }
+
     fn size_param(&self, name: Symbol) -> Option<Ty> {
         let &(_, ty) = self.type_params.iter().rev().find(|&&(n, _)| n == name)?;
         self.t.types.is_size(ty).then_some(ty)
@@ -1826,6 +1900,10 @@ impl<'a> Checker<'a> {
                 let elem = self.resolve_type(elem);
                 match len {
                     Len::Int(len) => self.t.types.array(elem, len),
+                    Len::Expr(len) => match self.size_expr(len) {
+                        Some(len) => self.t.types.sized_array(elem, len),
+                        None => Ty::ERROR,
+                    },
                     Len::Param(name) => match self.size_param(name) {
                         Some(len) => self.t.types.sized_array(elem, len),
                         None => {
@@ -1839,7 +1917,7 @@ impl<'a> Checker<'a> {
                     },
                 }
             }
-            TypeKind::Size(_) => {
+            TypeKind::Size(_) | TypeKind::SizeExpr(_) => {
                 self.error(node.span, "a size is not a type");
                 Ty::ERROR
             }
@@ -2577,18 +2655,7 @@ impl<'a> Checker<'a> {
                 let elem_hint = expect.ty().and_then(|t| self.t.types.elem_of(t));
                 let elem = self.expr(value, elem_hint.map_or(Expect::None, Expect::Hint));
                 self.expr(count, Expect::Ty(Ty::INT));
-                let len = match ast.expr(count).kind {
-                    ExprKind::Int(n) => self.t.types.intern(TyKind::Size(n)),
-                    _ if let Res::Size(size) = self.t.res[count.index()] => size,
-                    _ => {
-                        let span = ast.expr(count).span;
-                        self.error(
-                            span,
-                            "the length of an array must be an integer literal or a size parameter",
-                        );
-                        Ty::ERROR
-                    }
-                };
+                let len = self.size_expr(count).unwrap_or(Ty::ERROR);
                 if self.t.types.linearity(elem) != crate::ty::Kind::Copyable
                     && !matches!(ast.expr(value).kind, ExprKind::Ket { .. })
                 {
@@ -3039,6 +3106,7 @@ impl<'a> Checker<'a> {
                 self.bind_param(w, f) && self.bind_param(n, m)
             }
             (TyKind::Distribution(w), TyKind::Distribution(f)) => self.bind_param(w, f),
+            (TyKind::SizeSum { .. }, _) => self.bind_size(want, found),
             (
                 TyKind::Ref {
                     mutable: a,
@@ -3060,6 +3128,55 @@ impl<'a> Checker<'a> {
                 wa.iter().zip(&fa).all(|(&w, &f)| self.bind_param(w, f))
             }
             _ => false,
+        }
+    }
+
+    /// `want`, a sum of sizes, given the size `found`: equal once the parameters already
+    /// known are put in, or solved for the one still unknown, as `N` is 4 when `[Qubit; 5]`
+    /// is given for `[Qubit; N + 1]` (`spec/types.md` §6).
+    fn bind_size(&mut self, want: Ty, found: Ty) -> bool {
+        let want = self.known(want);
+        if want == found {
+            return true;
+        }
+        let types = &self.t.types;
+        let (Some((c, terms)), Some((d, mut rest))) =
+            (types.size_parts(want), types.size_parts(found))
+        else {
+            return false;
+        };
+        let inference = self.inference.last();
+        let (unknown, known): (Vec<_>, Vec<_>) = terms
+            .into_iter()
+            .partition(|(p, _)| inference.is_some_and(|i| i.params.contains(p)));
+        let [(param, k)] = unknown[..] else {
+            return false;
+        };
+        // What is left of `found` once the constant and the known terms are taken away must
+        // be `k` times the unknown parameter.
+        let Some(mut constant) = d.checked_sub(c) else {
+            return false;
+        };
+        for (p, j) in known {
+            let Some(at) = rest.iter().position(|&(q, _)| q == p) else {
+                return false;
+            };
+            let Some(left) = rest[at].1.checked_sub(j) else {
+                return false;
+            };
+            rest[at].1 = left;
+        }
+        rest.retain(|&(_, j)| j != 0);
+        if constant % k != 0 || rest.iter().any(|&(_, j)| j % k != 0) {
+            return false;
+        }
+        constant /= k;
+        for term in &mut rest {
+            term.1 /= k;
+        }
+        match self.t.types.size_sum(constant, rest) {
+            Some(value) => self.bind_param(param, value),
+            None => false,
         }
     }
 
@@ -3100,7 +3217,14 @@ impl<'a> Checker<'a> {
 
     /// The type arguments a generic call or literal ends with: what was found, with each
     /// parameter nothing determined reported and left unknown.
-    fn settle(&mut self, params: &[Ty], found: Vec<Option<Ty>>, what: &str, span: Span) -> Vec<Ty> {
+    fn settle(
+        &mut self,
+        params: &[Ty],
+        mut found: Vec<Option<Ty>>,
+        what: &str,
+        span: Span,
+    ) -> Vec<Ty> {
+        self.found_from_bounds(params, &mut found);
         params
             .iter()
             .zip(found)
@@ -3116,6 +3240,68 @@ impl<'a> Checker<'a> {
                 })
             })
             .collect()
+    }
+
+    /// Fills in parameters that only a bound's associated type fixes: `U` in
+    /// `T: Add<T, Output = U>`, once `T` is known, is `T`'s `Output`.
+    fn found_from_bounds(&mut self, params: &[Ty], found: &mut [Option<Ty>]) {
+        if self.param_assoc.is_empty() || found.iter().all(Option::is_some) {
+            return;
+        }
+        loop {
+            let (from, to): (Vec<Ty>, Vec<Ty>) = params
+                .iter()
+                .zip(found.iter())
+                .filter_map(|(&p, f)| Some((p, (*f)?)))
+                .unzip();
+            let fixed: Vec<(Ty, TraitId, Vec<Ty>, Symbol, Ty)> = self
+                .param_assoc
+                .iter()
+                .filter(|&((p, ..), _)| from.contains(p))
+                .map(|((p, t, args, name), &want)| (*p, *t, args.clone(), *name, want))
+                .collect();
+            let mut changed = false;
+            for (p, trait_id, args, name, want) in fixed {
+                let Some(slot) = params.iter().position(|&q| q == want) else {
+                    continue;
+                };
+                if found[slot].is_some() {
+                    continue;
+                }
+                let base = self.t.types.subst(p, &from, &to);
+                let args: Vec<Ty> = args
+                    .iter()
+                    .map(|&a| self.t.types.subst(a, &from, &to))
+                    .collect();
+                // An argument still naming a parameter of this call is not known yet.
+                let types = &self.t.types;
+                if args
+                    .iter()
+                    .any(|&a| types.params_in(a).iter().any(|q| params.contains(q)))
+                {
+                    continue;
+                }
+                let copy = self.t.traits[trait_id.index()]
+                    .assoc
+                    .iter()
+                    .any(|&(n, c)| n == name && c);
+                let assoc = self.t.types.intern(TyKind::Assoc {
+                    base,
+                    trait_index: trait_id.0,
+                    args: args.into(),
+                    name,
+                    copy,
+                });
+                let ty = self.resolve_assoc(assoc);
+                if !matches!(self.t.types.kind(ty), TyKind::Assoc { .. }) {
+                    found[slot] = Some(ty);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
     }
 
     /// Reports each type argument that does not meet its parameter's bound.

@@ -245,8 +245,8 @@ type        = path [ "<" type_arg { "," type_arg } [ "," ] ">" ]   (* Int, Float
             | "(" ")"                             (* unit *)
             | "(" type "," [ type { "," type } [ "," ] ] ")"   (* tuple *)
             | "[" type ";" size "]" ;             (* array of fixed length *)
-size        = INT | IDENT ;                       (* a length, or a size parameter *)
-type_arg    = type | INT ;                        (* `Register<8>` gives a size *)
+size        = expr ;                              (* a length, a size parameter, or a sum: `N + 1` (types.md §6) *)
+type_arg    = type | INT | "{" expr "}" ;         (* `Register<8>` and `Register<{N + 1}>` give sizes *)
 ```
 
 ### Statements and blocks

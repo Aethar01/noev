@@ -1,0 +1,54 @@
+// A quantum integer defined by a program (spec/types.md §6): a register with `+` from
+// `std::ops::Add`, whose sum is one qubit wider (`QInt<{N + 1}>`). Qubit 0 is the lowest bit.
+//
+// `+` takes its operands by value, so they and the carries are measured away at the end;
+// a register in superposition would want them kept, or uncomputed with `with`/`do`.
+
+use std::ops::Add
+
+struct QInt<const N: Int> { r: [Qubit; N] }
+
+impl<const N: Int> Add<QInt<N>> for QInt<N> {
+    type Output = QInt<{N + 1}>
+
+    // A ripple-carry adder: each carry is the majority of the bits and the carry below,
+    // and each sum bit their parity.
+    fn add(mv self, rhs: QInt<N>) -> QInt<{N + 1}> {
+        let a = mv self.r
+        let b = mv rhs.r
+        let carry: [Qubit; N + 1] = [|0>; N + 1]
+        let sum: [Qubit; N + 1] = [|0>; N + 1]
+        for i in 0..N {
+            ctrl a[i], b[i] { carry[i + 1].x() }
+            ctrl a[i], carry[i] { carry[i + 1].x() }
+            ctrl b[i], carry[i] { carry[i + 1].x() }
+            ctrl a[i] { sum[i].x() }
+            ctrl b[i] { sum[i].x() }
+            ctrl carry[i] { sum[i].x() }
+        }
+        ctrl carry[N] { sum[N].x() }
+        mv a.measure()
+        mv b.measure()
+        mv carry.measure()
+        QInt { r: mv sum }
+    }
+}
+
+// The size of the result follows from the arguments': `[Qubit; N + 1]` for `N`.
+fn width<const N: Int>(x: ref QInt<N>) -> Int { N }
+
+// Any type that adds to itself, through the bound.
+fn double<T: Add<T, Output = U>, U>(a: T, b: T) -> U { mv a + mv b }
+
+fn main() {
+    let six = QInt { r: |011> }
+    let three = QInt { r: |110> }
+    let nine = mv six + mv three
+    print(width(ref nine))
+    print(mv nine.r.measure())
+
+    let five = QInt { r: |1010> }
+    let ten = double(mv five, QInt { r: |1010> })
+    print(width(ref ten))
+    print(mv ten.r.measure())
+}
