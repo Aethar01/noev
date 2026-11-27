@@ -140,3 +140,57 @@ fn main() {
     assert!(ir.contains("qasm ["), "expected qasm stmt in IR:\n{ir}");
     let _ = std::fs::remove_file(&file);
 }
+
+#[test]
+fn three_qubit_unitary_exports_to_qasm_and_qir() {
+    let file = write_temp(
+        "unitary3_export.nv",
+        r#"
+fn main() {
+    let mut ccx = [[0.0 + 0i; 8]; 8]
+    for i in 0..8 {
+        ccx[i][i] = 1.0 + 0i
+    }
+    ccx[6][6] = 0.0 + 0i
+    ccx[7][7] = 0.0 + 0i
+    ccx[6][7] = 1.0 + 0i
+    ccx[7][6] = 1.0 + 0i
+    let _ = sample 10 {
+        let r = |110>
+        r.unitary(ccx)
+        mv r.measure()
+    }
+}
+"#,
+    );
+    let qasm_out = Command::new(noev_bin())
+        .args(["export"])
+        .arg(&file)
+        .output()
+        .expect("run noev export");
+    assert!(
+        qasm_out.status.success(),
+        "noev export failed: {}",
+        String::from_utf8_lossy(&qasm_out.stderr)
+    );
+    let qasm = String::from_utf8_lossy(&qasm_out.stdout);
+    assert!(qasm.contains("qubit[3] q;"), "got:\n{qasm}");
+    assert!(
+        qasm.contains("ctrl @ x "),
+        "expected decomposed CNOTs:\n{qasm}"
+    );
+
+    let qir_out = Command::new(noev_bin())
+        .args(["build", "--emit=qir"])
+        .arg(&file)
+        .output()
+        .expect("run noev build --emit=qir");
+    assert!(
+        qir_out.status.success(),
+        "noev build --emit=qir failed: {}",
+        String::from_utf8_lossy(&qir_out.stderr)
+    );
+    let qir = String::from_utf8_lossy(&qir_out.stdout);
+    assert!(qir.contains("__quantum__qis__cnot__body"), "got:\n{qir}");
+    let _ = std::fs::remove_file(&file);
+}

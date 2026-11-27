@@ -72,6 +72,14 @@ before 1.0.
   calls for linking against external QIR runtimes), verified all 39 `tests/run/*.nv` programs
   compiled with LLVM `-O2` against the interpreter plus end-to-end C QIR shim linking, and
   added LLVM IR and `-O2` object benchmarks alongside Cranelift.
+- Larger matrix gates (`spec/core.md` §1): generalized `r.unitary(m)` to arbitrary
+  `[Qubit; N]` registers (`1 <= N <= 10`, `[[Complex; 2^N]; 2^N]`); implemented recursive
+  Quantum Shannon Decomposition (`unitary::decompose_n`: Cosine–Sine Decomposition via
+  two-stage complex Hermitian Jacobi, demultiplexing, and Walsh–Hadamard Gray-code
+  uniformly controlled rotations with CNOT cancellation, bottoming out in 2-qubit KAK) with
+  exact global phase so `adj`, `ctrl`, circuits, OpenQASM 3 export, QIR export, `ketrs`,
+  Cranelift, and LLVM all work uniformly; added 3- and 4-qubit unit/run/export tests and a
+  `unitary` decomposition benchmark.
 - Inline OpenQASM (`spec/interop.md` §4, `spec/ownership.md` §11): added the `unsafe`
   built-in `qasm("…")` for hardware-specific OpenQASM 3 statements with interpolated `{q}`
   qubit places (mut-lent, checking N002/N005/N018 and clearing `|0>`-tracking) and classical

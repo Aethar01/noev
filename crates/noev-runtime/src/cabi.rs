@@ -638,17 +638,6 @@ impl NoevRuntime {
     }
 
     fn execute_op(&mut self, op: Op) -> Result<(), RuntimeError> {
-        if op.gate == Gate::Unitary
-            && op.targets.len() == 2
-            && (!op.controls.is_empty() || matches!(self.mode, Mode::Build(_)))
-        {
-            let (first, second) = (op.targets[0], op.targets[1]);
-            for mut part in crate::unitary::decompose(&op.params, op.adjoint, first, second) {
-                part.controls.extend(&op.controls);
-                self.execute_op(part)?;
-            }
-            return Ok(());
-        }
         if op.controls.iter().any(|c| op.targets.contains(c)) {
             return Err(RuntimeError::new(
                 "a gate's target is also one of its controls",
@@ -656,11 +645,22 @@ impl NoevRuntime {
         }
         let wanted = match op.gate {
             Gate::Swap => 2,
-            Gate::Unitary => crate::unitary::size(&op.params) / 2,
+            Gate::Unitary => crate::unitary::qubits(&op.params),
             _ => 1,
         };
         if op.targets.len() != wanted {
             return Err(RuntimeError::new("a gate with the wrong number of qubits"));
+        }
+        if op.gate == Gate::Unitary
+            && (op.targets.len() >= 3
+                || (op.targets.len() == 2
+                    && (!op.controls.is_empty() || matches!(self.mode, Mode::Build(_)))))
+        {
+            for mut part in crate::unitary::decompose_n(&op.params, op.adjoint, &op.targets) {
+                part.controls.extend(&op.controls);
+                self.execute_op(part)?;
+            }
+            return Ok(());
         }
         match &mut self.mode {
             Mode::Simulate => self.session_mut()?.apply(&op).map_err(backend_error),

@@ -126,8 +126,9 @@ pub enum Gate {
     P,
     U,
     Swap,
-    /// `unitary(m)`: a one- or two-qubit gate given as a matrix of `Complex` values. Its
-    /// entries travel as the gate's parameters: real and imaginary parts, rows first.
+    /// `unitary(m)`: a gate on a `Qubit` or `[Qubit; N]` given as a `2^N × 2^N` matrix of
+    /// `Complex` values. Its entries travel as the gate's parameters: real and imaginary parts,
+    /// rows first.
     Unitary,
 }
 
@@ -334,9 +335,10 @@ pub fn method(types: &mut Types, base: Ty, name: &str) -> Option<(Builtin, Sig)>
             };
             Some((builtin, sig))
         }
-        // A two-qubit gate from its matrix.
-        TyKind::Array(Ty::QUBIT, 2) if name == "unitary" => {
-            let params = vec![matrix(types, 4)];
+        // An N-qubit gate from its 2^N × 2^N matrix (`spec/core.md` §1).
+        TyKind::Array(Ty::QUBIT, n) if name == "unitary" && (1..=10).contains(&n) => {
+            let dim = 1u64 << n;
+            let params = vec![matrix(types, dim)];
             Some((
                 Builtin::Gate(Gate::Unitary),
                 Sig::new(Some(OwnKind::Mut), params, self_mut, Yes),

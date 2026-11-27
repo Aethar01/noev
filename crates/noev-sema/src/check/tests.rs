@@ -390,10 +390,17 @@ fn amplitudes() {
 #[test]
 fn matrix_gates() {
     ok("fn f(q: mut Qubit, m: [[Complex; 2]; 2]) { q.unitary(m).h() }");
+    ok("fn f(r: mut [Qubit; 1], m: [[Complex; 2]; 2]) { r.unitary(m) }");
     ok("fn f(r: mut [Qubit; 2], m: [[Complex; 4]; 4]) { r.unitary(m) }");
+    ok("fn f(r: mut [Qubit; 3], m: [[Complex; 8]; 8]) { r.unitary(m) }");
+    ok("fn f(r: mut [Qubit; 4], m: [[Complex; 16]; 16]) { r.unitary(m) }");
     assert_eq!(
         one_error("fn f(q: mut Qubit, m: [[Complex; 4]; 4]) { q.unitary(m) }"),
         "mismatched types: expected `[[Complex; 2]; 2]`, found `[[Complex; 4]; 4]`"
+    );
+    assert_eq!(
+        one_error("fn f(r: mut [Qubit; 3], m: [[Complex; 4]; 4]) { r.unitary(m) }"),
+        "mismatched types: expected `[[Complex; 8]; 8]`, found `[[Complex; 4]; 4]`"
     );
 }
 

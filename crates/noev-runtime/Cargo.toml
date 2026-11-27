@@ -39,6 +39,10 @@ required-features = ["ketrs"]
 name = "qir"
 harness = false
 
+[[bench]]
+name = "unitary"
+harness = false
+
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }
 

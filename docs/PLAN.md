@@ -445,7 +445,7 @@ gets a compile-fail test under `tests/ui/`.
 | 12 | Python bindings               | On the Rust API, with PyO3 as in `ketrs-py`: Python optimisers driving Noev expectation values | ☑ Done |
 | 13 | C, both ways                  | `extern "C"` imports called inside `unsafe`, arrays by reference, `extern "C" struct`, `extern "C" fn` callbacks, and a `noev.h` API for C and C++ hosts (`spec/interop.md` §3); imports use native code generation | ☑ Done |
 | 14 | Inline OpenQASM               | Hardware-specific gates, inside `unsafe`                              | ☑ Done |
-| 15 | Larger matrix gates           | Gates from unitary matrices on three or more qubits, decomposed as for two | ☐ |
+| 15 | Larger matrix gates           | Gates from unitary matrices on three or more qubits, decomposed as for two | ☑ Done |
 | 16 | Standard library for backends | `Vec<T>`, string handling, `std::io`, `std::env`, `std::fs`: only what a backend written in Noev needs (`spec/std.md` §6) | ☐ |
 | 17 | Targets and backends          | The `Backend` trait and `Circuit` in `std::backend`; target descriptions for every backend, ketrs included; capability checks; `--backend` on `build` and `run`; `noev target fetch`; the plug-in C ABI for backends (`spec/runtime.md` §3–5) | ☐ |
 
