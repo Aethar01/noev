@@ -50,6 +50,11 @@ noev build [OPTIONS] [FILE]
 | `-O, --opt-level <0..3>` | Overall optimization level (`0` = none, `1` = basic, `2` = default, `3` = aggressive) |
 | `--cranelift-opt <none\|speed\|speed-and-size>` | Override Cranelift `opt_level` independently of `-O` |
 | `--llvm-opt <0\|1\|2\|3\|s\|z>` | Override LLVM optimization level independently of `-O` |
+| `--target-cpu <CPU>` | Target CPU for native code generation (e.g. `native`, `generic`, `znver4`, `apple-m3`) |
+| `--target-feature <FEATURES>` | Comma-separated target features (e.g. `+avx2,+fma`) |
+| `--cranelift-arg <KEY=VALUE>` | Forward a native setting to Cranelift (repeatable, e.g. `enable_simd=true`) |
+| `--llvm-passes <PIPELINE>` | Custom LLVM pass pipeline (overrides `default<O*>`) |
+| `--llvm-arg <ARG>` | Forward a native CLI flag to LLVM (repeatable) |
 | `--qir-runtime` | Emit QIR runtime calls (`__quantum__qis__*`, `__quantum__rt__*`) with `--codegen=llvm` |
 | `-l, --link <LIB>` | Extra C objects, static libraries, or library names to link |
 | `--backend <NAME[:DEVICE]>` | Target description for compile-time capability checks |

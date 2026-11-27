@@ -143,7 +143,7 @@ impl LlvmOpt {
 }
 
 /// Options shared by every [`CodeGenerator`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CodegenOptions {
     /// Overall optimization level (`-O0`..`-O3`).
     pub opt: OptLevel,
@@ -151,6 +151,16 @@ pub struct CodegenOptions {
     pub cranelift_opt: Option<CraneliftOpt>,
     /// Optional explicit override for LLVM (`--llvm-opt`).
     pub llvm_opt: Option<LlvmOpt>,
+    /// Target CPU name (`--target-cpu`, e.g. `"native"`, `"generic"`, `"znver4"`).
+    pub target_cpu: Option<String>,
+    /// Comma-separated target feature list (`--target-feature`, e.g. `"+avx2,+fma"`).
+    pub target_features: Option<String>,
+    /// Raw Cranelift `KEY=VALUE` settings (`--cranelift-arg`).
+    pub cranelift_args: Vec<(String, String)>,
+    /// Custom LLVM new-pass-manager pipeline (`--llvm-passes`, e.g. `"default<O3>"`).
+    pub llvm_passes: Option<String>,
+    /// Raw LLVM command-line flags (`--llvm-arg`).
+    pub llvm_args: Vec<String>,
     /// Which runtime ABI quantum operations target.
     pub runtime_abi: RuntimeAbi,
     /// Emit a native test runner `main` executing `program.tests` instead of `program.main`.
@@ -159,13 +169,13 @@ pub struct CodegenOptions {
 
 impl CodegenOptions {
     /// Effective Cranelift optimization level.
-    pub fn effective_cranelift_opt(self) -> CraneliftOpt {
+    pub fn effective_cranelift_opt(&self) -> CraneliftOpt {
         self.cranelift_opt
             .unwrap_or_else(|| CraneliftOpt::from_opt_level(self.opt))
     }
 
     /// Effective LLVM optimization level.
-    pub fn effective_llvm_opt(self) -> LlvmOpt {
+    pub fn effective_llvm_opt(&self) -> LlvmOpt {
         self.llvm_opt
             .unwrap_or_else(|| LlvmOpt::from_opt_level(self.opt))
     }
@@ -177,8 +187,11 @@ pub trait CodeGenerator: Sync {
     fn name(&self) -> &'static str;
 
     /// Compiles `program` to a native relocatable object file (`.o`) for the host machine.
-    fn emit_object(&self, program: &Program, opts: CodegenOptions)
-    -> Result<Vec<u8>, CodegenError>;
+    fn emit_object(
+        &self,
+        program: &Program,
+        opts: &CodegenOptions,
+    ) -> Result<Vec<u8>, CodegenError>;
 
     /// Compiles `program` to a standalone native executable at `output`, linking `runtime_lib`.
     fn emit_binary(
@@ -186,7 +199,7 @@ pub trait CodeGenerator: Sync {
         program: &Program,
         output: &Path,
         runtime_lib: &Path,
-        opts: CodegenOptions,
+        opts: &CodegenOptions,
     ) -> Result<(), CodegenError> {
         let obj_bytes = self.emit_object(program, opts)?;
         link_object(&obj_bytes, output, runtime_lib)
@@ -271,7 +284,7 @@ impl CodeGenerator for CraneliftCodegen {
     fn emit_object(
         &self,
         program: &Program,
-        opts: CodegenOptions,
+        opts: &CodegenOptions,
     ) -> Result<Vec<u8>, CodegenError> {
         use cranelift_codegen::settings::{self, Configurable};
         use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -291,7 +304,40 @@ impl CodeGenerator for CraneliftCodegen {
         flag_builder
             .set("is_pic", "true")
             .map_err(|e| CodegenError(e.to_string()))?;
-        let isa_builder = cranelift_native::builder().map_err(|e| CodegenError(e.to_string()))?;
+        let mut isa_builder =
+            cranelift_native::builder().map_err(|e| CodegenError(e.to_string()))?;
+        if let Some(features) = opts.target_features.as_deref() {
+            for raw in features.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                let (enable, name) = if let Some(rest) = raw.strip_prefix('+') {
+                    (true, rest)
+                } else if let Some(rest) = raw.strip_prefix('-') {
+                    (false, rest)
+                } else {
+                    (true, raw)
+                };
+                let val = if enable { "true" } else { "false" };
+                let candidate = if name.starts_with("has_") {
+                    name.to_string()
+                } else {
+                    format!("has_{name}")
+                };
+                isa_builder
+                    .set(&candidate, val)
+                    .or_else(|_| isa_builder.set(name, val))
+                    .map_err(|e| {
+                        CodegenError(format!("unknown Cranelift target feature `{raw}`: {e}"))
+                    })?;
+            }
+        }
+        for (key, value) in &opts.cranelift_args {
+            if let Err(flag_err) = flag_builder.set(key, value) {
+                isa_builder.set(key, value).map_err(|_| {
+                    CodegenError(format!(
+                        "invalid Cranelift option `{key}={value}`: {flag_err}"
+                    ))
+                })?;
+            }
+        }
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
             .map_err(|e| CodegenError(e.to_string()))?;
@@ -311,7 +357,7 @@ impl CodeGenerator for CraneliftCodegen {
 /// Convenience wrapper compiling `program` with [`CraneliftCodegen`] using default options.
 #[cfg(feature = "cranelift")]
 pub fn emit_object(program: &Program) -> Result<Vec<u8>, CodegenError> {
-    CraneliftCodegen.emit_object(program, CodegenOptions::default())
+    CraneliftCodegen.emit_object(program, &CodegenOptions::default())
 }
 
 /// Convenience wrapper compiling and linking `program` with [`CraneliftCodegen`].
@@ -321,7 +367,7 @@ pub fn emit_binary(
     output: &Path,
     runtime_lib: &Path,
 ) -> Result<(), CodegenError> {
-    CraneliftCodegen.emit_binary(program, output, runtime_lib, CodegenOptions::default())
+    CraneliftCodegen.emit_binary(program, output, runtime_lib, &CodegenOptions::default())
 }
 
 #[cfg(test)]

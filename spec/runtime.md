@@ -42,9 +42,10 @@ controls both native code generation (`noev build`, `noev test --compile`) and l
 circuit optimization on backends that support it (`noev run`, `noev test`, and compiled
 binaries via `-O` / `--opt-level` / `--circuit-opt` or `NOEV_OPT_LEVEL` / `NOEV_CIRCUIT_OPT`).
 Level `0` disables optimization; levels `1` through `3` apply progressively heavier passes
-while preserving exact program and circuit semantics. Each layer can also be tuned
-independently with `--circuit-opt <0..3>`, `--cranelift-opt <none|speed|speed-and-size>`,
-and `--llvm-opt <0|1|2|3|s|z>`.
+while preserving exact program and circuit semantics. Each layer can also be tuned independently with `--circuit-opt <0..3>`,
+`--cranelift-opt <none|speed|speed-and-size>`, and `--llvm-opt <0|1|2|3|s|z>`, and native
+backend flags can be passed through directly with `--target-cpu`, `--target-feature`,
+`--cranelift-arg KEY=VALUE`, `--llvm-passes`, and `--llvm-arg`.
 
 Classical code becomes ordinary machine code. Quantum operations become calls to the
 runtime (§4). A code generator may inline runtime calls it knows, but must keep their

@@ -105,7 +105,7 @@ enum Command {
         opt_level: u8,
 
         /// Override quantum circuit optimization level independently of `-O`
-        #[arg(long = "circuit-opt", value_name = "0..3", value_parser = clap::value_parser!(u8).range(0..=3))]
+        #[arg(long = "circuit-opt", value_name = "0..3", value_parser = clap::value_parser!(u8).range(0..=3), help_heading = "Optimization")]
         circuit_opt: Option<u8>,
 
         /// Save every circuit the run sends to the backend as OpenQASM 3, one file per job,
@@ -150,7 +150,7 @@ enum Command {
         opt: OptOptions,
 
         /// Override quantum circuit optimization level independently of `-O`
-        #[arg(long = "circuit-opt", value_name = "0..3", value_parser = clap::value_parser!(u8).range(0..=3))]
+        #[arg(long = "circuit-opt", value_name = "0..3", value_parser = clap::value_parser!(u8).range(0..=3), help_heading = "Optimization")]
         circuit_opt: Option<u8>,
 
         /// Print test standard output as it runs instead of hiding output for passing tests
@@ -235,19 +235,78 @@ enum MessageFormat {
     Short,
 }
 
-#[derive(Clone, Copy, clap::Args)]
+#[derive(Clone, clap::Args)]
 struct OptOptions {
     /// Overall optimization level (`0` = none, `1` = light, `2` = default, `3` = aggressive)
-    #[arg(short = 'O', long = "opt-level", value_name = "0..3", value_parser = clap::value_parser!(u8).range(0..=3), default_value_t = 2)]
+    #[arg(
+        short = 'O',
+        long = "opt-level",
+        value_name = "0..3",
+        value_parser = clap::value_parser!(u8).range(0..=3),
+        default_value_t = 2,
+        help_heading = "Optimization"
+    )]
     opt_level: u8,
 
     /// Override Cranelift `opt_level` independently of `-O`
-    #[arg(long = "cranelift-opt", value_enum)]
+    #[arg(long = "cranelift-opt", value_enum, help_heading = "Optimization")]
     cranelift_opt: Option<CraneliftOptChoice>,
 
     /// Override LLVM optimization level independently of `-O`
-    #[arg(long = "llvm-opt", value_enum)]
+    #[arg(long = "llvm-opt", value_enum, help_heading = "Optimization")]
     llvm_opt: Option<LlvmOptChoice>,
+
+    /// Target CPU for native code generation (e.g. `native`, `generic`, `znver4`, `apple-m3`)
+    #[arg(
+        long = "target-cpu",
+        value_name = "CPU",
+        help_heading = "Codegen Options"
+    )]
+    target_cpu: Option<String>,
+
+    /// Comma-separated target feature flags (e.g. `+avx2,+fma`)
+    #[arg(
+        long = "target-feature",
+        value_name = "FEATURES",
+        help_heading = "Codegen Options"
+    )]
+    target_feature: Option<String>,
+
+    /// Forward a native `KEY=VALUE` setting to Cranelift (repeatable, e.g. `enable_simd=true`)
+    #[arg(
+        long = "cranelift-arg",
+        value_name = "KEY=VALUE",
+        value_parser = parse_key_val,
+        help_heading = "Codegen Options"
+    )]
+    cranelift_args: Vec<(String, String)>,
+
+    /// Custom LLVM new-pass-manager pipeline (overrides `default<O*>`)
+    #[arg(
+        long = "llvm-passes",
+        value_name = "PIPELINE",
+        help_heading = "Codegen Options"
+    )]
+    llvm_passes: Option<String>,
+
+    /// Forward a native CLI flag to LLVM (repeatable)
+    #[arg(
+        long = "llvm-arg",
+        value_name = "ARG",
+        allow_hyphen_values = true,
+        help_heading = "Codegen Options"
+    )]
+    llvm_args: Vec<String>,
+}
+
+fn parse_key_val(s: &str) -> Result<(String, String), String> {
+    let Some((k, v)) = s.split_once('=') else {
+        return Err(format!("expected `KEY=VALUE`, got `{s}`"));
+    };
+    if k.is_empty() {
+        return Err(format!("empty setting key in `{s}`"));
+    }
+    Ok((k.to_string(), v.to_string()))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -344,7 +403,7 @@ fn main() -> ExitCode {
             &file,
             emit,
             codegen,
-            opt,
+            &opt,
             qir_runtime,
             &link,
             backend.as_deref(),
@@ -387,7 +446,7 @@ fn main() -> ExitCode {
             backend.as_deref(),
             compile || codegen.is_some(),
             codegen,
-            opt,
+            &opt,
             circuit_opt.unwrap_or(opt.opt_level),
             nocapture,
             messages.message_format,
@@ -620,7 +679,7 @@ fn build(
     file: &Path,
     emit: Emit,
     codegen: Option<CodegenChoice>,
-    opt: OptOptions,
+    opt: &OptOptions,
     qir_runtime: bool,
     link: &[String],
     backend: Option<&str>,
@@ -811,7 +870,7 @@ fn select_codegen(
 
 #[cfg(any(feature = "cranelift", feature = "llvm"))]
 fn codegen_options(
-    opt: OptOptions,
+    opt: &OptOptions,
     qir_runtime: bool,
     test_harness: bool,
 ) -> noev_codegen::CodegenOptions {
@@ -830,6 +889,11 @@ fn codegen_options(
             LlvmOptChoice::Os => noev_codegen::LlvmOpt::Os,
             LlvmOptChoice::Oz => noev_codegen::LlvmOpt::Oz,
         }),
+        target_cpu: opt.target_cpu.clone(),
+        target_features: opt.target_feature.clone(),
+        cranelift_args: opt.cranelift_args.clone(),
+        llvm_passes: opt.llvm_passes.clone(),
+        llvm_args: opt.llvm_args.clone(),
         runtime_abi: if qir_runtime {
             noev_codegen::RuntimeAbi::Qir
         } else {
@@ -842,12 +906,12 @@ fn codegen_options(
 #[cfg(feature = "llvm")]
 fn build_llvm_ir(
     program: &noev_ir::Program,
-    opt: OptOptions,
+    opt: &OptOptions,
     qir_runtime: bool,
     output: Option<&Path>,
 ) -> ExitCode {
     let opts = codegen_options(opt, qir_runtime, false);
-    match noev_codegen::llvm::LlvmCodegen.emit_llvm_ir(program, opts) {
+    match noev_codegen::llvm::LlvmCodegen.emit_llvm_ir(program, &opts) {
         Ok(ir) => match output {
             Some(path) => match std::fs::write(path, ir) {
                 Ok(()) => ExitCode::SUCCESS,
@@ -871,7 +935,7 @@ fn build_llvm_ir(
 #[cfg(not(feature = "llvm"))]
 fn build_llvm_ir(
     _program: &noev_ir::Program,
-    _opt: OptOptions,
+    _opt: &OptOptions,
     _qir_runtime: bool,
     _output: Option<&Path>,
 ) -> ExitCode {
@@ -884,7 +948,7 @@ fn build_object(
     file: &Path,
     program: &noev_ir::Program,
     codegen: Option<CodegenChoice>,
-    opt: OptOptions,
+    opt: &OptOptions,
     qir_runtime: bool,
     output: Option<&Path>,
 ) -> ExitCode {
@@ -895,7 +959,8 @@ fn build_object(
     let dest = output
         .map(Path::to_path_buf)
         .unwrap_or_else(|| default_artifact_path(file, Some("o")));
-    match generator.emit_object(program, codegen_options(opt, qir_runtime, false)) {
+    let opts = codegen_options(opt, qir_runtime, false);
+    match generator.emit_object(program, &opts) {
         Ok(bytes) => match std::fs::write(&dest, bytes) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -915,7 +980,7 @@ fn build_object(
     _file: &Path,
     _program: &noev_ir::Program,
     _codegen: Option<CodegenChoice>,
-    _opt: OptOptions,
+    _opt: &OptOptions,
     _qir_runtime: bool,
     _output: Option<&Path>,
 ) -> ExitCode {
@@ -930,7 +995,7 @@ fn build_binary(
     file: &Path,
     program: &noev_ir::Program,
     codegen: Option<CodegenChoice>,
-    opt: OptOptions,
+    opt: &OptOptions,
     qir_runtime: bool,
     link: &[String],
     output: Option<&Path>,
@@ -961,10 +1026,10 @@ fn build_binary(
         .unwrap_or_else(|| default_artifact_path(file, None));
     let opts = codegen_options(opt, qir_runtime, false);
     let res = if link.is_empty() {
-        generator.emit_binary(program, &dest, &runtime_lib, opts)
+        generator.emit_binary(program, &dest, &runtime_lib, &opts)
     } else {
         generator
-            .emit_object(program, opts)
+            .emit_object(program, &opts)
             .and_then(|obj| noev_codegen::link_object_with_args(&obj, &dest, &runtime_lib, link))
     };
     match res {
@@ -981,7 +1046,7 @@ fn build_binary(
     _file: &Path,
     _program: &noev_ir::Program,
     _codegen: Option<CodegenChoice>,
-    _opt: OptOptions,
+    _opt: &OptOptions,
     _qir_runtime: bool,
     _link: &[String],
     _output: Option<&Path>,
@@ -1443,7 +1508,7 @@ fn run_tests(
     backend_arg: Option<&str>,
     compile: bool,
     codegen: Option<CodegenChoice>,
-    opt: OptOptions,
+    opt: &OptOptions,
     circuit_opt: u8,
     nocapture: bool,
     format: MessageFormat,
@@ -1685,7 +1750,7 @@ fn run_tests_compiled(
     seed: u64,
     backend_spec: Option<&str>,
     codegen: Option<CodegenChoice>,
-    opt: OptOptions,
+    opt: &OptOptions,
     circuit_opt: u8,
     nocapture: bool,
 ) -> ExitCode {
@@ -1785,7 +1850,7 @@ fn run_tests_compiled(
                     };
                     let bin_path = tmp_dir.join(bin_name);
                     let res = generator
-                        .emit_binary(&unit.program, &bin_path, &runtime_lib, opts)
+                        .emit_binary(&unit.program, &bin_path, &runtime_lib, &opts)
                         .map(|()| bin_path)
                         .map_err(|e| e.0);
                     compiled.lock().unwrap().push((pos, res));
@@ -1922,7 +1987,7 @@ fn run_tests_compiled(
     _seed: u64,
     _backend_spec: Option<&str>,
     _codegen: Option<CodegenChoice>,
-    _opt: OptOptions,
+    _opt: &OptOptions,
     _circuit_opt: u8,
     _nocapture: bool,
 ) -> ExitCode {

@@ -56,11 +56,12 @@ fn bench_codegen(c: &mut Criterion) {
     group.throughput(Throughput::Elements(fn_count));
     #[cfg(feature = "cranelift")]
     group.bench_function("cranelift_100_fns", |b| {
+        let opts = CodegenOptions::default();
         b.iter_batched(
             || &program,
             |prog| {
                 let obj = noev_codegen::CraneliftCodegen
-                    .emit_object(prog, CodegenOptions::default())
+                    .emit_object(prog, &opts)
                     .expect("cranelift emit_object");
                 black_box(obj.len())
             },
@@ -69,17 +70,15 @@ fn bench_codegen(c: &mut Criterion) {
     });
     #[cfg(feature = "cranelift")]
     group.bench_function("cranelift_O0_100_fns", |b| {
+        let opts = CodegenOptions {
+            opt: OptLevel::O0,
+            ..CodegenOptions::default()
+        };
         b.iter_batched(
             || &program,
             |prog| {
                 let obj = noev_codegen::CraneliftCodegen
-                    .emit_object(
-                        prog,
-                        CodegenOptions {
-                            opt: OptLevel::O0,
-                            ..CodegenOptions::default()
-                        },
-                    )
+                    .emit_object(prog, &opts)
                     .expect("cranelift O0 emit_object");
                 black_box(obj.len())
             },
@@ -88,11 +87,12 @@ fn bench_codegen(c: &mut Criterion) {
     });
     #[cfg(feature = "llvm")]
     group.bench_function("llvm_ir_100_fns", |b| {
+        let opts = CodegenOptions::default();
         b.iter_batched(
             || &program,
             |prog| {
                 let ir = noev_codegen::llvm::LlvmCodegen
-                    .emit_llvm_ir(prog, CodegenOptions::default())
+                    .emit_llvm_ir(prog, &opts)
                     .expect("llvm emit_llvm_ir");
                 black_box(ir.len())
             },
@@ -101,17 +101,15 @@ fn bench_codegen(c: &mut Criterion) {
     });
     #[cfg(feature = "llvm")]
     group.bench_function("llvm_O2_obj_100_fns", |b| {
+        let opts = CodegenOptions {
+            opt: OptLevel::O2,
+            ..CodegenOptions::default()
+        };
         b.iter_batched(
             || &program,
             |prog| {
                 let obj = noev_codegen::llvm::LlvmCodegen
-                    .emit_object(
-                        prog,
-                        CodegenOptions {
-                            opt: OptLevel::O2,
-                            ..CodegenOptions::default()
-                        },
-                    )
+                    .emit_object(prog, &opts)
                     .expect("llvm emit_object");
                 black_box(obj.len())
             },

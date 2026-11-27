@@ -21,7 +21,7 @@ impl LlvmCodegen {
     pub fn emit_llvm_ir(
         &self,
         program: &Program,
-        opts: CodegenOptions,
+        opts: &CodegenOptions,
     ) -> Result<String, CodegenError> {
         emit::emit_module(program, opts)
     }
@@ -30,9 +30,9 @@ impl LlvmCodegen {
     pub fn compile_ir_to_object(
         &self,
         ir: &str,
-        opts: CodegenOptions,
+        opts: &CodegenOptions,
     ) -> Result<Vec<u8>, CodegenError> {
-        sys::compile_ir_to_object(ir, opts.effective_llvm_opt())
+        sys::compile_ir_to_object(ir, opts)
     }
 }
 
@@ -44,7 +44,7 @@ impl CodeGenerator for LlvmCodegen {
     fn emit_object(
         &self,
         program: &Program,
-        opts: CodegenOptions,
+        opts: &CodegenOptions,
     ) -> Result<Vec<u8>, CodegenError> {
         let ir = self.emit_llvm_ir(program, opts)?;
         self.compile_ir_to_object(&ir, opts)

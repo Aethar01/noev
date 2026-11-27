@@ -62,7 +62,7 @@ fn llvm_bytes_literal(bytes: &[u8]) -> String {
 }
 
 /// Emits a complete LLVM IR module (`.ll`) for `program`.
-pub fn emit_module(program: &Program, opts: CodegenOptions) -> Result<String, CodegenError> {
+pub fn emit_module(program: &Program, opts: &CodegenOptions) -> Result<String, CodegenError> {
     let ptr_bytes = size_of::<usize>() as u32;
     let mut layouts = LayoutCache::new(program, ptr_bytes);
     let mut globals = GlobalPool::new();
@@ -623,7 +623,7 @@ struct FnEmitter<'a, 'p> {
     layouts: &'a mut LayoutCache<'p>,
     globals: &'a mut GlobalPool,
     decls: &'a mut BTreeMap<String, String>,
-    opts: CodegenOptions,
+    opts: &'a CodegenOptions,
     facts: &'a [HashMap<PlaceKey, u32>],
     cur_block: Block,
     allocas: String,

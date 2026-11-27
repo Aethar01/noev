@@ -1,14 +1,12 @@
 //! Minimal dynamic loader for the stable LLVM C API (`libLLVM.so` / `libLLVM.dylib`), with
 //! fallback to the `llc` CLI when no shared library is available.
 
-#[cfg(unix)]
-use std::ffi::CString;
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::process::Command;
 use std::ptr;
 use std::sync::OnceLock;
 
-use crate::{CodegenError, LlvmOpt};
+use crate::{CodegenError, CodegenOptions, LlvmOpt};
 
 type LlvmContextRef = *mut c_void;
 type LlvmModuleRef = *mut c_void;
@@ -42,6 +40,9 @@ struct LlvmApi {
     verify_module: unsafe extern "C" fn(LlvmModuleRef, c_int, *mut *mut c_char) -> LlvmBool,
     dispose_module: unsafe extern "C" fn(LlvmModuleRef),
     get_default_triple: unsafe extern "C" fn() -> *mut c_char,
+    get_host_cpu_name: Option<unsafe extern "C" fn() -> *mut c_char>,
+    parse_command_line_options:
+        Option<unsafe extern "C" fn(c_int, *const *const c_char, *const c_char)>,
     set_target: Option<unsafe extern "C" fn(LlvmModuleRef, *const c_char)>,
     get_target_from_triple:
         unsafe extern "C" fn(*const c_char, *mut LlvmTargetRef, *mut *mut c_char) -> LlvmBool,
@@ -166,6 +167,8 @@ fn try_load_llvm() -> Option<LlvmApi> {
             verify_module: load_sym(handle, "LLVMVerifyModule")?,
             dispose_module: load_sym(handle, "LLVMDisposeModule")?,
             get_default_triple: load_sym(handle, "LLVMGetDefaultTargetTriple")?,
+            get_host_cpu_name: load_sym(handle, "LLVMGetHostCPUName"),
+            parse_command_line_options: load_sym(handle, "LLVMParseCommandLineOptions"),
             set_target: load_sym(handle, "LLVMSetTarget"),
             get_target_from_triple: load_sym(handle, "LLVMGetTargetFromTriple")?,
             create_target_machine: load_sym(handle, "LLVMCreateTargetMachine")?,
@@ -192,11 +195,11 @@ fn llvm_api() -> Option<&'static LlvmApi> {
 
 /// Compiles LLVM IR text (`.ll`) into native object bytes (`.o`), using `libLLVM` if present
 /// and falling back to `llc`.
-pub fn compile_ir_to_object(ir: &str, opt: LlvmOpt) -> Result<Vec<u8>, CodegenError> {
+pub fn compile_ir_to_object(ir: &str, opts: &CodegenOptions) -> Result<Vec<u8>, CodegenError> {
     if let Some(api) = llvm_api() {
-        return compile_with_libllvm(api, ir, opt);
+        return compile_with_libllvm(api, ir, opts);
     }
-    compile_with_llc(ir, opt)
+    compile_with_llc(ir, opts)
 }
 
 fn take_llvm_msg(api: &LlvmApi, ptr: *mut c_char) -> String {
@@ -210,8 +213,27 @@ fn take_llvm_msg(api: &LlvmApi, ptr: *mut c_char) -> String {
     s
 }
 
-fn compile_with_libllvm(api: &LlvmApi, ir: &str, opt: LlvmOpt) -> Result<Vec<u8>, CodegenError> {
+fn compile_with_libllvm(
+    api: &LlvmApi,
+    ir: &str,
+    opts: &CodegenOptions,
+) -> Result<Vec<u8>, CodegenError> {
+    let opt = opts.effective_llvm_opt();
     unsafe {
+        if !opts.llvm_args.is_empty()
+            && let Some(parse_cli) = api.parse_command_line_options
+        {
+            let mut c_args: Vec<CString> = Vec::with_capacity(opts.llvm_args.len() + 1);
+            c_args.push(CString::new("noev").unwrap());
+            for arg in &opts.llvm_args {
+                let c = CString::new(arg.as_str()).map_err(|_| {
+                    CodegenError(format!("invalid NUL byte in `--llvm-arg`: `{arg}`"))
+                })?;
+                c_args.push(c);
+            }
+            let ptrs: Vec<*const c_char> = c_args.iter().map(|s| s.as_ptr()).collect();
+            parse_cli(ptrs.len() as c_int, ptrs.as_ptr(), ptr::null());
+        }
         let ctx = (api.context_create)();
         let buf_name = c"noev_module";
         let mem = (api.create_mem_buf_copy)(ir.as_ptr().cast(), ir.len(), buf_name.as_ptr());
@@ -259,18 +281,38 @@ fn compile_with_libllvm(api: &LlvmApi, ir: &str, opt: LlvmOpt) -> Result<Vec<u8>
             LlvmOpt::O2 | LlvmOpt::Os | LlvmOpt::Oz => 2, // LLVMCodeGenLevelDefault
             LlvmOpt::O3 => 3,                             // LLVMCodeGenLevelAggressive (-O3)
         };
-        let cpu = c"generic";
-        let features = c"";
+        let host_cpu_ptr = if opts.target_cpu.as_deref() == Some("native") {
+            api.get_host_cpu_name.map(|f| f())
+        } else {
+            None
+        };
+        let cpu_owned =
+            match opts.target_cpu.as_deref() {
+                Some("native") | None => None,
+                Some(c) => Some(CString::new(c).map_err(|_| {
+                    CodegenError(format!("invalid NUL byte in `--target-cpu`: `{c}`"))
+                })?),
+            };
+        let cpu_ptr = if let Some(ptr) = host_cpu_ptr {
+            ptr as *const c_char
+        } else if let Some(ref owned) = cpu_owned {
+            owned.as_ptr()
+        } else {
+            c"generic".as_ptr()
+        };
+        let features_owned = match opts.target_features.as_deref() {
+            Some(f) => Some(CString::new(f).map_err(|_| {
+                CodegenError(format!("invalid NUL byte in `--target-feature`: `{f}`"))
+            })?),
+            None => None,
+        };
+        let features_ptr = features_owned.as_ref().map_or(c"".as_ptr(), |s| s.as_ptr());
         // Reloc = 2 (PIC), CodeModel = 0 (Default).
-        let tm = (api.create_target_machine)(
-            target,
-            triple,
-            cpu.as_ptr(),
-            features.as_ptr(),
-            opt_level,
-            2,
-            0,
-        );
+        let tm =
+            (api.create_target_machine)(target, triple, cpu_ptr, features_ptr, opt_level, 2, 0);
+        if let Some(ptr) = host_cpu_ptr {
+            (api.dispose_message)(ptr);
+        }
         (api.dispose_message)(triple);
         if tm.is_null() {
             (api.dispose_module)(module);
@@ -278,21 +320,31 @@ fn compile_with_libllvm(api: &LlvmApi, ir: &str, opt: LlvmOpt) -> Result<Vec<u8>
             return Err(CodegenError("failed to create LLVM target machine".into()));
         }
 
-        // Run LLVM new-pass-manager optimization pipeline for -O1..-O3/-Os/-Oz.
+        // Run LLVM new-pass-manager optimization pipeline (custom `--llvm-passes` or `-O1..-O3/-Os/-Oz`).
         // Modern LLVM implements -Os/-Oz via `default<O2>` combined with `optsize`/`minsize`
         // function attributes (set by `emit.rs`).
-        let passes = match opt {
-            LlvmOpt::O0 => None,
-            LlvmOpt::O1 => Some(c"default<O1>"),
-            LlvmOpt::O2 | LlvmOpt::Os | LlvmOpt::Oz => Some(c"default<O2>"),
-            LlvmOpt::O3 => Some(c"default<O3>"),
+        let custom_passes = match opts.llvm_passes.as_deref() {
+            Some(p) => Some(CString::new(p).map_err(|_| {
+                CodegenError(format!("invalid NUL byte in `--llvm-passes`: `{p}`"))
+            })?),
+            None => None,
         };
-        if let Some(passes) = passes
+        let passes_ptr = if let Some(ref p) = custom_passes {
+            Some(p.as_ptr())
+        } else {
+            match opt {
+                LlvmOpt::O0 => None,
+                LlvmOpt::O1 => Some(c"default<O1>".as_ptr()),
+                LlvmOpt::O2 | LlvmOpt::Os | LlvmOpt::Oz => Some(c"default<O2>".as_ptr()),
+                LlvmOpt::O3 => Some(c"default<O3>".as_ptr()),
+            }
+        };
+        if let Some(passes) = passes_ptr
             && let (Some(create_opts), Some(dispose_opts), Some(run_passes)) =
                 (api.create_pass_opts, api.dispose_pass_opts, api.run_passes)
         {
             let pb_opts = create_opts();
-            let err = run_passes(module, passes.as_ptr(), tm, pb_opts);
+            let err = run_passes(module, passes, tm, pb_opts);
             dispose_opts(pb_opts);
             if !err.is_null() {
                 let msg = if let (Some(get_msg), Some(disp_msg)) =
@@ -336,7 +388,8 @@ fn compile_with_libllvm(api: &LlvmApi, ir: &str, opt: LlvmOpt) -> Result<Vec<u8>
     }
 }
 
-fn compile_with_llc(ir: &str, opt: LlvmOpt) -> Result<Vec<u8>, CodegenError> {
+fn compile_with_llc(ir: &str, opts: &CodegenOptions) -> Result<Vec<u8>, CodegenError> {
+    let opt = opts.effective_llvm_opt();
     let dir = std::env::temp_dir();
     let tag = format!(
         "noev-llvm-{}-{}",
@@ -358,6 +411,15 @@ fn compile_with_llc(ir: &str, opt: LlvmOpt) -> Result<Vec<u8>, CodegenError> {
         LlvmOpt::O2 | LlvmOpt::Os | LlvmOpt::Oz => "-O2",
         LlvmOpt::O3 => "-O3",
     });
+    if let Some(cpu) = opts.target_cpu.as_deref() {
+        cmd.arg(format!("-mcpu={cpu}"));
+    }
+    if let Some(features) = opts.target_features.as_deref() {
+        cmd.arg(format!("-mattr={features}"));
+    }
+    for arg in &opts.llvm_args {
+        cmd.arg(arg);
+    }
     cmd.arg("-o").arg(&obj_path).arg(&ll_path);
 
     let out = cmd.output();
