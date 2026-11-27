@@ -5,13 +5,16 @@
 //! version (`NOEV_BACKEND_ABI_VERSION == 1`), extracts its [`TargetSpec`], and exposes it as
 //! a first-class [`Backend`].
 
-use std::ffi::{CStr, c_char, c_void};
 #[cfg(unix)]
-use std::ffi::{CString, c_int};
+use std::ffi::{CStr, c_int};
+use std::ffi::{CString, c_char, c_void};
 use std::path::Path;
+use std::rc::Rc;
 
+#[cfg(unix)]
+use noev_sema::TargetCapabilities;
 use noev_sema::prelude::Gate;
-use noev_sema::{BackendLevel, TargetCapabilities, TargetSpec};
+use noev_sema::{BackendLevel, TargetSpec};
 
 use crate::backend::{Backend, BackendError, Circuit, Counts, Op, Session};
 
@@ -128,122 +131,16 @@ unsafe extern "C" {
     fn dlerror() -> *const c_char;
 }
 
-/// A dynamically loaded plug-in backend implementing [`Backend`].
-pub struct PluginBackend {
+/// Shared ownership of a loaded plug-in library and backend instance so that any
+/// [`PluginSession`] keeps the shared library mapped until the last session drops.
+struct PluginHandle {
     #[cfg(unix)]
     lib_handle: *mut c_void,
     vtable: *const NoevBackendVTable,
     instance: *mut c_void,
-    target: TargetSpec,
 }
 
-impl PluginBackend {
-    /// Loads a plug-in backend shared library from `path`, passing optional `device` to its
-    /// `create` callback.
-    pub fn load(path: &Path, device: Option<&str>) -> Result<Self, BackendError> {
-        #[cfg(not(unix))]
-        {
-            let _ = (path, device);
-            return Err(BackendError(
-                "dynamic plug-in backends are only supported on Unix platforms".into(),
-            ));
-        }
-        #[cfg(unix)]
-        {
-            let cpath = CString::new(path.to_string_lossy().as_bytes())
-                .map_err(|_| BackendError("plug-in path contains NUL byte".into()))?;
-            let handle = unsafe { dlopen(cpath.as_ptr(), RTLD_NOW) };
-            if handle.is_null() {
-                let reason = unsafe {
-                    let e = dlerror();
-                    if e.is_null() {
-                        "unknown dlopen error".to_string()
-                    } else {
-                        CStr::from_ptr(e).to_string_lossy().into_owned()
-                    }
-                };
-                return Err(BackendError(format!(
-                    "cannot load backend plug-in `{}`: {reason}",
-                    path.display()
-                )));
-            }
-            let sym_name = c"noev_backend_vtable";
-            let sym = unsafe { dlsym(handle, sym_name.as_ptr()) };
-            if sym.is_null() {
-                unsafe { dlclose(handle) };
-                return Err(BackendError(format!(
-                    "backend plug-in `{}` does not export `noev_backend_vtable`",
-                    path.display()
-                )));
-            }
-            let get_vtable: unsafe extern "C" fn() -> *const NoevBackendVTable =
-                unsafe { std::mem::transmute(sym) };
-            let vtable = unsafe { get_vtable() };
-            if vtable.is_null() {
-                unsafe { dlclose(handle) };
-                return Err(BackendError(format!(
-                    "backend plug-in `{}` returned a null vtable",
-                    path.display()
-                )));
-            }
-            let vt = unsafe { &*vtable };
-            if vt.abi_version != NOEV_BACKEND_ABI_VERSION {
-                let ver = vt.abi_version;
-                unsafe { dlclose(handle) };
-                return Err(BackendError(format!(
-                    "backend plug-in `{}` uses ABI version {ver}, but this runtime expects {NOEV_BACKEND_ABI_VERSION}",
-                    path.display()
-                )));
-            }
-            let mut target = extract_target(vt, path)?;
-            let canonical = path
-                .canonicalize()
-                .unwrap_or_else(|_| path.to_path_buf())
-                .to_string_lossy()
-                .into_owned();
-            target.plugin = Some(canonical);
-            if let Some(dev) = device {
-                target.device = Some(dev.to_string());
-            }
-
-            let instance = if let Some(create) = vt.create {
-                let cdev = match device {
-                    Some(d) => Some(
-                        CString::new(d)
-                            .map_err(|_| BackendError("device name contains NUL byte".into()))?,
-                    ),
-                    None => None,
-                };
-                let ptr = unsafe { create(cdev.as_ref().map_or(std::ptr::null(), |s| s.as_ptr())) };
-                if ptr.is_null() {
-                    unsafe { dlclose(handle) };
-                    return Err(BackendError(format!(
-                        "backend plug-in `{}` failed to initialise",
-                        target.name
-                    )));
-                }
-                ptr
-            } else {
-                std::ptr::null_mut()
-            };
-
-            Ok(PluginBackend {
-                lib_handle: handle,
-                vtable,
-                instance,
-                target,
-            })
-        }
-    }
-
-    /// Reads the [`TargetSpec`] from a plug-in without keeping it loaded.
-    pub fn probe_target(path: &Path, device: Option<&str>) -> Result<TargetSpec, BackendError> {
-        let plugin = Self::load(path, device)?;
-        Ok(plugin.target.clone())
-    }
-}
-
-impl Drop for PluginBackend {
+impl Drop for PluginHandle {
     fn drop(&mut self) {
         let vt = unsafe { &*self.vtable };
         if let Some(destroy) = vt.destroy
@@ -258,14 +155,167 @@ impl Drop for PluginBackend {
     }
 }
 
+/// A dynamically loaded plug-in backend implementing [`Backend`].
+pub struct PluginBackend {
+    handle: Rc<PluginHandle>,
+    target: TargetSpec,
+}
+
+impl PluginBackend {
+    /// Loads a plug-in backend shared library from `path`, passing optional `device` to its
+    /// `create` callback.
+    pub fn load(path: &Path, device: Option<&str>) -> Result<Self, BackendError> {
+        #[cfg(not(unix))]
+        {
+            let _ = (path, device);
+            Err(BackendError(
+                "dynamic plug-in backends are only supported on Unix platforms".into(),
+            ))
+        }
+        #[cfg(unix)]
+        {
+            let (lib_handle, vtable, target) = open_plugin_vtable(path, device)?;
+            let vt = unsafe { &*vtable };
+
+            let instance = if let Some(create) = vt.create {
+                let cdev = match device {
+                    Some(d) => Some(
+                        CString::new(d)
+                            .map_err(|_| BackendError("device name contains NUL byte".into()))?,
+                    ),
+                    None => None,
+                };
+                let ptr = unsafe { create(cdev.as_ref().map_or(std::ptr::null(), |s| s.as_ptr())) };
+                if ptr.is_null() {
+                    unsafe { dlclose(lib_handle) };
+                    return Err(BackendError(format!(
+                        "backend plug-in `{}` failed to initialise",
+                        target.name
+                    )));
+                }
+                ptr
+            } else {
+                std::ptr::null_mut()
+            };
+
+            Ok(PluginBackend {
+                handle: Rc::new(PluginHandle {
+                    lib_handle,
+                    vtable,
+                    instance,
+                }),
+                target,
+            })
+        }
+    }
+
+    /// Reads the [`TargetSpec`] from a plug-in's vtable without instantiating a backend
+    /// (`create`/`destroy` are not called).
+    pub fn probe_target(path: &Path, device: Option<&str>) -> Result<TargetSpec, BackendError> {
+        #[cfg(not(unix))]
+        {
+            let _ = (path, device);
+            Err(BackendError(
+                "dynamic plug-in backends are only supported on Unix platforms".into(),
+            ))
+        }
+        #[cfg(unix)]
+        {
+            let (lib_handle, _vtable, target) = open_plugin_vtable(path, device)?;
+            unsafe { dlclose(lib_handle) };
+            Ok(target)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn open_plugin_vtable(
+    path: &Path,
+    device: Option<&str>,
+) -> Result<(*mut c_void, *const NoevBackendVTable, TargetSpec), BackendError> {
+    let cpath = CString::new(path.to_string_lossy().as_bytes())
+        .map_err(|_| BackendError("plug-in path contains NUL byte".into()))?;
+    let handle = unsafe { dlopen(cpath.as_ptr(), RTLD_NOW) };
+    if handle.is_null() {
+        let reason = unsafe {
+            let e = dlerror();
+            if e.is_null() {
+                "unknown dlopen error".to_string()
+            } else {
+                CStr::from_ptr(e).to_string_lossy().into_owned()
+            }
+        };
+        return Err(BackendError(format!(
+            "cannot load backend plug-in `{}`: {reason}",
+            path.display()
+        )));
+    }
+    let sym_name = c"noev_backend_vtable";
+    let sym = unsafe { dlsym(handle, sym_name.as_ptr()) };
+    if sym.is_null() {
+        unsafe { dlclose(handle) };
+        return Err(BackendError(format!(
+            "backend plug-in `{}` does not export `noev_backend_vtable`",
+            path.display()
+        )));
+    }
+    let get_vtable: unsafe extern "C" fn() -> *const NoevBackendVTable =
+        unsafe { std::mem::transmute(sym) };
+    let vtable = unsafe { get_vtable() };
+    if vtable.is_null() {
+        unsafe { dlclose(handle) };
+        return Err(BackendError(format!(
+            "backend plug-in `{}` returned a null vtable",
+            path.display()
+        )));
+    }
+    let vt = unsafe { &*vtable };
+    if vt.abi_version != NOEV_BACKEND_ABI_VERSION {
+        let ver = vt.abi_version;
+        unsafe { dlclose(handle) };
+        return Err(BackendError(format!(
+            "backend plug-in `{}` uses ABI version {ver}, but this runtime expects {NOEV_BACKEND_ABI_VERSION}",
+            path.display()
+        )));
+    }
+    let mut target = match extract_target(vt, path) {
+        Ok(t) => t,
+        Err(e) => {
+            unsafe { dlclose(handle) };
+            return Err(e);
+        }
+    };
+    let canonical = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    target.plugin = Some(canonical);
+    if let Some(dev) = device {
+        target.device = Some(dev.to_string());
+    }
+    Ok((handle, vtable, target))
+}
+
 #[cfg(unix)]
 fn extract_target(vt: &NoevBackendVTable, path: &Path) -> Result<TargetSpec, BackendError> {
+    let vt_level = BackendLevel::from_abi(vt.level).ok_or_else(|| {
+        BackendError(format!(
+            "plug-in `{}` declared invalid level {}",
+            path.display(),
+            vt.level
+        ))
+    })?;
     if !vt.target_toml.is_null() {
         let text = unsafe { CStr::from_ptr(vt.target_toml) }
             .to_str()
             .map_err(|_| BackendError("plug-in `target_toml` is not valid UTF-8".into()))?;
-        return TargetSpec::from_toml(text)
-            .map_err(|e| BackendError(format!("invalid plug-in `target_toml`: {e}")));
+        let mut spec = TargetSpec::from_toml(text)
+            .map_err(|e| BackendError(format!("invalid plug-in `target_toml`: {e}")))?;
+        if !text.lines().any(|l| l.trim_start().starts_with("level")) {
+            spec.level = vt_level;
+        }
+        return Ok(spec);
     }
     let name = if vt.name.is_null() {
         path.file_stem()
@@ -277,12 +327,6 @@ fn extract_target(vt: &NoevBackendVTable, path: &Path) -> Result<TargetSpec, Bac
             .to_string_lossy()
             .into_owned()
     };
-    let level = BackendLevel::from_abi(vt.level).ok_or_else(|| {
-        BackendError(format!(
-            "plug-in `{name}` declared invalid level {}",
-            vt.level
-        ))
-    })?;
     let qubits = if vt.qubits < 0 {
         None
     } else {
@@ -291,7 +335,7 @@ fn extract_target(vt: &NoevBackendVTable, path: &Path) -> Result<TargetSpec, Bac
     Ok(TargetSpec {
         name,
         device: None,
-        level,
+        level: vt_level,
         qubits,
         gates: None,
         coupling: None,
@@ -301,10 +345,10 @@ fn extract_target(vt: &NoevBackendVTable, path: &Path) -> Result<TargetSpec, Bac
 }
 
 fn read_err(buf: &[c_char], fallback: &str) -> BackendError {
-    let msg = unsafe { CStr::from_ptr(buf.as_ptr()) }
-        .to_string_lossy()
-        .trim()
-        .to_string();
+    // Bound the read strictly to `buf.len()` even if a C plug-in forgot the NUL terminator.
+    let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), buf.len()) };
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let msg = String::from_utf8_lossy(&bytes[..end]).trim().to_string();
     if msg.is_empty() {
         BackendError(fallback.into())
     } else {
@@ -349,14 +393,17 @@ impl Backend for PluginBackend {
     }
 
     fn session(&self, seed: u64) -> Option<Box<dyn Session>> {
-        let vt = unsafe { &*self.vtable };
+        if self.target.level == BackendLevel::Circuit {
+            return None;
+        }
+        let vt = unsafe { &*self.handle.vtable };
         let new_fn = vt.session_new?;
-        let raw = unsafe { new_fn(self.instance, seed) };
+        let raw = unsafe { new_fn(self.handle.instance, seed) };
         if raw.is_null() {
             return None;
         }
         Some(Box::new(PluginSession {
-            vtable: self.vtable,
+            handle: Rc::clone(&self.handle),
             session: raw,
         }))
     }
@@ -367,7 +414,10 @@ impl Backend for PluginBackend {
         shots: usize,
         seed: u64,
     ) -> Option<Result<Counts, BackendError>> {
-        let vt = unsafe { &*self.vtable };
+        if self.target.level == BackendLevel::Gate {
+            return None;
+        }
+        let vt = unsafe { &*self.handle.vtable };
         let run_fn = vt.run_circuit?;
         let qasm3 = crate::qasm::to_qasm3(circuit, &[]);
         let Ok(c_qasm) = CString::new(qasm3) else {
@@ -379,7 +429,7 @@ impl Backend for PluginBackend {
         let mut err_buf = [0 as c_char; 512];
         let ok = unsafe {
             run_fn(
-                self.instance,
+                self.handle.instance,
                 c_qasm.as_ptr(),
                 c_qasm.as_bytes().len(),
                 circuit.qubits,
@@ -401,13 +451,13 @@ impl Backend for PluginBackend {
 }
 
 struct PluginSession {
-    vtable: *const NoevBackendVTable,
+    handle: Rc<PluginHandle>,
     session: *mut c_void,
 }
 
 impl Drop for PluginSession {
     fn drop(&mut self) {
-        let vt = unsafe { &*self.vtable };
+        let vt = unsafe { &*self.handle.vtable };
         if let Some(free_fn) = vt.session_free
             && !self.session.is_null()
         {
@@ -418,7 +468,7 @@ impl Drop for PluginSession {
 
 impl Session for PluginSession {
     fn add_qubit(&mut self) -> Result<usize, BackendError> {
-        let vt = unsafe { &*self.vtable };
+        let vt = unsafe { &*self.handle.vtable };
         let f = vt
             .session_add_qubit
             .ok_or_else(|| BackendError("plug-in does not implement `session_add_qubit`".into()))?;
@@ -432,7 +482,7 @@ impl Session for PluginSession {
     }
 
     fn apply(&mut self, op: &Op) -> Result<(), BackendError> {
-        let vt = unsafe { &*self.vtable };
+        let vt = unsafe { &*self.handle.vtable };
         let f = vt
             .session_apply
             .ok_or_else(|| BackendError("plug-in does not implement `session_apply`".into()))?;
@@ -459,7 +509,7 @@ impl Session for PluginSession {
     }
 
     fn measure(&mut self, qubit: usize) -> Result<bool, BackendError> {
-        let vt = unsafe { &*self.vtable };
+        let vt = unsafe { &*self.handle.vtable };
         let f = vt
             .session_measure
             .ok_or_else(|| BackendError("plug-in does not implement `session_measure`".into()))?;
@@ -481,7 +531,7 @@ impl Session for PluginSession {
     }
 
     fn reset(&mut self, qubit: usize) -> Result<(), BackendError> {
-        let vt = unsafe { &*self.vtable };
+        let vt = unsafe { &*self.handle.vtable };
         let f = vt
             .session_reset
             .ok_or_else(|| BackendError("plug-in does not implement `session_reset`".into()))?;
@@ -494,7 +544,7 @@ impl Session for PluginSession {
     }
 
     fn release(&mut self, qubit: usize) -> Result<(), BackendError> {
-        let vt = unsafe { &*self.vtable };
+        let vt = unsafe { &*self.handle.vtable };
         let Some(f) = vt.session_release else {
             return Ok(());
         };
@@ -531,6 +581,13 @@ pub fn target_cache_dir() -> std::path::PathBuf {
     {
         return std::path::PathBuf::from(home)
             .join(".cache")
+            .join("noev")
+            .join("targets");
+    }
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA")
+        && !local_app_data.is_empty()
+    {
+        return std::path::PathBuf::from(local_app_data)
             .join("noev")
             .join("targets");
     }
@@ -603,9 +660,12 @@ pub fn list_cached_targets() -> Result<Vec<(String, TargetSpec)>, String> {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "toml") && path.is_file() {
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
-            let target = TargetSpec::from_toml(&text)?;
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(target) = TargetSpec::from_toml(&text) else {
+                continue;
+            };
             let key = match &target.device {
                 Some(dev) => format!("{}:{dev}", target.name),
                 None => target.name.clone(),
@@ -621,7 +681,7 @@ fn is_plugin_path(path: &Path) -> bool {
     path.is_file()
         && matches!(
             path.extension().and_then(|e| e.to_str()),
-            Some("so" | "dylib" | "dll")
+            Some("so" | "dylib")
         )
 }
 

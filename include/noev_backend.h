@@ -37,7 +37,16 @@ extern "C" {
 #define NOEV_CAP_SAMPLE_STATE       (1u << 3)
 #define NOEV_CAP_FOREIGN_WHILE_LIVE (1u << 4)
 
-/* Core gate IDs for gate-level sessions (`session_apply`). */
+/*
+ * Core gate IDs for gate-level sessions (`session_apply`).
+ *
+ * Parameter conventions (`params[0..n_params]`):
+ *   - RX, RY, RZ, P: 1 angle in radians.
+ *   - U:             3 angles (theta, phi, lambda) in radians.
+ *   - UNITARY:       row-major interleaved complex entries [re_0, im_0, re_1, im_1, ...]
+ *                    for a 2^n_targets x 2^n_targets matrix (2 * 4^n_targets doubles).
+ *   - All other gates: 0 parameters.
+ */
 #define NOEV_GATE_X       0u
 #define NOEV_GATE_Y       1u
 #define NOEV_GATE_Z       2u

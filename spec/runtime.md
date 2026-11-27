@@ -262,7 +262,9 @@ backend reads its own when the program starts, from the environment or the user'
 configuration.
 
 A program can also be built for a dynamic backend, loaded when it starts, so one binary can
-run on a simulator or on hardware. It is then checked against the loaded backend's
+run on a simulator or on hardware. Compiled binaries accept `--backend=NAME[:DEVICE]` (or
+`--backend NAME[:DEVICE]`, stopping before `--`, or `NOEV_BACKEND`) and `--seed=N` to choose
+the backend and RNG seed at launch. It is then checked against the loaded backend's
 description when it starts, as host functions are checked when it is loaded
 ([interop.md](interop.md) §2), and refuses to run if it needs what the backend lacks.
 

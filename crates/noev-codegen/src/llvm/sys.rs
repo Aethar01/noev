@@ -1,7 +1,9 @@
 //! Minimal dynamic loader for the stable LLVM C API (`libLLVM.so` / `libLLVM.dylib`), with
 //! fallback to the `llc` CLI when no shared library is available.
 
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+#[cfg(unix)]
+use std::ffi::CString;
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::process::Command;
 use std::ptr;
 use std::sync::OnceLock;

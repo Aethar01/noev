@@ -812,6 +812,9 @@ pub unsafe extern "C" fn noev_rt_main_enter(
         let mut i = 1;
         while i < args.len() {
             if let Ok(s) = unsafe { CStr::from_ptr(args[i]) }.to_str() {
+                if s == "--" {
+                    break;
+                }
                 if let Some(rest) = s.strip_prefix("--seed=") {
                     if let Ok(n) = rest.parse() {
                         seed = n;
@@ -2584,6 +2587,25 @@ pub unsafe extern "C" fn noev_rt_assert_str(
 // Native test runner harness (`noev test --compile` / `--codegen`, `spec/testing.md`)
 // ---------------------------------------------------------------------------------------
 
+/// Deterministically derives a per-test PRNG seed from the run's base seed and the test's
+/// full name (`spec/testing.md` §3).
+///
+/// Using the test name makes a test's seed independent of `--filter`, file ordering, and
+/// interpreter vs compiled execution, so `noev test --seed <BASE> <TEST>` always reproduces.
+pub fn derive_test_seed(base_seed: u64, full_name: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ base_seed;
+    for &b in full_name.as_bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    // SplitMix64 finalizer for strong avalanche even for short or similar names.
+    h ^= h >> 30;
+    h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    h ^= h >> 27;
+    h = h.wrapping_mul(0x94d0_49bb_1331_11eb);
+    h ^ (h >> 31)
+}
+
 /// Shared growable byte buffer used to capture stdout/stderr for a single test run.
 struct CaptureWriter(Rc<std::cell::RefCell<Vec<u8>>>);
 
@@ -2639,6 +2661,9 @@ pub unsafe extern "C" fn noev_rt_test_harness_new(
         let mut i = 1;
         while i < args.len() {
             if let Ok(s) = unsafe { CStr::from_ptr(args[i]) }.to_str() {
+                if s == "--" {
+                    break;
+                }
                 if let Some(rest) = s.strip_prefix("--seed=") {
                     if let Ok(n) = rest.parse() {
                         seed = Some(n);
@@ -2821,9 +2846,9 @@ pub unsafe extern "C" fn noev_rt_test_run_all(harness: *mut NoevTestHarness) -> 
     }
 
     let mut passed = 0usize;
-    let mut failures: Vec<(String, u64, String, String)> = Vec::new();
-    for (idx, test, full) in &matching {
-        let test_seed = h.seed.wrapping_add(*idx as u64);
+    let mut failures: Vec<(String, String, String)> = Vec::new();
+    for (_idx, test, full) in &matching {
+        let test_seed = derive_test_seed(h.seed, full);
         let captured = Rc::new(std::cell::RefCell::new(Vec::<u8>::new()));
         let mut rt = unsafe { NoevRuntime::new_borrowed(backend.as_ref(), test_seed) };
         if h.nocapture {
@@ -2838,6 +2863,7 @@ pub unsafe extern "C" fn noev_rt_test_run_all(harness: *mut NoevTestHarness) -> 
             })));
         }
         let ok = (test.func)(&mut rt);
+        let _ = unsafe { cabi::noev_rt_flush(&mut rt) };
         let err_msg = if ok {
             None
         } else {
@@ -2867,7 +2893,7 @@ pub unsafe extern "C" fn noev_rt_test_run_all(harness: *mut NoevTestHarness) -> 
         if let Some(reason) = failure_reason {
             println!("test {full} ... FAILED");
             let out_str = String::from_utf8_lossy(&captured.borrow()).into_owned();
-            failures.push((full.clone(), test_seed, reason, out_str));
+            failures.push((full.clone(), reason, out_str));
         } else {
             println!("test {full} ... ok");
             passed += 1;
@@ -2876,7 +2902,7 @@ pub unsafe extern "C" fn noev_rt_test_run_all(harness: *mut NoevTestHarness) -> 
 
     if !failures.is_empty() {
         println!("\nfailures:");
-        for (name, test_seed, reason, out) in &failures {
+        for (name, reason, out) in &failures {
             println!("\n---- {name} ----");
             if !out.is_empty() {
                 print!("{out}");
@@ -2885,7 +2911,7 @@ pub unsafe extern "C" fn noev_rt_test_run_all(harness: *mut NoevTestHarness) -> 
                 }
             }
             println!("error: {reason}");
-            println!("note: reproduce with --seed {test_seed}");
+            println!("note: reproduce with: noev test --seed {} {name}", h.seed);
         }
     }
 

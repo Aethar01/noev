@@ -200,16 +200,16 @@ impl TargetSpec {
     pub fn to_toml(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
-        let _ = writeln!(out, "name = {:?}", self.name);
+        let _ = writeln!(out, "name = {}", escape_toml_str(&self.name));
         if let Some(ref dev) = self.device {
-            let _ = writeln!(out, "device = {dev:?}");
+            let _ = writeln!(out, "device = {}", escape_toml_str(dev));
         }
-        let _ = writeln!(out, "level = {:?}", self.level.as_str());
+        let _ = writeln!(out, "level = {}", escape_toml_str(self.level.as_str()));
         if let Some(q) = self.qubits {
             let _ = writeln!(out, "qubits = {q}");
         }
         if let Some(ref gates) = self.gates {
-            let items: Vec<String> = gates.iter().map(|g| format!("{g:?}")).collect();
+            let items: Vec<String> = gates.iter().map(|g| escape_toml_str(g)).collect();
             let _ = writeln!(out, "gates = [{}]", items.join(", "));
         }
         if let Some(ref coupling) = self.coupling {
@@ -220,7 +220,7 @@ impl TargetSpec {
             let _ = writeln!(out, "coupling = [{}]", pairs.join(", "));
         }
         if let Some(ref plugin) = self.plugin {
-            let _ = writeln!(out, "plugin = {plugin:?}");
+            let _ = writeln!(out, "plugin = {}", escape_toml_str(plugin));
         }
         out.push_str("\n[capabilities]\n");
         let c = self.capabilities;
@@ -362,6 +362,27 @@ fn parse_bool(s: &str) -> Option<bool> {
     }
 }
 
+fn escape_toml_str(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c == '\x7f' => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn parse_str(s: &str) -> Option<String> {
     let s = s.trim();
     if !(s.starts_with('"') && s.ends_with('"') && s.len() >= 2) {
@@ -377,6 +398,14 @@ fn parse_str(s: &str) -> Option<String> {
                 't' => out.push('\t'),
                 '"' => out.push('"'),
                 '\\' => out.push('\\'),
+                'u' => {
+                    let mut hex = String::with_capacity(4);
+                    for _ in 0..4 {
+                        hex.push(chars.next()?);
+                    }
+                    let code = u32::from_str_radix(&hex, 16).ok()?;
+                    out.push(char::from_u32(code)?);
+                }
                 other => {
                     out.push('\\');
                     out.push(other);
@@ -947,6 +976,7 @@ fn find_quantum_in_backend(ast: &Ast, typed: &Typed, block: BlockId, diags: &mut
                         | Builtin::Reset
                         | Builtin::Discard
                         | Builtin::Release
+                        | Builtin::Amplitudes
                         | Builtin::Qasm,
                     )) = typed.callees[e.index()]
                     {
@@ -1018,6 +1048,13 @@ fn find_quantum_in_backend(ast: &Ast, typed: &Typed, block: BlockId, diags: &mut
                 } => {
                     stack_exprs.push(lhs);
                     stack_exprs.push(rhs);
+                }
+                ExprKind::Str(parts) => {
+                    for p in ast.list(parts) {
+                        if let noev_syntax::ast::StrPart::Value { expr, .. } = *p {
+                            stack_exprs.push(expr);
+                        }
+                    }
                 }
                 _ => {}
             }

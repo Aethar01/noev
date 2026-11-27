@@ -1963,6 +1963,9 @@ impl<'a> Checker<'a> {
             let f = FnId::from_index(index);
             let decl = *self.ast.function(f);
             if decl.test != noev_syntax::ast::TestKind::None {
+                if decl.is_foreign_import() || decl.extern_kind != ExternKind::None {
+                    self.error(decl.name_span, "a `test fn` cannot be `extern`");
+                }
                 if decl.is_rev {
                     self.error(decl.name_span, "a `test fn` cannot be `rev`");
                 }

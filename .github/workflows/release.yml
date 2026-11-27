@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,11 +32,11 @@ jobs:
             archive: tar.gz
             cross: false
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-latest
             archive: tar.gz
             cross: false
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-latest
             archive: tar.gz
             cross: true
           - target: x86_64-pc-windows-msvc
@@ -72,13 +72,14 @@ jobs:
         run: |
           $bin = "target/${{ matrix.target }}/release/noev.exe"
           & $bin --version
-          & $bin test --seed 1 tests/run/gates.nv
+          & $bin test --seed 1 tests/run
 
       - name: Package archive (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME:-dev}"
+          RAW_TAG="${GITHUB_REF_NAME:-dev}"
+          TAG="${RAW_TAG//\//-}"
           NAME="noev-${TAG}-${{ matrix.target }}"
           STAGE="dist/${NAME}"
           mkdir -p "${STAGE}/bin" "${STAGE}/lib" "${STAGE}/include"
@@ -93,7 +94,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $tag = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "dev" }
+          $rawTag = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "dev" }
+          $tag = $rawTag -replace '/', '-'
           $name = "noev-$tag-${{ matrix.target }}"
           $stage = "dist/$name"
           New-Item -ItemType Directory -Force -Path "$stage/bin", "$stage/lib", "$stage/include" | Out-Null
@@ -107,6 +109,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
+          if-no-files-found: error
           path: |
             dist/*.tar.gz
             dist/*.zip
@@ -115,6 +118,8 @@ jobs:
     name: Publish GitHub Release
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

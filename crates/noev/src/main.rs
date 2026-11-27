@@ -647,6 +647,7 @@ fn default_artifact_path(file: &Path, ext: Option<&str>) -> PathBuf {
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty() && *s != ".")
         .unwrap_or("a");
+    let ext = ext.or(if cfg!(windows) { Some("exe") } else { None });
     match ext {
         Some(e) => PathBuf::from(format!("{stem}.{e}")),
         None => PathBuf::from(stem),
@@ -1402,12 +1403,15 @@ fn run_tests_interpreted(
     format: MessageFormat,
 ) -> ExitCode {
     let chosen = backend_spec.unwrap_or("ketrs");
-    let exporter_holder;
+    if chosen == "export" {
+        anstream::eprintln!(
+            "{ERROR}error:{ERROR:#} `--backend=export` only records circuits and cannot execute tests; \
+             use `ketrs` or a runnable plug-in backend"
+        );
+        return ExitCode::from(2);
+    }
     let plugin_holder;
-    let backend: &dyn noev_runtime::Backend = if chosen == "export" {
-        exporter_holder = noev_runtime::backend::Exporter::default();
-        &exporter_holder
-    } else if chosen == "ketrs" {
+    let backend: &dyn noev_runtime::Backend = if chosen == "ketrs" {
         let Some(sim) = simulator() else {
             anstream::eprintln!(
                 "{ERROR}error:{ERROR:#} this noev was built without a simulator (its `ketrs` feature)"
@@ -1445,10 +1449,8 @@ fn run_tests_interpreted(
     );
 
     let mut passed = 0usize;
-    let mut index = 0u64;
     struct Failure<'a> {
         name: String,
-        seed: u64,
         message: String,
         span: Option<noev_syntax::Span>,
         unit: &'a TestUnit,
@@ -1462,8 +1464,7 @@ fn run_tests_interpreted(
             if !filter.is_none_or(|f| full.contains(f)) {
                 continue;
             }
-            let test_seed = seed.wrapping_add(index);
-            index += 1;
+            let test_seed = noev_runtime::cabi_compiled::derive_test_seed(seed, &full);
             let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::<u8>::new()));
             let output = if nocapture {
                 noev_runtime::Output {
@@ -1482,7 +1483,6 @@ fn run_tests_interpreted(
                 let out_text = String::from_utf8_lossy(&captured.borrow()).into_owned();
                 failures.push(Failure {
                     name: full,
-                    seed: test_seed,
                     message,
                     span,
                     unit,
@@ -1511,7 +1511,10 @@ fn run_tests_interpreted(
             } else {
                 anstream::eprintln!("{ERROR}error:{ERROR:#} {}", fail.message);
             }
-            println!("note: reproduce with --seed {}", fail.seed);
+            println!(
+                "note: reproduce with: noev test --seed {seed} {}",
+                fail.name
+            );
         }
     }
 
@@ -1565,15 +1568,42 @@ fn run_tests_compiled(
         return ExitCode::SUCCESS;
     }
 
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "noev-test-bin-{}-{}",
-        std::process::id(),
-        seed & 0xffff
-    ));
-    if let Err(error) = std::fs::create_dir_all(&tmp_dir) {
-        anstream::eprintln!("noev: cannot create {}: {error}", tmp_dir.display());
+    if backend_spec == Some("export") {
+        anstream::eprintln!(
+            "{ERROR}error:{ERROR:#} `--backend=export` only records circuits and cannot execute tests; \
+             use `ketrs` or a runnable plug-in backend"
+        );
         return ExitCode::from(2);
     }
+
+    // Create an exclusively owned temporary directory (`create_dir` fails if it already exists).
+    let base_tmp = std::env::temp_dir();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let mut tmp_dir = None;
+    for attempt in 0u64..100 {
+        let candidate = base_tmp.join(format!(
+            "noev-test-bin-{}-{:x}-{attempt}",
+            std::process::id(),
+            nanos ^ u128::from(seed)
+        ));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => {
+                tmp_dir = Some(candidate);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                anstream::eprintln!("noev: cannot create {}: {error}", candidate.display());
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(tmp_dir) = tmp_dir else {
+        anstream::eprintln!("noev: cannot create a unique temporary directory for compiled tests");
+        return ExitCode::from(2);
+    };
 
     let opts = noev_codegen::CodegenOptions {
         opt: noev_codegen::OptLevel::Speed,
@@ -1603,7 +1633,12 @@ fn run_tests_compiled(
                         i
                     };
                     let (unit_idx, unit) = active[pos];
-                    let bin_path = tmp_dir.join(format!("test_unit_{unit_idx}"));
+                    let bin_name = if cfg!(windows) {
+                        format!("test_unit_{unit_idx}.exe")
+                    } else {
+                        format!("test_unit_{unit_idx}")
+                    };
+                    let bin_path = tmp_dir.join(bin_name);
                     let res = generator
                         .emit_binary(&unit.program, &bin_path, &runtime_lib, opts)
                         .map(|()| bin_path)
