@@ -11,6 +11,10 @@
   --sl-color-gray-5: #36332f;
   --sl-color-gray-6: #181715;
   --sl-color-black: #0e0e0d;
+
+  --noev-link-line: #f5a98f66;
+  --noev-select: #8f3d24;
+  accent-color: var(--sl-color-accent);
 }
 
 /* Light mode: crisp white/warm-paper & deep terracotta */
@@ -27,13 +31,56 @@
   --sl-color-gray-6: #f0ede6;
   --sl-color-gray-7: #f8f6f2;
   --sl-color-black: #ffffff;
+
+  --noev-link-line: #a63a1c66;
+  --noev-select: #f2c4b3;
 }
 
 .hero h1 {
   letter-spacing: -0.02em;
 }
 
+/* Keycaps in prose, written <kbd>…</kbd>. */
+.sl-markdown-content kbd {
+  font-family: var(--sl-font-mono);
+  font-size: 0.85em;
+  padding: 0.05em 0.4em;
+  border: 1px solid var(--sl-color-gray-5);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--sl-color-gray-6);
+}
+
 .sl-markdown-content table {
   display: table;
   width: 100%;
+}
+
+/* Links in prose: copper/terracotta text over a faint underline that fills in on hover. */
+.sl-markdown-content a:not(:where(.not-content *)):not(.sl-anchor-link) {
+  color: var(--sl-color-text-accent);
+  text-decoration-line: underline;
+  text-decoration-color: var(--noev-link-line);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
+  transition: text-decoration-color 0.15s, text-decoration-thickness 0.15s;
+}
+
+.sl-markdown-content a:not(:where(.not-content *)):not(.sl-anchor-link):hover {
+  text-decoration-color: currentColor;
+  text-decoration-thickness: 2px;
+}
+
+/* Keyboard focus ring in the theme's accent. */
+a:focus-visible,
+button:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--sl-color-accent);
+  outline-offset: 2px;
+}
+
+/* Selected text, tinted with the theme's copper/terracotta accent. */
+::selection {
+  background-color: var(--noev-select);
+  color: var(--sl-color-white);
 }
