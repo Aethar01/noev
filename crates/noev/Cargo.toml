@@ -34,6 +34,8 @@ default = ["ketrs", "cranelift", "llvm"]
 # The ketrs simulator as a backend for `noev run` and compiled binaries. Without it, only
 # `--backend=export` runs.
 ketrs = ["noev-runtime/ketrs"]
+# Optional Vulkan GPU engines (`ketrs:gpu`, `ketrs:gpu32`); building requires `glslc`.
+ketrs-gpu = ["ketrs", "noev-runtime/ketrs-gpu"]
 # The Cranelift native code generator (`noev build --codegen=cranelift`).
 cranelift = ["dep:noev-codegen", "noev-codegen/cranelift"]
 # The LLVM native code generator (`noev build --codegen=llvm`).

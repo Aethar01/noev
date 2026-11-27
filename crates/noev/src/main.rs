@@ -569,8 +569,19 @@ fn target_cmd(command: TargetCommand) -> ExitCode {
             }
         }
         TargetCommand::List => {
-            println!("ketrs   (built-in, level=both)");
-            println!("export  (built-in, level=circuit)");
+            println!("ketrs          (built-in, level=both, 30 qubits, FP64 statevector)");
+            for spec_name in noev_sema::TargetSpec::builtin_ketrs_devices() {
+                if let Some(t) = noev_sema::TargetSpec::builtin(spec_name) {
+                    let qubits = t
+                        .qubits
+                        .map_or_else(|| "unbounded".to_string(), |q| format!("{q} qubits"));
+                    println!(
+                        "{spec_name:<14} (built-in, level={}, {qubits})",
+                        t.level.as_str()
+                    );
+                }
+            }
+            println!("export         (built-in, level=circuit, unbounded)");
             match noev_runtime::plugin::list_cached_targets() {
                 Ok(entries) => {
                     for (key, target) in entries {
@@ -981,15 +992,28 @@ fn build_binary(
     ExitCode::from(2)
 }
 
-/// The simulator `noev run` uses, configured with circuit optimization level `opt_level`, if
-/// this build has one.
-fn simulator(opt_level: u8) -> Option<Box<dyn noev_runtime::Backend>> {
+/// The simulator `noev run` uses for `spec` (`"ketrs"` or `"ketrs:<device>"`), configured
+/// with circuit optimization level `opt_level`, if this build has `ketrs`.
+fn simulator(spec: &str, opt_level: u8) -> Result<Box<dyn noev_runtime::Backend>, String> {
     #[cfg(feature = "ketrs")]
-    return Some(Box::new(noev_runtime::Ketrs::with_opt_level(opt_level)));
+    {
+        noev_runtime::KetrsBackend::from_spec(spec, opt_level)
+            .map(|b| Box::new(b) as Box<dyn noev_runtime::Backend>)
+            .ok_or_else(|| {
+                format!(
+                    "unknown ketrs device `{spec}`; valid built-ins are `ketrs`, `ketrs:sv32`, \
+                     `ketrs:mps`, `ketrs:pmps`, `ketrs:density`, `ketrs:gpu`, `ketrs:gpu32`"
+                )
+            })
+    }
     #[cfg(not(feature = "ketrs"))]
     {
-        let _ = opt_level;
-        None
+        let _ = (spec, opt_level);
+        Err(
+            "this noev was built without a simulator (its `ketrs` feature); \
+             `--backend=export` saves the program's circuits instead"
+                .into(),
+        )
     }
 }
 
@@ -1129,28 +1153,30 @@ fn run(
     };
     let sim_holder: Option<Box<dyn noev_runtime::Backend>>;
     let plugin_holder: Option<noev_runtime::plugin::PluginBackend>;
-    let chosen_backend: &dyn noev_runtime::Backend = if chosen == "ketrs" {
-        let Some(simulator) = simulator(circuit_opt) else {
-            anstream::eprintln!(
-                "{ERROR}error:{ERROR:#} this noev was built without a simulator (its `ketrs` feature); \
-                 `--backend=export` saves the program's circuits instead"
-            );
-            return ExitCode::from(2);
+    let chosen_backend: &dyn noev_runtime::Backend =
+        if chosen == "ketrs" || chosen.starts_with("ketrs:") {
+            match simulator(chosen, circuit_opt) {
+                Ok(sim) => {
+                    sim_holder = Some(sim);
+                    sim_holder.as_deref().expect("set")
+                }
+                Err(msg) => {
+                    anstream::eprintln!("{ERROR}error:{ERROR:#} {msg}");
+                    return ExitCode::from(2);
+                }
+            }
+        } else {
+            match noev_runtime::plugin::load_plugin_spec(chosen) {
+                Ok(plugin) => {
+                    plugin_holder = Some(plugin);
+                    plugin_holder.as_ref().expect("set")
+                }
+                Err(error) => {
+                    anstream::eprintln!("{ERROR}error:{ERROR:#} {}", error.0);
+                    return ExitCode::from(2);
+                }
+            }
         };
-        sim_holder = Some(simulator);
-        sim_holder.as_deref().expect("set")
-    } else {
-        match noev_runtime::plugin::load_plugin_spec(chosen) {
-            Ok(plugin) => {
-                plugin_holder = Some(plugin);
-                plugin_holder.as_ref().expect("set")
-            }
-            Err(error) => {
-                anstream::eprintln!("{ERROR}error:{ERROR:#} {}", error.0);
-                return ExitCode::from(2);
-            }
-        }
-    };
     let recorder = noev_runtime::backend::Recorder::new(chosen_backend);
     let result = noev_runtime::run_main(&program, &recorder, seed, output);
     if let Some(dir) = circuits
@@ -1528,15 +1554,17 @@ fn run_tests_interpreted(
     }
     let sim_holder;
     let plugin_holder;
-    let backend: &dyn noev_runtime::Backend = if chosen == "ketrs" {
-        let Some(sim) = simulator(circuit_opt) else {
-            anstream::eprintln!(
-                "{ERROR}error:{ERROR:#} this noev was built without a simulator (its `ketrs` feature)"
-            );
-            return ExitCode::from(2);
-        };
-        sim_holder = sim;
-        &*sim_holder
+    let backend: &dyn noev_runtime::Backend = if chosen == "ketrs" || chosen.starts_with("ketrs:") {
+        match simulator(chosen, circuit_opt) {
+            Ok(sim) => {
+                sim_holder = sim;
+                &*sim_holder
+            }
+            Err(msg) => {
+                anstream::eprintln!("{ERROR}error:{ERROR:#} {msg}");
+                return ExitCode::from(2);
+            }
+        }
     } else {
         match noev_runtime::plugin::load_plugin_spec(chosen) {
             Ok(p) => {

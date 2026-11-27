@@ -147,7 +147,7 @@ pub struct TargetSpec {
 }
 
 impl TargetSpec {
-    /// Target description for the built-in `ketrs` statevector simulator.
+    /// Target description for the built-in `ketrs` FP64 statevector simulator.
     pub fn ketrs() -> Self {
         TargetSpec {
             name: "ketrs".into(),
@@ -165,6 +165,57 @@ impl TargetSpec {
             },
             plugin: None,
         }
+    }
+
+    /// Built-in `ketrs` device target descriptions (`ketrs:sv`, `ketrs:sv32`, `ketrs:mps`,
+    /// `ketrs:pmps`, `ketrs:density`, `ketrs:gpu`, `ketrs:gpu32`).
+    pub fn ketrs_device(device: &str) -> Option<Self> {
+        let circuit_only = TargetCapabilities {
+            read_state: false,
+            check_release: false,
+            exact_expectations: false,
+            sample_state: false,
+            foreign_while_live: true,
+        };
+        let full_sv = TargetCapabilities {
+            read_state: true,
+            check_release: true,
+            exact_expectations: true,
+            sample_state: true,
+            foreign_while_live: true,
+        };
+        let (dev_name, level, qubits, capabilities) = match device {
+            "sv" | "sv64" => (device, BackendLevel::Both, Some(30), full_sv),
+            "sv32" => ("sv32", BackendLevel::Both, Some(31), full_sv),
+            "mps" => ("mps", BackendLevel::Circuit, None, circuit_only),
+            "pmps" => ("pmps", BackendLevel::Circuit, None, circuit_only),
+            "density" => ("density", BackendLevel::Circuit, Some(14), circuit_only),
+            "gpu" => ("gpu", BackendLevel::Circuit, Some(30), circuit_only),
+            "gpu32" => ("gpu32", BackendLevel::Circuit, Some(31), circuit_only),
+            _ => return None,
+        };
+        Some(TargetSpec {
+            name: "ketrs".into(),
+            device: Some(dev_name.into()),
+            level,
+            qubits,
+            gates: None,
+            coupling: None,
+            capabilities,
+            plugin: None,
+        })
+    }
+
+    /// Canonical built-in `ketrs` device specs for `noev target list`.
+    pub fn builtin_ketrs_devices() -> &'static [&'static str] {
+        &[
+            "ketrs:sv32",
+            "ketrs:mps",
+            "ketrs:pmps",
+            "ketrs:density",
+            "ketrs:gpu",
+            "ketrs:gpu32",
+        ]
     }
 
     /// Target description for the built-in `export` circuit recorder.
@@ -187,13 +238,18 @@ impl TargetSpec {
         }
     }
 
-    /// Looks up a built-in target description by name (`ketrs` or `export`).
+    /// Looks up a built-in target description by name (`ketrs`, `ketrs:<device>`, or `export`).
     pub fn builtin(name: &str) -> Option<Self> {
-        match name {
-            "ketrs" => Some(Self::ketrs()),
-            "export" => Some(Self::export()),
-            _ => None,
+        if name == "ketrs" {
+            return Some(Self::ketrs());
         }
+        if name == "export" {
+            return Some(Self::export());
+        }
+        if let Some(device) = name.strip_prefix("ketrs:") {
+            return Self::ketrs_device(device);
+        }
+        None
     }
 
     /// Serialises this target description to a human-readable TOML file.

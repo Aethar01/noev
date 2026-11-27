@@ -24,6 +24,8 @@ rand = { version = "0.9", default-features = false, features = ["small_rng"] }
 
 [features]
 default = ["ketrs"]
+# Optional Vulkan GPU support for `ketrs:gpu` / `ketrs:gpu32` (building requires `glslc`).
+ketrs-gpu = ["ketrs", "ketrs/gpu"]
 
 # The end-to-end tests run programs on ketrs.
 [[test]]

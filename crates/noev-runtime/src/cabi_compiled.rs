@@ -910,20 +910,33 @@ pub unsafe extern "C" fn noev_rt_main_enter(
             }
             return rt;
         }
-        if spec != "ketrs" {
-            match crate::plugin::load_plugin_spec(spec) {
-                Ok(plugin) => {
-                    let mut rt = NoevRuntime::new_owned(Box::new(plugin), seed);
-                    rt.set_output(Rc::new(std::cell::RefCell::new(crate::Output {
-                        stdout: Box::new(std::io::stdout()),
-                        stderr: Box::new(std::io::stderr()),
-                    })));
-                    return Box::into_raw(Box::new(rt));
-                }
-                Err(err) => {
-                    eprintln!("error: {}", err.0);
-                    std::process::exit(1);
-                }
+        #[cfg(feature = "ketrs")]
+        if let Some(ketrs_backend) =
+            crate::backend::ketrs::KetrsBackend::from_spec(spec, effective_circuit_opt)
+        {
+            let mut rt = NoevRuntime::new_owned(Box::new(ketrs_backend), seed);
+            rt.set_output(Rc::new(std::cell::RefCell::new(crate::Output {
+                stdout: Box::new(std::io::stdout()),
+                stderr: Box::new(std::io::stderr()),
+            })));
+            return Box::into_raw(Box::new(rt));
+        }
+        if spec == "ketrs" || spec.starts_with("ketrs:") {
+            eprintln!("error: runtime built without `ketrs` simulator");
+            std::process::exit(1);
+        }
+        match crate::plugin::load_plugin_spec(spec) {
+            Ok(plugin) => {
+                let mut rt = NoevRuntime::new_owned(Box::new(plugin), seed);
+                rt.set_output(Rc::new(std::cell::RefCell::new(crate::Output {
+                    stdout: Box::new(std::io::stdout()),
+                    stderr: Box::new(std::io::stderr()),
+                })));
+                return Box::into_raw(Box::new(rt));
+            }
+            Err(err) => {
+                eprintln!("error: {}", err.0);
+                std::process::exit(1);
             }
         }
     }
@@ -2896,10 +2909,16 @@ pub unsafe extern "C" fn noev_rt_test_run_all(harness: *mut NoevTestHarness) -> 
     let spec = h.backend_spec.as_deref().unwrap_or("ketrs");
     let backend: Box<dyn crate::Backend> = if spec == "export" {
         Box::new(crate::backend::Exporter::default())
-    } else if spec == "ketrs" {
+    } else if spec == "ketrs" || spec.starts_with("ketrs:") {
         #[cfg(feature = "ketrs")]
         {
-            Box::new(crate::backend::ketrs::Ketrs::with_opt_level(h.circuit_opt))
+            match crate::backend::ketrs::KetrsBackend::from_spec(spec, h.circuit_opt) {
+                Some(b) => Box::new(b),
+                None => {
+                    eprintln!("error: unknown ketrs engine `{spec}`");
+                    return 2;
+                }
+            }
         }
         #[cfg(not(feature = "ketrs"))]
         {

@@ -7,7 +7,13 @@ Noev separates programs from quantum hardware through a unified backend interfac
 
 ## Built-in backends
 
-- **`ketrs` (default):** local statevector simulator powered by [`ketrs`](https://github.com/Aethar01/ketrs). Supports gate-level execution, circuit sampling, exact expectation values, and `std::debug::amplitudes`.
+- **`ketrs` (default):** local simulator powered by [`ketrs`](https://github.com/Aethar01/ketrs), exposing every engine as a device target:
+  - `ketrs` / `ketrs:sv`: adaptive FP64 statevector (real to complex, both levels, up to 30 qubits)
+  - `ketrs:sv32`: adaptive FP32 statevector (both levels, up to 31 qubits, half the RAM)
+  - `ketrs:mps`: open-boundary matrix product state (circuit level, 30+ qubits; tune via `NOEV_MPS_MAX_BOND` / `NOEV_MPS_CUTOFF`)
+  - `ketrs:pmps`: periodic-ring matrix product state (circuit level, unitary + terminal measurements)
+  - `ketrs:density`: density matrix simulator (circuit level, up to 14 qubits, unitary + terminal measurements)
+  - `ketrs:gpu` / `ketrs:gpu32`: Vulkan GPU statevector (circuit level; requires building with `--features ketrs-gpu`)
 - **`export`:** records circuits to OpenQASM 3 or QIR 1.0 files without simulating anything (`noev run --backend=export` or `noev export`).
 
 Select a backend on the CLI or in `noev.toml`:
