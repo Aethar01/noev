@@ -830,12 +830,23 @@ fn gate_result(rt: *mut NoevRuntime, res: Result<(), RuntimeError>) -> bool {
 // Program lifecycle and errors
 // ---------------------------------------------------------------------------------------
 
-/// Creates a runtime backed by the `ketrs` simulator, seeded with `seed`.
-/// Free with [`noev_rt_free`].
+/// Creates a runtime backed by the `ketrs` simulator, seeded with `seed` and default
+/// optimization level (`2`). Free with [`noev_rt_free`].
 #[cfg(feature = "ketrs")]
 #[unsafe(no_mangle)]
 pub extern "C" fn noev_rt_new_ketrs(seed: u64) -> *mut NoevRuntime {
-    let mut rt = NoevRuntime::new_owned(Box::new(crate::backend::ketrs::Ketrs), seed);
+    noev_rt_new_ketrs_with_opt(seed, crate::backend::ketrs::DEFAULT_OPT_LEVEL)
+}
+
+/// Creates a runtime backed by the `ketrs` simulator with circuit optimization level
+/// `opt_level` (`0`..=`3`), seeded with `seed`. Free with [`noev_rt_free`].
+#[cfg(feature = "ketrs")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noev_rt_new_ketrs_with_opt(seed: u64, opt_level: u8) -> *mut NoevRuntime {
+    let mut rt = NoevRuntime::new_owned(
+        Box::new(crate::backend::ketrs::Ketrs::with_opt_level(opt_level)),
+        seed,
+    );
     rt.set_output(Rc::new(RefCell::new(Output {
         stdout: Box::new(std::io::stdout()),
         stderr: Box::new(std::io::stderr()),

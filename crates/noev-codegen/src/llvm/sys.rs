@@ -8,7 +8,7 @@ use std::process::Command;
 use std::ptr;
 use std::sync::OnceLock;
 
-use crate::{CodegenError, OptLevel};
+use crate::{CodegenError, LlvmOpt};
 
 type LlvmContextRef = *mut c_void;
 type LlvmModuleRef = *mut c_void;
@@ -192,7 +192,7 @@ fn llvm_api() -> Option<&'static LlvmApi> {
 
 /// Compiles LLVM IR text (`.ll`) into native object bytes (`.o`), using `libLLVM` if present
 /// and falling back to `llc`.
-pub fn compile_ir_to_object(ir: &str, opt: OptLevel) -> Result<Vec<u8>, CodegenError> {
+pub fn compile_ir_to_object(ir: &str, opt: LlvmOpt) -> Result<Vec<u8>, CodegenError> {
     if let Some(api) = llvm_api() {
         return compile_with_libllvm(api, ir, opt);
     }
@@ -210,7 +210,7 @@ fn take_llvm_msg(api: &LlvmApi, ptr: *mut c_char) -> String {
     s
 }
 
-fn compile_with_libllvm(api: &LlvmApi, ir: &str, opt: OptLevel) -> Result<Vec<u8>, CodegenError> {
+fn compile_with_libllvm(api: &LlvmApi, ir: &str, opt: LlvmOpt) -> Result<Vec<u8>, CodegenError> {
     unsafe {
         let ctx = (api.context_create)();
         let buf_name = c"noev_module";
@@ -254,8 +254,10 @@ fn compile_with_libllvm(api: &LlvmApi, ir: &str, opt: OptLevel) -> Result<Vec<u8
         }
 
         let opt_level = match opt {
-            OptLevel::None => 0,  // LLVMCodeGenLevelNone
-            OptLevel::Speed => 2, // LLVMCodeGenLevelDefault (-O2)
+            LlvmOpt::O0 => 0,                             // LLVMCodeGenLevelNone
+            LlvmOpt::O1 => 1,                             // LLVMCodeGenLevelLess (-O1)
+            LlvmOpt::O2 | LlvmOpt::Os | LlvmOpt::Oz => 2, // LLVMCodeGenLevelDefault
+            LlvmOpt::O3 => 3,                             // LLVMCodeGenLevelAggressive (-O3)
         };
         let cpu = c"generic";
         let features = c"";
@@ -276,13 +278,20 @@ fn compile_with_libllvm(api: &LlvmApi, ir: &str, opt: OptLevel) -> Result<Vec<u8
             return Err(CodegenError("failed to create LLVM target machine".into()));
         }
 
-        // Run LLVM new-pass-manager optimization pipeline when optimizing for speed.
-        if opt == OptLevel::Speed
+        // Run LLVM new-pass-manager optimization pipeline for -O1..-O3/-Os/-Oz.
+        // Modern LLVM implements -Os/-Oz via `default<O2>` combined with `optsize`/`minsize`
+        // function attributes (set by `emit.rs`).
+        let passes = match opt {
+            LlvmOpt::O0 => None,
+            LlvmOpt::O1 => Some(c"default<O1>"),
+            LlvmOpt::O2 | LlvmOpt::Os | LlvmOpt::Oz => Some(c"default<O2>"),
+            LlvmOpt::O3 => Some(c"default<O3>"),
+        };
+        if let Some(passes) = passes
             && let (Some(create_opts), Some(dispose_opts), Some(run_passes)) =
                 (api.create_pass_opts, api.dispose_pass_opts, api.run_passes)
         {
             let pb_opts = create_opts();
-            let passes = c"default<O2>";
             let err = run_passes(module, passes.as_ptr(), tm, pb_opts);
             dispose_opts(pb_opts);
             if !err.is_null() {
@@ -327,7 +336,7 @@ fn compile_with_libllvm(api: &LlvmApi, ir: &str, opt: OptLevel) -> Result<Vec<u8
     }
 }
 
-fn compile_with_llc(ir: &str, opt: OptLevel) -> Result<Vec<u8>, CodegenError> {
+fn compile_with_llc(ir: &str, opt: LlvmOpt) -> Result<Vec<u8>, CodegenError> {
     let dir = std::env::temp_dir();
     let tag = format!(
         "noev-llvm-{}-{}",
@@ -344,8 +353,10 @@ fn compile_with_llc(ir: &str, opt: OptLevel) -> Result<Vec<u8>, CodegenError> {
     let mut cmd = Command::new(std::env::var("LLC").unwrap_or_else(|_| "llc".into()));
     cmd.args(["-filetype=obj", "-relocation-model=pic"]);
     cmd.arg(match opt {
-        OptLevel::None => "-O0",
-        OptLevel::Speed => "-O2",
+        LlvmOpt::O0 => "-O0",
+        LlvmOpt::O1 => "-O1",
+        LlvmOpt::O2 | LlvmOpt::Os | LlvmOpt::Oz => "-O2",
+        LlvmOpt::O3 => "-O3",
     });
     cmd.arg("-o").arg(&obj_path).arg(&ll_path);
 

@@ -56,25 +56,119 @@ pub enum RuntimeAbi {
     Qir,
 }
 
-/// Optimization level requested from a code generator.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Optimization level requested from a code generator (`-O0`..`-O3`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OptLevel {
-    /// Fast compilation, minimal optimization.
-    None,
-    /// Standard speed optimizations (`-O2`).
+    /// `-O0`: no optimization, fastest compilation.
+    O0 = 0,
+    /// `-O1`: basic optimizations.
+    O1 = 1,
+    /// `-O2`: standard speed optimizations (default).
     #[default]
+    O2 = 2,
+    /// `-O3`: aggressive speed optimizations.
+    O3 = 3,
+}
+
+impl OptLevel {
+    /// Converts a numeric level (`0`..=`3`) to an [`OptLevel`].
+    pub fn from_u8(level: u8) -> Option<Self> {
+        match level {
+            0 => Some(OptLevel::O0),
+            1 => Some(OptLevel::O1),
+            2 => Some(OptLevel::O2),
+            3 => Some(OptLevel::O3),
+            _ => None,
+        }
+    }
+}
+
+/// Cranelift-specific `opt_level` setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CraneliftOpt {
+    /// `opt_level = "none"`
+    None,
+    /// `opt_level = "speed"`
     Speed,
+    /// `opt_level = "speed_and_size"`
+    SpeedAndSize,
+}
+
+impl CraneliftOpt {
+    /// Converts a generic [`OptLevel`] to a Cranelift setting.
+    pub fn from_opt_level(opt: OptLevel) -> Self {
+        match opt {
+            OptLevel::O0 => CraneliftOpt::None,
+            OptLevel::O1 | OptLevel::O2 | OptLevel::O3 => CraneliftOpt::Speed,
+        }
+    }
+
+    /// Cranelift configuration string value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CraneliftOpt::None => "none",
+            CraneliftOpt::Speed => "speed",
+            CraneliftOpt::SpeedAndSize => "speed_and_size",
+        }
+    }
+}
+
+/// LLVM-specific optimization level (`-O0`, `-O1`, `-O2`, `-O3`, `-Os`, `-Oz`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LlvmOpt {
+    /// `-O0`
+    O0,
+    /// `-O1`
+    O1,
+    /// `-O2`
+    O2,
+    /// `-O3`
+    O3,
+    /// `-Os` (optimize for size)
+    Os,
+    /// `-Oz` (optimize aggressively for size)
+    Oz,
+}
+
+impl LlvmOpt {
+    /// Converts a generic [`OptLevel`] to an [`LlvmOpt`].
+    pub fn from_opt_level(opt: OptLevel) -> Self {
+        match opt {
+            OptLevel::O0 => LlvmOpt::O0,
+            OptLevel::O1 => LlvmOpt::O1,
+            OptLevel::O2 => LlvmOpt::O2,
+            OptLevel::O3 => LlvmOpt::O3,
+        }
+    }
 }
 
 /// Options shared by every [`CodeGenerator`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CodegenOptions {
-    /// Optimization level.
+    /// Overall optimization level (`-O0`..`-O3`).
     pub opt: OptLevel,
+    /// Optional explicit override for Cranelift (`--cranelift-opt`).
+    pub cranelift_opt: Option<CraneliftOpt>,
+    /// Optional explicit override for LLVM (`--llvm-opt`).
+    pub llvm_opt: Option<LlvmOpt>,
     /// Which runtime ABI quantum operations target.
     pub runtime_abi: RuntimeAbi,
     /// Emit a native test runner `main` executing `program.tests` instead of `program.main`.
     pub test_harness: bool,
+}
+
+impl CodegenOptions {
+    /// Effective Cranelift optimization level.
+    pub fn effective_cranelift_opt(self) -> CraneliftOpt {
+        self.cranelift_opt
+            .unwrap_or_else(|| CraneliftOpt::from_opt_level(self.opt))
+    }
+
+    /// Effective LLVM optimization level.
+    pub fn effective_llvm_opt(self) -> LlvmOpt {
+        self.llvm_opt
+            .unwrap_or_else(|| LlvmOpt::from_opt_level(self.opt))
+    }
 }
 
 /// Common interface implemented by every native code generator (`spec/runtime.md` §2).
@@ -190,10 +284,7 @@ impl CodeGenerator for CraneliftCodegen {
         }
 
         let mut flag_builder = settings::builder();
-        let opt = match opts.opt {
-            OptLevel::None => "none",
-            OptLevel::Speed => "speed",
-        };
+        let opt = opts.effective_cranelift_opt().as_str();
         flag_builder
             .set("opt_level", opt)
             .map_err(|e| CodegenError(e.to_string()))?;
@@ -231,4 +322,36 @@ pub fn emit_binary(
     runtime_lib: &Path,
 ) -> Result<(), CodegenError> {
     CraneliftCodegen.emit_binary(program, output, runtime_lib, CodegenOptions::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opt_level_defaults_and_overrides() {
+        let def = CodegenOptions::default();
+        assert_eq!(def.opt, OptLevel::O2);
+        assert_eq!(def.effective_cranelift_opt(), CraneliftOpt::Speed);
+        assert_eq!(def.effective_llvm_opt(), LlvmOpt::O2);
+
+        let o0 = CodegenOptions {
+            opt: OptLevel::O0,
+            ..Default::default()
+        };
+        assert_eq!(o0.effective_cranelift_opt(), CraneliftOpt::None);
+        assert_eq!(o0.effective_llvm_opt(), LlvmOpt::O0);
+
+        let overridden = CodegenOptions {
+            opt: OptLevel::O0,
+            cranelift_opt: Some(CraneliftOpt::SpeedAndSize),
+            llvm_opt: Some(LlvmOpt::Oz),
+            ..Default::default()
+        };
+        assert_eq!(
+            overridden.effective_cranelift_opt(),
+            CraneliftOpt::SpeedAndSize
+        );
+        assert_eq!(overridden.effective_llvm_opt(), LlvmOpt::Oz);
+    }
 }

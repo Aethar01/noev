@@ -24,7 +24,7 @@ use std::rc::Rc;
 
 pub use backend::Backend;
 #[cfg(feature = "ketrs")]
-pub use backend::ketrs::Ketrs;
+pub use backend::ketrs::{Ketrs, KetrsBackend};
 pub use machine::{Machine, Output, RuntimeError};
 use machine::{Mode, Recording};
 pub use value::Value;

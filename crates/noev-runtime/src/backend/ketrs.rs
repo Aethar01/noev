@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use ketrs::{Operation, PauliString, PauliSum, RealStatevector, Statevector};
+use ketrs::{Operation, OptimizationLevel, PauliString, PauliSum, RealStatevector, Statevector};
 use noev_sema::prelude::Gate;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -20,11 +20,83 @@ const MAX_QUBITS: usize = 30;
 /// Tolerance for checking whether an angle or matrix entry is real.
 const REAL_TOL: f64 = 1e-12;
 
-/// The ketrs simulator.
+/// Default circuit optimization level used by [`Ketrs`].
+pub const DEFAULT_OPT_LEVEL: u8 = 2;
+
+/// The ketrs simulator using the default circuit optimization level (`2`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Ketrs;
 
+impl Ketrs {
+    /// Returns a [`KetrsBackend`] configured with circuit optimization level `0`..=`3`.
+    pub fn with_opt_level(opt_level: u8) -> KetrsBackend {
+        KetrsBackend::new(opt_level)
+    }
+}
+
+/// The ketrs simulator with an explicit circuit optimization level (`0`..=`3`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KetrsBackend {
+    opt_level: u8,
+}
+
+impl Default for KetrsBackend {
+    fn default() -> Self {
+        Self::new(DEFAULT_OPT_LEVEL)
+    }
+}
+
+impl KetrsBackend {
+    /// Creates a ketrs backend with circuit optimization level `opt_level` (clamped to `0`..=`3`).
+    pub fn new(opt_level: u8) -> Self {
+        KetrsBackend {
+            opt_level: opt_level.min(3),
+        }
+    }
+
+    /// Configured circuit optimization level (`0`..=`3`).
+    pub fn opt_level(&self) -> u8 {
+        self.opt_level
+    }
+}
+
+fn ketrs_opt_level(level: u8) -> OptimizationLevel {
+    match level {
+        0 => OptimizationLevel::Level0,
+        1 => OptimizationLevel::Level1,
+        2 => OptimizationLevel::Level2,
+        _ => OptimizationLevel::Level3,
+    }
+}
+
 impl Backend for Ketrs {
+    fn name(&self) -> &str {
+        "ketrs"
+    }
+
+    fn exact_expectations(&self) -> bool {
+        true
+    }
+
+    fn target(&self) -> noev_sema::TargetSpec {
+        noev_sema::TargetSpec::ketrs()
+    }
+
+    fn session(&self, seed: u64) -> Option<Box<dyn Session>> {
+        KetrsBackend::default().session(seed)
+    }
+
+    fn run_circuit(
+        &self,
+        circuit: &Circuit,
+        shots: usize,
+        seed: u64,
+    ) -> Option<Result<Counts, BackendError>> {
+        KetrsBackend::default().run_circuit(circuit, shots, seed)
+    }
+}
+
+impl Backend for KetrsBackend {
     fn name(&self) -> &str {
         "ketrs"
     }
@@ -57,8 +129,10 @@ impl Backend for Ketrs {
             Ok(converted) => converted,
             Err(e) => return Some(Err(e)),
         };
-        let optimized = if converted.ops().len() > 1 || !converted.instructions().is_empty() {
-            converted.optimize()
+        let optimized = if self.opt_level > 0
+            && (converted.ops().len() > 1 || !converted.instructions().is_empty())
+        {
+            converted.optimize_level(ketrs_opt_level(self.opt_level))
         } else {
             converted
         };

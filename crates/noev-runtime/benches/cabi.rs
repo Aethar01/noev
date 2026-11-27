@@ -166,17 +166,15 @@ fn main() {
         clbits: n,
         instructions,
     };
-    let time = fastest(5, || {
-        black_box(
-            noev_runtime::Ketrs
-                .run_circuit(&circuit, 10_000, 7)
-                .unwrap()
-                .unwrap(),
+    for level in [0u8, 2, 3] {
+        let backend = noev_runtime::Ketrs::with_opt_level(level);
+        let time = fastest(5, || {
+            black_box(backend.run_circuit(&circuit, 10_000, 7).unwrap().unwrap());
+        });
+        println!(
+            "{:<14} {:>10.2} ms  (16q real circuit, 10000 shots, O{level})",
+            format!("ketrs_16q_O{level}"),
+            time.as_secs_f64() * 1e3,
         );
-    });
-    println!(
-        "{:<14} {:>10.2} ms  (16q real circuit, 10000 shots)",
-        "ketrs_16q_real",
-        time.as_secs_f64() * 1e3,
-    );
+    }
 }

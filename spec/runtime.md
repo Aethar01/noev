@@ -32,11 +32,19 @@ seed gives the same results on a simulator, whichever code generator built it.
 Code generators lower Noev IR, after all checks, to native code. The IR is the boundary: a
 code generator sees only IR, the runtime's function signatures (§4) and the target.
 
-- **Cranelift**: fast compilation, pure Rust. The default for debug builds and `noev run`
-  once it compiles rather than interprets.
-- **LLVM**: slower to compile, better optimised code. The default for release builds.
+- **Cranelift**: fast compilation, pure Rust (`-O0` uses no optimization, `-O1`..`-O3` optimize for speed).
+- **LLVM**: slower to compile, full optimization pipelines for `-O0`..`-O3`.
 - Others can be added (or replace these) without changing the front end, the IR or the
   runtime.
+
+An optimization level (`-O0`, `-O1`, `-O2`, `-O3`, or `--opt-level <0..3>`; default `2`)
+controls both native code generation (`noev build`, `noev test --compile`) and lossless
+circuit optimization on backends that support it (`noev run`, `noev test`, and compiled
+binaries via `-O` / `--opt-level` / `--circuit-opt` or `NOEV_OPT_LEVEL` / `NOEV_CIRCUIT_OPT`).
+Level `0` disables optimization; levels `1` through `3` apply progressively heavier passes
+while preserving exact program and circuit semantics. Each layer can also be tuned
+independently with `--circuit-opt <0..3>`, `--cranelift-opt <none|speed|speed-and-size>`,
+and `--llvm-opt <0|1|2|3|s|z>`.
 
 Classical code becomes ordinary machine code. Quantum operations become calls to the
 runtime (§4). A code generator may inline runtime calls it knows, but must keep their
@@ -254,8 +262,9 @@ configuration.
 
 A program can also be built for a dynamic backend, loaded when it starts, so one binary can
 run on a simulator or on hardware. Compiled binaries accept `--backend=NAME[:DEVICE]` (or
-`--backend NAME[:DEVICE]`, stopping before `--`, or `NOEV_BACKEND`) and `--seed=N` to choose
-the backend and RNG seed at launch. It is then checked against the loaded backend's
+`--backend NAME[:DEVICE]`, stopping before `--`, or `NOEV_BACKEND`), `--seed=N`, and
+`-O N` / `--opt-level=N` (or `NOEV_OPT_LEVEL`) to choose the backend, RNG seed, and circuit
+optimization level at launch. It is then checked against the loaded backend's
 description when it starts, as host functions are checked when it is loaded
 ([interop.md](interop.md) §2), and refuses to run if it needs what the backend lacks.
 

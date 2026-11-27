@@ -90,6 +90,10 @@ noev test [PATH] [FILTER] [OPTIONS]
 | `--backend NAME[:DEVICE]` | Backend to run tests on (`ketrs` by default, or `[target] backend` from `noev.toml`, or a plug-in/cached target) |
 | `--compile` | Compile tests to a native test runner binary instead of running in the interpreter |
 | `--codegen cranelift\|llvm` | Compile and run tests natively with the chosen code generator (implies `--compile`) |
+| `-O, --opt-level <0..3>` | Overall optimization level (`0` = none, `1` = light, `2` = default, `3` = aggressive) for native codegen and circuit optimization |
+| `--circuit-opt <0..3>` | Override quantum circuit optimization level independently of `-O` |
+| `--cranelift-opt <none\|speed\|speed-and-size>` | Override Cranelift codegen optimization setting independently of `-O` |
+| `--llvm-opt <0\|1\|2\|3\|s\|z>` | Override LLVM codegen optimization level independently of `-O` |
 | `--nocapture` | Print each test's standard output as it runs instead of hiding output for passing tests |
 
 Each test runs in an isolated runtime state with its own fresh quantum state and PRNG seed.

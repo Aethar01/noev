@@ -67,6 +67,25 @@ fn bench_codegen(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+    #[cfg(feature = "cranelift")]
+    group.bench_function("cranelift_O0_100_fns", |b| {
+        b.iter_batched(
+            || &program,
+            |prog| {
+                let obj = noev_codegen::CraneliftCodegen
+                    .emit_object(
+                        prog,
+                        CodegenOptions {
+                            opt: OptLevel::O0,
+                            ..CodegenOptions::default()
+                        },
+                    )
+                    .expect("cranelift O0 emit_object");
+                black_box(obj.len())
+            },
+            BatchSize::SmallInput,
+        );
+    });
     #[cfg(feature = "llvm")]
     group.bench_function("llvm_ir_100_fns", |b| {
         b.iter_batched(
@@ -89,7 +108,7 @@ fn bench_codegen(c: &mut Criterion) {
                     .emit_object(
                         prog,
                         CodegenOptions {
-                            opt: OptLevel::Speed,
+                            opt: OptLevel::O2,
                             ..CodegenOptions::default()
                         },
                     )

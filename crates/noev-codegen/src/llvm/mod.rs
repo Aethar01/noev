@@ -32,7 +32,7 @@ impl LlvmCodegen {
         ir: &str,
         opts: CodegenOptions,
     ) -> Result<Vec<u8>, CodegenError> {
-        sys::compile_ir_to_object(ir, opts.opt)
+        sys::compile_ir_to_object(ir, opts.effective_llvm_opt())
     }
 }
 

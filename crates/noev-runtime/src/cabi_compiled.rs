@@ -807,6 +807,8 @@ pub unsafe extern "C" fn noev_rt_main_enter(
 ) -> *mut NoevRuntime {
     let mut seed = 0u64;
     let mut backend_spec: Option<String> = None;
+    let mut circuit_opt: Option<u8> = None;
+    let mut overall_opt: Option<u8> = None;
     if !argv.is_null() && argc > 1 {
         let args = unsafe { std::slice::from_raw_parts(argv, argc as usize) };
         let mut i = 1;
@@ -834,11 +836,63 @@ pub unsafe extern "C" fn noev_rt_main_enter(
                 {
                     backend_spec = Some(next.to_string());
                     i += 1;
+                } else if let Some(rest) = s.strip_prefix("--circuit-opt=") {
+                    if let Ok(n) = rest.parse::<u8>()
+                        && n <= 3
+                    {
+                        circuit_opt = Some(n);
+                    }
+                } else if s == "--circuit-opt"
+                    && i + 1 < args.len()
+                    && let Ok(next) = unsafe { CStr::from_ptr(args[i + 1]) }.to_str()
+                    && let Ok(n) = next.parse::<u8>()
+                    && n <= 3
+                {
+                    circuit_opt = Some(n);
+                    i += 1;
+                } else if let Some(rest) = s
+                    .strip_prefix("--opt-level=")
+                    .or_else(|| s.strip_prefix("-O"))
+                    && !rest.is_empty()
+                {
+                    if let Ok(n) = rest.parse::<u8>()
+                        && n <= 3
+                    {
+                        overall_opt = Some(n);
+                    }
+                } else if (s == "--opt-level" || s == "-O")
+                    && i + 1 < args.len()
+                    && let Ok(next) = unsafe { CStr::from_ptr(args[i + 1]) }.to_str()
+                    && let Ok(n) = next.parse::<u8>()
+                    && n <= 3
+                {
+                    overall_opt = Some(n);
+                    i += 1;
                 }
             }
             i += 1;
         }
     }
+    if circuit_opt.is_none()
+        && let Ok(v) = std::env::var("NOEV_CIRCUIT_OPT")
+        && let Ok(n) = v.parse::<u8>()
+        && n <= 3
+    {
+        circuit_opt = Some(n);
+    }
+    if overall_opt.is_none()
+        && let Ok(v) = std::env::var("NOEV_OPT_LEVEL")
+        && let Ok(n) = v.parse::<u8>()
+        && n <= 3
+    {
+        overall_opt = Some(n);
+    }
+    #[cfg(feature = "ketrs")]
+    let effective_circuit_opt = circuit_opt
+        .or(overall_opt)
+        .unwrap_or(crate::backend::ketrs::DEFAULT_OPT_LEVEL);
+    #[cfg(not(feature = "ketrs"))]
+    let _ = (circuit_opt, overall_opt);
     if backend_spec.is_none()
         && let Ok(env_spec) = std::env::var("NOEV_BACKEND")
         && !env_spec.is_empty()
@@ -875,7 +929,7 @@ pub unsafe extern "C" fn noev_rt_main_enter(
     }
     #[cfg(feature = "ketrs")]
     {
-        cabi::noev_rt_new_ketrs(seed)
+        cabi::noev_rt_new_ketrs_with_opt(seed, effective_circuit_opt)
     }
     #[cfg(not(feature = "ketrs"))]
     {
@@ -2631,6 +2685,7 @@ struct RegisteredTest {
 pub struct NoevTestHarness {
     seed: u64,
     backend_spec: Option<String>,
+    circuit_opt: u8,
     filter: Option<String>,
     prefix: Option<String>,
     list: bool,
@@ -2650,6 +2705,7 @@ pub unsafe extern "C" fn noev_rt_test_harness_new(
 ) -> *mut NoevTestHarness {
     let mut seed: Option<u64> = None;
     let mut backend_spec: Option<String> = None;
+    let mut circuit_opt: Option<u8> = None;
     let mut filter: Option<String> = None;
     let mut prefix: Option<String> = None;
     let mut list = false;
@@ -2682,6 +2738,20 @@ pub unsafe extern "C" fn noev_rt_test_harness_new(
                     && let Ok(next) = unsafe { CStr::from_ptr(args[i + 1]) }.to_str()
                 {
                     backend_spec = Some(next.to_string());
+                    i += 1;
+                } else if let Some(rest) = s.strip_prefix("--circuit-opt=") {
+                    if let Ok(n) = rest.parse::<u8>()
+                        && n <= 3
+                    {
+                        circuit_opt = Some(n);
+                    }
+                } else if s == "--circuit-opt"
+                    && i + 1 < args.len()
+                    && let Ok(next) = unsafe { CStr::from_ptr(args[i + 1]) }.to_str()
+                    && let Ok(n) = next.parse::<u8>()
+                    && n <= 3
+                {
+                    circuit_opt = Some(n);
                     i += 1;
                 } else if let Some(rest) = s.strip_prefix("--filter=") {
                     filter = Some(rest.to_string());
@@ -2724,9 +2794,19 @@ pub unsafe extern "C" fn noev_rt_test_harness_new(
             .map_or(0, |d| d.as_nanos() as u64)
     });
 
+    let circuit_opt = circuit_opt
+        .or_else(|| {
+            std::env::var("NOEV_CIRCUIT_OPT")
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok())
+                .filter(|&n| n <= 3)
+        })
+        .unwrap_or(2);
+
     Box::into_raw(Box::new(NoevTestHarness {
         seed,
         backend_spec,
+        circuit_opt,
         filter,
         prefix,
         list,
@@ -2819,10 +2899,11 @@ pub unsafe extern "C" fn noev_rt_test_run_all(harness: *mut NoevTestHarness) -> 
     } else if spec == "ketrs" {
         #[cfg(feature = "ketrs")]
         {
-            Box::new(crate::backend::ketrs::Ketrs)
+            Box::new(crate::backend::ketrs::Ketrs::with_opt_level(h.circuit_opt))
         }
         #[cfg(not(feature = "ketrs"))]
         {
+            let _ = h.circuit_opt;
             eprintln!("error: runtime built without `ketrs` simulator");
             return 2;
         }

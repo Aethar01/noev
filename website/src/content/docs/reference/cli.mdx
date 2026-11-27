@@ -30,6 +30,8 @@ noev run [OPTIONS] [FILE]
 | --- | --- |
 | `--seed <N>` | PRNG seed for reproducible simulator runs |
 | `--backend <NAME[:DEVICE]>` | Execution backend (`ketrs`, `export`, plug-in library path, or cached target) |
+| `-O, --opt-level <0..3>` | Circuit optimization level (`0` = none, `1` = light, `2` = default, `3` = aggressive) |
+| `--circuit-opt <0..3>` | Override quantum circuit optimization level independently of `-O` |
 | `--circuits <DIR>` | Save every circuit sent to the backend as OpenQASM 3 files in `<DIR>` |
 | `--message-format <human\|short>` | Diagnostic output format |
 
@@ -45,6 +47,9 @@ noev build [OPTIONS] [FILE]
 | --- | --- |
 | `--emit <EMIT>` | Output kind: `binary` (default), `object`, `ir`, `plan`, `qir`, or `llvm-ir` |
 | `--codegen <cranelift\|llvm>` | Native code generator for `binary`, `object`, and `llvm-ir` (`cranelift` by default) |
+| `-O, --opt-level <0..3>` | Overall optimization level (`0` = none, `1` = basic, `2` = default, `3` = aggressive) |
+| `--cranelift-opt <none\|speed\|speed-and-size>` | Override Cranelift `opt_level` independently of `-O` |
+| `--llvm-opt <0\|1\|2\|3\|s\|z>` | Override LLVM optimization level independently of `-O` |
 | `--qir-runtime` | Emit QIR runtime calls (`__quantum__qis__*`, `__quantum__rt__*`) with `--codegen=llvm` |
 | `-l, --link <LIB>` | Extra C objects, static libraries, or library names to link |
 | `--backend <NAME[:DEVICE]>` | Target description for compile-time capability checks |
@@ -67,6 +72,10 @@ noev test [OPTIONS] [PATH] [FILTER]
 | `--backend <NAME[:DEVICE]>` | Backend to run tests on |
 | `--compile` | Compile tests into a native test runner binary |
 | `--codegen <cranelift\|llvm>` | Native code generator (implies `--compile`) |
+| `-O, --opt-level <0..3>` | Overall optimization level (`0`..`3`, default `2`) for native codegen and circuit optimization |
+| `--circuit-opt <0..3>` | Override quantum circuit optimization level independently of `-O` |
+| `--cranelift-opt <none\|speed\|speed-and-size>` | Override Cranelift `opt_level` independently of `-O` |
+| `--llvm-opt <0\|1\|2\|3\|s\|z>` | Override LLVM optimization level independently of `-O` |
 | `--nocapture` | Print test stdout as it runs instead of hiding output for passing tests |
 | `--message-format <human\|short>` | Diagnostic output format |
 

@@ -764,9 +764,14 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             self.emit_term(&term)?;
         }
 
+        let size_attr = match self.opts.effective_llvm_opt() {
+            crate::LlvmOpt::Os => " optsize",
+            crate::LlvmOpt::Oz => " minsize optsize",
+            _ => "",
+        };
         let _ = writeln!(
             out,
-            "\ndefine internal i8 @__noev_fn_{}({}) {{",
+            "\ndefine internal i8 @__noev_fn_{}({}){size_attr} {{",
             self.func_index,
             param_list.join(", ")
         );
