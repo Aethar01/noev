@@ -52,6 +52,12 @@ before 1.0.
   `noev_rt_amplitudes`, `noev_rt_zero_amplitude`, `noev_rt_expectation_exact`,
   `noev_rt_sample_run`, `noev_rt_write`, `noev_rt_assert`), and moved the interpreter
   (`Machine`) onto this C ABI.
+- Cranelift code generator (`spec/runtime.md` §2, §7): added `noev-codegen` behind the
+  optional `cranelift` feature (enabled by default; `--no-default-features` still builds
+  without `cranelift` or `ketrs`), wired `noev build --emit=object|binary` linking against
+  `libnoev_runtime.a`, added a Cranelift throughput benchmark (`noev-codegen/benches/compile`),
+  and verified all 39 `tests/run/*.nv` programs compiled to native binaries against the
+  interpreter.
 - Arithmetic in sizes: `[Qubit; N + 1]`, `[Bit; 2 * N]` and `Reg<{N + 1}>`, compared after
   normalising and solved by calls (`[Qubit; 5]` for `[Qubit; N + 1]` makes `N` 4), so a
   quantum integer can be a library type (`tests/run/qint.nv`). A call also infers a parameter

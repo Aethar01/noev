@@ -20,7 +20,7 @@ use rand::{Rng, SeedableRng};
 use crate::backend::{
     Backend, BackendError, Circuit, Condition, Exporter, Instruction, Op, Session,
 };
-use crate::value::{Pauli, Value};
+use crate::value::{Distribution, Observable, Pauli, Value};
 
 /// Where a program's output goes.
 pub struct Output {
@@ -255,6 +255,12 @@ pub struct NoevRuntime {
     pub needs_values: Cell<bool>,
     /// Error from the most recent failing C ABI call, if any.
     last_error: Option<RuntimeError>,
+    /// Heap arenas for compiled native code (arbitrary-precision ints, strings, observables,
+    /// distributions). Freed automatically when the runtime is dropped.
+    pub(crate) bigints: Vec<num_bigint::BigInt>,
+    pub(crate) strings: Vec<String>,
+    pub(crate) observables: Vec<Observable>,
+    pub(crate) distributions: Vec<Rc<Distribution>>,
 }
 
 impl NoevRuntime {
@@ -302,7 +308,54 @@ impl NoevRuntime {
             mode: Mode::Simulate,
             needs_values: Cell::new(false),
             last_error: None,
+            bigints: Vec::new(),
+            strings: vec![String::new()],
+            observables: vec![Observable::default()],
+            distributions: Vec::new(),
         }
+    }
+
+    /// Creates a child runtime sharing the same backend pointer, output, and value arenas, with
+    /// a fresh seed.
+    pub(crate) unsafe fn child_runtime(&self, seed: u64) -> Self {
+        let mut child = unsafe { Self::new_from_ptr(self.backend.as_ptr(), seed) };
+        child.output = self.output.clone();
+        child.bigints = self.bigints.clone();
+        child.strings = self.strings.clone();
+        child.observables = self.observables.clone();
+        child.distributions = self.distributions.clone();
+        child
+    }
+
+    /// Stores `err` as the last error and returns `false`.
+    pub(crate) fn fail_err(&mut self, error: RuntimeError) -> bool {
+        self.fail(error)
+    }
+
+    /// Applies an [`Op`] through the runtime's recording/execution pipeline.
+    pub(crate) fn emit_gate_op(
+        &mut self,
+        gate: Gate,
+        adjoint: bool,
+        params: Vec<f64>,
+        targets: Vec<usize>,
+    ) -> Result<(), RuntimeError> {
+        self.emit_gate(gate, adjoint, params, targets)
+    }
+
+    /// Releases a qubit through the runtime.
+    pub(crate) fn release_q(&mut self, qubit: usize) -> Result<(), RuntimeError> {
+        self.release_inner(qubit)
+    }
+
+    /// Allocates a qubit through the runtime.
+    pub(crate) fn alloc_q(&mut self) -> Result<usize, RuntimeError> {
+        self.allocate_inner()
+    }
+
+    /// Measures a qubit through the runtime.
+    pub(crate) fn measure_q(&mut self, qubit: usize) -> Result<NoevResult, RuntimeError> {
+        self.measure_inner(qubit)
     }
 
     /// Sets the execution mode (`Mode::Simulate` or `Mode::Build`).

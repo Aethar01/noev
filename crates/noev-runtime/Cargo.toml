@@ -8,6 +8,9 @@ license.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[lib]
+crate-type = ["rlib", "staticlib"]
+
 [dependencies]
 # The ketrs simulator, one backend among possible others.
 ketrs = { version = "0.2.0", optional = true }

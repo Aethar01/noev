@@ -50,10 +50,10 @@ enum Command {
         file: PathBuf,
 
         /// What to produce
-        #[arg(long, value_enum)]
+        #[arg(long, value_enum, default_value_t = Emit::Binary)]
         emit: Emit,
 
-        /// Where to write the output (default: standard output)
+        /// Where to write the output (default: file stem for binary/object, stdout for ir/plan)
         #[arg(short, long, value_name = "PATH")]
         output: Option<PathBuf>,
 
@@ -144,6 +144,10 @@ enum Emit {
     /// How each `sample` run and quantum function runs when repeated: sampled from one
     /// simulation, or shot by shot and why
     Plan,
+    /// A native object file (`.o`) produced by Cranelift
+    Object,
+    /// A standalone native executable compiled by Cranelift and linked with the runtime
+    Binary,
 }
 
 fn main() -> ExitCode {
@@ -252,7 +256,8 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
     })
 }
 
-/// Compiles `file` and writes the requested output to `output`, or to stdout.
+/// Compiles `file` and writes the requested output to `output`, or to stdout (or a default file
+/// name for `--emit=object` and `--emit=binary`).
 fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) -> ExitCode {
     let checked = match front_end(file, format) {
         Ok(checked) => checked,
@@ -264,23 +269,127 @@ fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) 
         &checked.circuits,
         &checked.sources,
     );
-    let text = match emit {
-        Emit::Ir => program.to_string(),
-        Emit::Plan => plan(&checked),
+    match emit {
+        Emit::Ir | Emit::Plan => {
+            let text = match emit {
+                Emit::Ir => program.to_string(),
+                Emit::Plan => plan(&checked),
+                _ => unreachable!(),
+            };
+            match output {
+                Some(path) => match std::fs::write(path, text) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => {
+                        anstream::eprintln!("noev: cannot write {}: {error}", path.display());
+                        ExitCode::from(2)
+                    }
+                },
+                None => {
+                    print!("{text}");
+                    ExitCode::SUCCESS
+                }
+            }
+        }
+        Emit::Object => build_object(file, &program, output),
+        Emit::Binary => build_binary(file, &program, output),
+    }
+}
+
+/// Default output filename when `-o` is omitted for `--emit=object` or `--emit=binary`.
+#[cfg(feature = "cranelift")]
+fn default_artifact_path(file: &Path, ext: Option<&str>) -> PathBuf {
+    let stem = file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty() && *s != ".")
+        .unwrap_or("a");
+    match ext {
+        Some(e) => PathBuf::from(format!("{stem}.{e}")),
+        None => PathBuf::from(stem),
+    }
+}
+
+/// Locates `libnoev_runtime.a` for linking standalone native binaries.
+#[cfg(feature = "cranelift")]
+fn find_runtime_lib() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("NOEV_RUNTIME_LIB") {
+        let p = PathBuf::from(path);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let lib_name = if cfg!(windows) {
+        "noev_runtime.lib"
+    } else {
+        "libnoev_runtime.a"
     };
-    match output {
-        Some(path) => match std::fs::write(path, text) {
+    [
+        dir.join(lib_name),
+        dir.parent().map(|p| p.join(lib_name)).unwrap_or_default(),
+        dir.parent()
+            .map(|p| p.join("lib").join(lib_name))
+            .unwrap_or_default(),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+}
+
+#[cfg(feature = "cranelift")]
+fn build_object(file: &Path, program: &noev_ir::Program, output: Option<&Path>) -> ExitCode {
+    let dest = output
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_artifact_path(file, Some("o")));
+    match noev_codegen::emit_object(program) {
+        Ok(bytes) => match std::fs::write(&dest, bytes) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                anstream::eprintln!("noev: cannot write {}: {error}", path.display());
+                anstream::eprintln!("noev: cannot write {}: {error}", dest.display());
                 ExitCode::from(2)
             }
         },
-        None => {
-            print!("{text}");
-            ExitCode::SUCCESS
+        Err(error) => {
+            anstream::eprintln!("{ERROR}error:{ERROR:#} {error}");
+            ExitCode::from(1)
         }
     }
+}
+
+#[cfg(not(feature = "cranelift"))]
+fn build_object(_file: &Path, _program: &noev_ir::Program, _output: Option<&Path>) -> ExitCode {
+    anstream::eprintln!("{ERROR}error:{ERROR:#} `noev` was built without the `cranelift` feature");
+    ExitCode::from(2)
+}
+
+#[cfg(feature = "cranelift")]
+fn build_binary(file: &Path, program: &noev_ir::Program, output: Option<&Path>) -> ExitCode {
+    if program.main.is_none() {
+        anstream::eprintln!("{ERROR}error:{ERROR:#} no `main` function to build into a binary");
+        return ExitCode::from(1);
+    }
+    let Some(runtime_lib) = find_runtime_lib() else {
+        anstream::eprintln!(
+            "{ERROR}error:{ERROR:#} cannot find `libnoev_runtime.a` (set `NOEV_RUNTIME_LIB` or build `noev-runtime`)"
+        );
+        return ExitCode::from(2);
+    };
+    let dest = output
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_artifact_path(file, None));
+    match noev_codegen::emit_binary(program, &dest, &runtime_lib) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            anstream::eprintln!("{ERROR}error:{ERROR:#} {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(not(feature = "cranelift"))]
+fn build_binary(_file: &Path, _program: &noev_ir::Program, _output: Option<&Path>) -> ExitCode {
+    anstream::eprintln!("{ERROR}error:{ERROR:#} `noev` was built without the `cranelift` feature");
+    ExitCode::from(2)
 }
 
 /// The simulator `noev run` uses, if this build has one.

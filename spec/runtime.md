@@ -5,9 +5,10 @@ program is native code linked to the **Noev runtime**. The runtime sends quantum
 to a **quantum backend**: a simulator such as ketrs, or a quantum computer's control stack.
 The program does not depend on which backend it runs on.
 
-Status: the backend interface (§3) and the runtime C ABI (§4) are implemented; the
-interpreter (`noev run`, §6) drives the runtime through the C ABI, with ketrs and export
-as backends. Code generators (§2) and target descriptions (§5) are still design.
+Status: the backend interface (§3), the runtime C ABI (§4), the interpreter (`noev run`, §6),
+and the Cranelift code generator (`noev build --emit=object|binary`, §2, §7, behind the
+optional `cranelift` feature) are implemented, with ketrs and export as backends. LLVM, QIR
+export, and target descriptions (§5) are still design.
 
 ```
 program.nv ─▶ front end ─▶ Noev IR ─┬─▶ code generator ─▶ native object ─┐
@@ -279,13 +280,14 @@ outcome; the repeated runs it starts are computed once, while recording. `noev e
 
 | `--emit=` | Output                                                                    |
 | --------- | ------------------------------------------------------------------------- |
-| `binary`  | An executable linked to the runtime and a backend (the default, later)     |
+| `binary`  | An executable linked to the runtime and a backend (the default)           |
 | `object`  | A native object file, to link yourself                                    |
 | `qir`     | QIR                                                                       |
 | `ir`      | Noev IR, for inspecting the compiler                                      |
 | `plan`    | How each repeated run executes ([execution.md](execution.md) §5)          |
 
-`binary`, `object` and `qir` are not implemented yet. `--emit` is required until `binary` is.
+`binary` (the default) and `object` are produced by Cranelift (behind the optional `cranelift`
+feature, on by default); `qir` is not implemented yet.
 
 ### Saving circuits
 

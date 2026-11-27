@@ -207,7 +207,8 @@ noev/
 │   ├── noev-syntax/           # tokens, lexer, parser, AST, spans
 │   ├── noev-sema/             # name resolution, type checker, ownership checker
 │   ├── noev-ir/               # quantum IR, lowering from AST
-│   ├── noev-runtime/          # interpreter, backend interface (ketrs), OpenQASM 3 output
+│   ├── noev-runtime/          # Runtime C ABI, interpreter, backend interface (ketrs), OpenQASM 3 output
+│   ├── noev-codegen/          # Cranelift native code generator (--emit=object|binary, optional feature)
 │   └── noev/                  # CLI binary: check / build / run / export, diagnostics rendering, language server
 ├── editors/                   # tree-sitter-noev grammar, nvim support
 ├── examples/                  # bell, hybrid, energy, qft, teleport, clone
@@ -435,7 +436,7 @@ gets a compile-fail test under `tests/ui/`.
 | 5  | `with`/`do` and release       | Compute–use–uncompute blocks, and automatic release of qubits proven to be in \|0⟩ (`spec/ownership.md` §8–9) | ☑ Done |
 | 6  | Lifetimes                     | Non-lexical lifetimes, explicit lifetimes, references in structs     | ☑ Done |
 | 7  | Runtime C ABI                 | Shaped like QIR's, with the interpreter moved onto it (`spec/runtime.md` §4) | ☑ Done |
-| 8  | Cranelift code generator      | `noev build --emit=binary\|object`; compiled programs tested against the interpreter | ☐ |
+| 8  | Cranelift code generator      | `noev build --emit=binary\|object`; compiled programs tested against the interpreter | ☑ Done |
 | 9  | QIR export                    | `--emit=qir`: base profile for circuits, adaptive profile for classical control | ☐ |
 | 10 | LLVM code generator           | Behind the same code-generation interface, optionally emitting QIR calls so programs link to QIR runtimes | ☐ |
 | 11 | Rust embedding API            | A Rust program loads a Noev program, calls its functions and provides `extern fn`s, checked when the program is loaded; host functions can call back into the program; safe, so no `unsafe` (`spec/interop.md` §2) | ☐ |

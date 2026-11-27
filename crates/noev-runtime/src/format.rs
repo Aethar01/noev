@@ -249,7 +249,7 @@ fn write_value(program: &Program, value: &Value, ty: Ty, out: &mut String) {
     }
 }
 
-fn write_observable(o: &Observable, out: &mut String) {
+pub(crate) fn write_observable(o: &Observable, out: &mut String) {
     use std::fmt::Write;
     if o.terms.is_empty() {
         out.push_str("0.0");

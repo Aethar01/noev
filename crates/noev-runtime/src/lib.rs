@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod cabi;
+pub mod cabi_compiled;
 pub mod format;
 pub mod fourier;
 pub mod int;
