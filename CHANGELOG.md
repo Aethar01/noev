@@ -54,10 +54,16 @@ before 1.0.
   (`Machine`) onto this C ABI.
 - Cranelift code generator (`spec/runtime.md` §2, §7): added `noev-codegen` behind the
   optional `cranelift` feature (enabled by default; `--no-default-features` still builds
-  without `cranelift` or `ketrs`), wired `noev build --emit=object|binary` linking against
-  `libnoev_runtime.a`, added a Cranelift throughput benchmark (`noev-codegen/benches/compile`),
-  and verified all 39 `tests/run/*.nv` programs compiled to native binaries against the
-  interpreter.
+  without `cranelift` or `ketrs`), wired `noev build --emit=object|binary` (`binary` is now
+  the default) linking against `libnoev_runtime.a`, added a Cranelift throughput benchmark
+  (`noev-codegen/benches/compile`), and verified all 39 `tests/run/*.nv` programs compiled
+  to native binaries against the interpreter.
+- QIR 1.0 export (`spec/runtime.md` §4, §7): added `noev-runtime::qir` emitting QIR 1.0
+  LLVM IR (Base Profile for straight-line circuits, Adaptive Profile for mid-circuit
+  measurement, `reset`, `if`, and `while`), decomposing `U`, `P`, matrix unitaries, and
+  arbitrary multi-controlled gates into standard QIR QIS intrinsics with zero extra ancillas;
+  wired `noev build --emit=qir` and `noev export --format=qir` (working without optional
+  features), with `ketrs` statevector fidelity verification and a QIR benchmark.
 - Arithmetic in sizes: `[Qubit; N + 1]`, `[Bit; 2 * N]` and `Reg<{N + 1}>`, compared after
   normalising and solved by calls (`[Qubit; 5]` for `[Qubit; N + 1]` makes `N` 4), so a
   quantum integer can be a library type (`tests/run/qint.nv`). A call also infers a parameter

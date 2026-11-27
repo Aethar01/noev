@@ -9,6 +9,7 @@ pub mod int;
 pub mod kak;
 pub mod machine;
 pub mod qasm;
+pub mod qir;
 pub mod sampling;
 pub mod sized;
 pub mod unitary;

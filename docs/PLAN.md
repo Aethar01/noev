@@ -437,7 +437,7 @@ gets a compile-fail test under `tests/ui/`.
 | 6  | Lifetimes                     | Non-lexical lifetimes, explicit lifetimes, references in structs     | ☑ Done |
 | 7  | Runtime C ABI                 | Shaped like QIR's, with the interpreter moved onto it (`spec/runtime.md` §4) | ☑ Done |
 | 8  | Cranelift code generator      | `noev build --emit=binary\|object`; compiled programs tested against the interpreter | ☑ Done |
-| 9  | QIR export                    | `--emit=qir`: base profile for circuits, adaptive profile for classical control | ☐ |
+| 9  | QIR export                    | `--emit=qir`: base profile for circuits, adaptive profile for classical control | ☑ Done |
 | 10 | LLVM code generator           | Behind the same code-generation interface, optionally emitting QIR calls so programs link to QIR runtimes | ☐ |
 | 11 | Rust embedding API            | A Rust program loads a Noev program, calls its functions and provides `extern fn`s, checked when the program is loaded; host functions can call back into the program; safe, so no `unsafe` (`spec/interop.md` §2) | ☐ |
 | 12 | Python bindings               | On the Rust API, with PyO3 as in `ketrs-py`: Python optimisers driving Noev expectation values | ☐ |

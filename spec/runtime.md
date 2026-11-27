@@ -6,9 +6,10 @@ to a **quantum backend**: a simulator such as ketrs, or a quantum computer's con
 The program does not depend on which backend it runs on.
 
 Status: the backend interface (§3), the runtime C ABI (§4), the interpreter (`noev run`, §6),
-and the Cranelift code generator (`noev build --emit=object|binary`, §2, §7, behind the
-optional `cranelift` feature) are implemented, with ketrs and export as backends. LLVM, QIR
-export, and target descriptions (§5) are still design.
+the Cranelift code generator (`noev build --emit=object|binary`, §2, §7, behind the optional
+`cranelift` feature), and QIR 1.0 export (`noev build --emit=qir` and `noev export --format=qir`,
+§4, §7) are implemented, with ketrs and export as backends. LLVM and target descriptions (§5)
+are still design.
 
 ```
 program.nv ─▶ front end ─▶ Noev IR ─┬─▶ code generator ─▶ native object ─┐
@@ -287,7 +288,9 @@ outcome; the repeated runs it starts are computed once, while recording. `noev e
 | `plan`    | How each repeated run executes ([execution.md](execution.md) §5)          |
 
 `binary` (the default) and `object` are produced by Cranelift (behind the optional `cranelift`
-feature, on by default); `qir` is not implemented yet.
+feature, on by default). `qir` emits QIR 1.0 LLVM IR text (`.ll`) with Base Profile for
+circuits and Adaptive Profile for mid-circuit measurement, reset, and classical control;
+`noev export --format=qir` saves one `.ll` file per circuit.
 
 ### Saving circuits
 

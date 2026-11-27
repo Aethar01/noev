@@ -1164,6 +1164,7 @@ dependencies = [
 name = "noev-runtime"
 version = "0.4.2"
 dependencies = [
+ "criterion",
  "ketrs",
  "noev-ir",
  "noev-sema",

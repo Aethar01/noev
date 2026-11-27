@@ -35,5 +35,12 @@ name = "cabi"
 harness = false
 required-features = ["ketrs"]
 
+[[bench]]
+name = "qir"
+harness = false
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+
 [lints]
 workspace = true

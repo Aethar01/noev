@@ -120,6 +120,8 @@ enum BackendChoice {
 enum ExportFormat {
     /// OpenQASM 3
     Qasm3,
+    /// QIR 1.0 (LLVM IR text, `.ll`)
+    Qir,
 }
 
 #[derive(clap::Args)]
@@ -144,6 +146,9 @@ enum Emit {
     /// How each `sample` run and quantum function runs when repeated: sampled from one
     /// simulation, or shot by shot and why
     Plan,
+    /// QIR 1.0 (LLVM IR text, `.ll`): base profile for circuits, adaptive profile for
+    /// classical control
+    Qir,
     /// A native object file (`.o`) produced by Cranelift
     Object,
     /// A standalone native executable compiled by Cranelift and linked with the runtime
@@ -192,10 +197,16 @@ fn main() -> ExitCode {
         Command::Export {
             file,
             output,
-            format: ExportFormat::Qasm3,
+            format: export_format,
             messages,
         } => match front_end(&file, messages.message_format) {
-            Ok(checked) => export(&file, &checked, output.as_deref(), messages.message_format),
+            Ok(checked) => export(
+                &file,
+                &checked,
+                output.as_deref(),
+                export_format,
+                messages.message_format,
+            ),
             Err(code) => code,
         },
     }
@@ -290,8 +301,60 @@ fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) 
                 }
             }
         }
+        Emit::Qir => build_qir(file, &checked, &program, output, format),
         Emit::Object => build_object(file, &program, output),
         Emit::Binary => build_binary(file, &program, output),
+    }
+}
+
+/// Records `program`'s circuits without a simulator and writes one QIR 1.0 LLVM IR module to
+/// `output`, or to standard output.
+fn build_qir(
+    file: &Path,
+    checked: &Checked,
+    program: &noev_ir::Program,
+    output: Option<&Path>,
+    format: MessageFormat,
+) -> ExitCode {
+    let exporter = noev_runtime::backend::Exporter::default();
+    let sink = noev_runtime::Output {
+        stdout: Box::new(std::io::sink()),
+        stderr: Box::new(std::io::sink()),
+    };
+    let result = noev_runtime::run_main(program, &exporter, 0, sink);
+    let jobs = exporter.jobs.borrow();
+    let header = [format!("Generated from {} by noev", file.display())];
+    let text = noev_runtime::qir::to_qir_module(&jobs, &header);
+    let write_res = match output {
+        Some(path) => std::fs::write(path, text).map_err(|error| {
+            anstream::eprintln!("noev: cannot write {}: {error}", path.display());
+            ExitCode::from(2)
+        }),
+        None => {
+            print!("{text}");
+            Ok(())
+        }
+    };
+    if let Err(code) = write_res {
+        return code;
+    }
+    let human = matches!(format, MessageFormat::Human);
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error.unknown => {
+            if human {
+                anstream::eprintln!(
+                    "{NOTE}note:{NOTE:#} stopped where {}, which needs a simulator or quantum \
+                     computer; any circuits after that need `noev run --circuits`",
+                    error.message
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            report_runtime_error(checked, error, format);
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -406,6 +469,7 @@ fn export(
     file: &Path,
     checked: &Checked,
     output: Option<&Path>,
+    export_format: ExportFormat,
     format: MessageFormat,
 ) -> ExitCode {
     let program = &noev_ir::lower(
@@ -423,16 +487,20 @@ fn export(
     let result = noev_runtime::run_main(program, &exporter, 0, sink);
     let jobs = exporter.jobs.borrow();
     let saved = match output {
-        Some(dir) => save_circuits(file, dir, &jobs, format),
+        Some(dir) => save_circuits(file, dir, &jobs, export_format, format),
         None => {
             for (i, (circuit, shots)) in jobs.iter().enumerate() {
                 if i > 0 {
                     println!();
                 }
-                print!(
-                    "{}",
-                    noev_runtime::qasm::to_qasm3(circuit, &circuit_header(file, i, *shots))
-                );
+                let header = circuit_header(file, i, *shots);
+                let text = match export_format {
+                    ExportFormat::Qasm3 => noev_runtime::qasm::to_qasm3(circuit, &header),
+                    ExportFormat::Qir => {
+                        noev_runtime::qir::to_qir(circuit, &format!("circuit_{}", i + 1), &header)
+                    }
+                };
+                print!("{text}");
             }
             Ok(())
         }
@@ -501,7 +569,7 @@ fn run(
         Err(code) => return code,
     };
     if backend == Some(BackendChoice::Export) {
-        return export(file, &checked, circuits, format);
+        return export(file, &checked, circuits, ExportFormat::Qasm3, format);
     }
     let program = noev_ir::lower(
         &checked.ast,
@@ -537,7 +605,13 @@ fn run(
     let backend = noev_runtime::backend::Recorder::new(simulator);
     let result = noev_runtime::run_main(&program, &backend, seed, output);
     if let Some(dir) = circuits
-        && let Err(code) = save_circuits(file, dir, &backend.jobs.borrow(), format)
+        && let Err(code) = save_circuits(
+            file,
+            dir,
+            &backend.jobs.borrow(),
+            ExportFormat::Qasm3,
+            format,
+        )
     {
         return code;
     }
@@ -621,11 +695,13 @@ fn plan(checked: &Checked) -> String {
         .collect()
 }
 
-/// Writes each circuit job as `DIR/circuit-N.qasm`, numbered in the order they ran.
+/// Writes each circuit job as `DIR/circuit-N.qasm` or `DIR/circuit-N.ll`, numbered in the
+/// order they ran.
 fn save_circuits(
     file: &Path,
     dir: &Path,
     jobs: &[(noev_runtime::backend::Circuit, usize)],
+    export_format: ExportFormat,
     format: MessageFormat,
 ) -> Result<(), ExitCode> {
     let fail = |error: std::io::Error| {
@@ -635,8 +711,15 @@ fn save_circuits(
     std::fs::create_dir_all(dir).map_err(fail)?;
     for (i, (circuit, shots)) in jobs.iter().enumerate() {
         let header = circuit_header(file, i, *shots);
-        let path = dir.join(format!("circuit-{}.qasm", i + 1));
-        std::fs::write(&path, noev_runtime::qasm::to_qasm3(circuit, &header)).map_err(fail)?;
+        let (ext, text) = match export_format {
+            ExportFormat::Qasm3 => ("qasm", noev_runtime::qasm::to_qasm3(circuit, &header)),
+            ExportFormat::Qir => (
+                "ll",
+                noev_runtime::qir::to_qir(circuit, &format!("circuit_{}", i + 1), &header),
+            ),
+        };
+        let path = dir.join(format!("circuit-{}.{ext}", i + 1));
+        std::fs::write(&path, text).map_err(fail)?;
     }
     if matches!(format, MessageFormat::Human) {
         let what = match jobs.len() {
