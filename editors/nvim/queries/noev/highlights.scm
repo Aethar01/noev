@@ -14,9 +14,9 @@
 
 ((type_identifier) @type.builtin
   (#any-of? @type.builtin
-    "Int" "Float" "Bool" "Bit" "String" "Qubit" "Observable" "Distribution" "Basis"
-    "Option" "Result"
-    "i8" "i16" "i32" "i64" "u8" "u16" "u32" "u64" "f32" "f64"))
+    "Int" "Float" "Complex" "Bool" "Bit" "String" "Qubit" "Observable" "Distribution" "Basis"
+    "Option" "Result" "Vec"
+    "i8" "i16" "i32" "i64" "u8" "u16" "u32" "u64" "f32" "f64" "c32" "c64"))
 
 
 (self) @variable.builtin
@@ -59,11 +59,11 @@
 ; Conversions and observables look like calls to types: `Float(n)`, `Z(0)`.
 (call_expression
   function: (identifier) @type.builtin
-  (#any-of? @type.builtin "Int" "Float" "Bool" "Bit"))
+  (#any-of? @type.builtin "Int" "Float" "Complex" "Bool" "Bit"))
 
 (call_expression
   function: (identifier) @function.builtin
-  (#any-of? @function.builtin "X" "Y" "Z" "I" "P" "PX" "print" "eprint" "measure" "measure_in" "swap"))
+  (#any-of? @function.builtin "X" "Y" "Z" "I" "P" "PX" "print" "eprint" "measure" "measure_in" "swap" "qasm"))
 
 (method_identifier) @function.method.call
 
@@ -166,6 +166,12 @@
 
 (modifier) @keyword.modifier
 
+(test_modifier
+  [
+    "test"
+    "fail"
+  ] @attribute)
+
 [
   "sample"
   "ctrl"
@@ -240,4 +246,4 @@
 ; Sized number types called as conversions; last, so they win over calls: `u8(x)`, `u8::try_from(x)`.
 ((identifier) @type.builtin
   (#any-of? @type.builtin
-    "i8" "i16" "i32" "i64" "u8" "u16" "u32" "u64" "f32" "f64"))
+    "i8" "i16" "i32" "i64" "u8" "u16" "u32" "u64" "f32" "f64" "c32" "c64"))

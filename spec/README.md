@@ -1,6 +1,6 @@
 # Noev Language Specification
 
-Version 0.4, draft. These documents define the Noev language. The Rust compiler in
+Version 0.5, draft. These documents define the Noev language. The Rust compiler in
 `crates/` is one implementation of them. When the compiler and the spec disagree, the
 compiler is wrong, or the spec is changed on purpose.
 
@@ -12,8 +12,8 @@ compiler is wrong, or the spec is changed on purpose.
 | [core.md](core.md)             | Intrinsics: built-in gates, measurement, observables, maths |
 | [std.md](std.md)               | The standard library, with a reference definition in Noev for each item |
 | [execution.md](execution.md)   | Runs, shots, sampling, and when a run is a circuit         |
-| [runtime.md](runtime.md)       | Code generators, the runtime and quantum backends (Design) |
-| [modules.md](modules.md)       | Modules, imports, visibility and packages (Reserved)      |
+| [runtime.md](runtime.md)       | Code generators, the runtime and quantum backends         |
+| [modules.md](modules.md)       | Modules, imports, visibility and packages                 |
 | [interop.md](interop.md)       | Calling Noev from other languages, and foreign functions  |
 | [testing.md](testing.md)       | `test fn`, expected failures, `assert` messages, `noev test` |
 

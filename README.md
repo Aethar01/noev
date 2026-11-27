@@ -29,16 +29,17 @@ $ noev run examples/bell.nv
 P(11) = 0.493
 ```
 
-Status: 0.4, with 0.5 in progress. The language is specified in [`spec/`](spec/), and this
-compiler implements all of it apart from the parts marked *Reserved* there. Modules,
-packages, traits and generics are in; `with`/`do`, lifetimes, native code and interop are
-still to come ([`docs/PLAN.md`](docs/PLAN.md) §11). Expect changes before 1.0.
+Status: 0.5. The language is specified in [`spec/`](spec/), and this compiler implements
+modules and packages, generics and traits, `with`/`do` uncomputation, non-lexical lifetimes,
+Cranelift and LLVM native code generation, OpenQASM 3 and QIR 1.0 export, Rust/Python/C
+interop, plug-in backends, and the built-in test runner ([`docs/PLAN.md`](docs/PLAN.md) §11).
+Expect changes before 1.0.
 
 ## What it does
 
 - **Qubits are owned.** A qubit is a linear value: it must be measured, discarded or returned
   exactly once, and can't be copied. `ref` and `mut` lend it, as in Rust. Breaking a rule is
-  a compile error with its own code (N001–N023, [`spec/ownership.md`](spec/ownership.md)).
+  a compile error with its own code (N001–N024, [`spec/ownership.md`](spec/ownership.md)).
 - **Every call runs once.** Code reads in order, quantum or not. Repeating a run is explicit:
   `sample n { … }` runs a block `n` times and gives a `Distribution`, and `<ψ| H |ψ>` is an
   expectation value, estimated `within` a precision you choose.
@@ -74,12 +75,15 @@ simulator: it still checks, builds and exports programs, but `noev run` needs
 ## Use
 
 ```
-noev check prog.nv              # types and ownership
+noev check prog.nv              # types, ownership and target capabilities
 noev run prog.nv                # run main; output is what it prints
 noev run prog.nv --seed 7       # reproduce a run
+noev test                       # run `test fn` suites (add --compile for native code)
+noev build prog.nv              # compile to a native binary (--codegen=cranelift|llvm)
 noev build prog.nv --emit=plan  # how each run executes: circuit or shot by shot, and why
-noev build prog.nv --emit=ir    # the compiler's intermediate representation
-noev export prog.nv -o out/     # every circuit, as OpenQASM 3, without running anything
+noev build prog.nv --emit=qir   # QIR 1.0 LLVM IR
+noev export prog.nv -o out/     # every circuit, as OpenQASM 3 (--format=qir for QIR)
+noev target list                # list built-in and cached backend targets
 ```
 
 The [`examples/`](examples/) show the language: a Bell pair, a hybrid struct holding an angle
@@ -100,8 +104,9 @@ on hover, go to definition and document symbols. See
 - [`tests/ui/`](tests/ui/) and [`tests/run/`](tests/run/): the conformance suite, checked only
   through the `noev` command line, so any implementation can use it.
 - [`crates/`](crates/): the compiler, one crate per phase: `noev-syntax` (lexer, parser),
-  `noev-sema` (types, ownership, circuits), `noev-ir`, `noev-runtime` (interpreter, backends,
-  OpenQASM output) and `noev` (the command line).
+  `noev-sema` (types, ownership, circuits, targets), `noev-ir`, `noev-codegen` (Cranelift and
+  LLVM), `noev-runtime` (interpreter, C ABI, backends, OpenQASM 3 / QIR export), `noev-c`
+  (C/C++ embedding library), `noev-py` (Python bindings), and `noev` (CLI, LSP, Rust API).
 - [`docs/PLAN.md`](docs/PLAN.md): the plan, decisions and roadmap.
 
 `cargo test --workspace` runs everything, and `cargo bench -p noev-syntax`, `-p noev-sema` and

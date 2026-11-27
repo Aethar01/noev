@@ -1,8 +1,10 @@
 [
   (block)
   (struct_item)
+  (enum_item)
   (trait_item)
   (impl_item)
+  (extern_item)
   (arguments)
   (parameters)
   (array_expression)

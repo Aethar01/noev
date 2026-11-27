@@ -7,6 +7,8 @@ before 1.0.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-27
+
 ### Spec
 
 - 0.5 is planned in `docs/PLAN.md`: modules, generics, native code, interop and backends.
