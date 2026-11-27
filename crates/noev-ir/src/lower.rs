@@ -199,6 +199,7 @@ fn stub(name: String, span: Span) -> Function {
         }],
         span,
         sampled: false,
+        is_extern: false,
     }
 }
 
@@ -285,6 +286,18 @@ impl<'a> Builder<'a> {
         builder.params = params;
         builder.args = args;
         builder.function.span = decl.span;
+        builder.function.is_extern = decl.is_extern;
+        if decl.is_extern {
+            for (param, &ty) in syntax.list(decl.params).iter().zip(info.sig.params.iter()) {
+                builder.function.locals.push(LocalDecl {
+                    ty,
+                    name: Some(syntax.name(param.name).to_string()),
+                });
+                builder.function.params += 1;
+            }
+            builder.function.blocks.clear();
+            return builder;
+        }
         match (info.self_local, info.receiver_ty) {
             (Some(local), _) => {
                 builder.declare(local);
@@ -340,6 +353,7 @@ impl<'a> Builder<'a> {
                 blocks: Vec::new(),
                 span: body.map_or(Span::default(), |b| syntax.block(b).span),
                 sampled: false,
+                is_extern: false,
             },
             current: Block(0),
             locals: vec![None; typed.locals.len()],
@@ -443,6 +457,9 @@ impl<'a> Builder<'a> {
     }
 
     fn build(mut self) -> Function {
+        if self.function.is_extern {
+            return self.function;
+        }
         if let Some(body) = self.body {
             let dest = (self.function.locals[0].ty != Ty::UNIT).then(|| Place::local(Local(0)));
             self.block_into(body, dest);

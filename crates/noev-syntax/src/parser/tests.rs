@@ -480,7 +480,11 @@ fn helpful_errors() {
     );
     assert_eq!(
         errors("extern fn f(x: Float) -> Float\nfn g() {}"),
-        ["`extern` functions are not supported yet"]
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        errors("extern \"C\" { fn erf(x: Float) -> Float }"),
+        ["`extern \"C\"` declarations are not supported yet"]
     );
     assert_eq!(
         errors("fn f(x: Int) -> Float { x as Float }"),

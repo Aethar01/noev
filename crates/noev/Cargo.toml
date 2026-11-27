@@ -54,5 +54,15 @@ required-features = ["ketrs", "cranelift"]
 name = "llvm"
 required-features = ["ketrs", "llvm"]
 
+# The Rust embedding suite needs the ketrs simulator for quantum calls.
+[[test]]
+name = "embed"
+required-features = ["ketrs"]
+
+[[bench]]
+name = "embed"
+harness = false
+required-features = ["ketrs"]
+
 [lints]
 workspace = true

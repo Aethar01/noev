@@ -202,7 +202,7 @@ noev/
 │   ├── std.md                 #   standard library, with reference definitions in Noev
 │   ├── runtime.md             #   code generators, the runtime and quantum backends (design)
 │   ├── modules.md             #   modules, imports, visibility, packages (reserved)
-│   └── interop.md             #   calling into and out of Noev (reserved)
+│   └── interop.md             #   calling into and out of Noev (Rust embedding implemented; Python and C reserved)
 ├── crates/
 │   ├── noev-syntax/           # tokens, lexer, parser, AST, spans
 │   ├── noev-sema/             # name resolution, type checker, ownership checker
@@ -439,7 +439,7 @@ gets a compile-fail test under `tests/ui/`.
 | 8  | Cranelift code generator      | `noev build --emit=binary\|object`; compiled programs tested against the interpreter | ☑ Done |
 | 9  | QIR export                    | `--emit=qir`: base profile for circuits, adaptive profile for classical control | ☑ Done |
 | 10 | LLVM code generator           | Behind the same code-generation interface, optionally emitting QIR calls so programs link to QIR runtimes | ☑ Done |
-| 11 | Rust embedding API            | A Rust program loads a Noev program, calls its functions and provides `extern fn`s, checked when the program is loaded; host functions can call back into the program; safe, so no `unsafe` (`spec/interop.md` §2) | ☐ |
+| 11 | Rust embedding API            | A Rust program loads a Noev program, calls its functions and provides `extern fn`s, checked when the program is loaded; host functions can call back into the program; safe, so no `unsafe` (`spec/interop.md` §2) | ☑ Done |
 | 12 | Python bindings               | On the Rust API, with PyO3 as in `ketrs-py`: Python optimisers driving Noev expectation values | ☐ |
 | 13 | C, both ways                  | `extern "C"` imports called inside `unsafe`, arrays by reference, `extern "C" struct`, `extern "C" fn` callbacks, and a `noev.h` API for C and C++ hosts (`spec/interop.md` §3); imports use native code generation | ☐ |
 | 14 | Inline OpenQASM               | Hardware-specific gates, inside `unsafe`                              | ☐ |

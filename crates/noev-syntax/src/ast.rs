@@ -395,6 +395,12 @@ macro_rules! arena {
     };
 }
 
+impl Ast {
+    pub(crate) fn function_mut(&mut self, id: FnId) -> &mut FnDecl {
+        &mut self.fns[id.index()]
+    }
+}
+
 arena! {
     push_expr, expr, all_exprs: ExprId => Expr in exprs;
     push_stmt, stmt, all_stmts: StmtId => Stmt in stmts;
@@ -674,6 +680,7 @@ impl Ast {
             is_unsafe: false,
             is_rev: false,
             is_circuit: false,
+            is_extern: false,
             receiver: Some(Receiver {
                 kind: OwnKind::Mv,
                 span: at,
@@ -1570,13 +1577,15 @@ pub struct FnDecl {
     pub is_rev: bool,
     /// Whether it is `circuit fn`.
     pub is_circuit: bool,
+    /// Whether it is an `extern fn` host function declaration (`spec/interop.md` §2).
+    pub is_extern: bool,
     /// `mv self`, `ref self` or `mut self`, for methods.
     pub receiver: Option<Receiver>,
     /// The other parameters.
     pub params: List<Param>,
     /// The return type, if not `()`.
     pub ret: Option<TypeId>,
-    /// The body. Only trait declarations may omit it.
+    /// The body. Only trait and `extern fn` declarations may omit it.
     pub body: Option<BlockId>,
     /// The whole declaration.
     pub span: Span,

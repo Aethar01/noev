@@ -20,6 +20,7 @@ use crate::cabi::{
 };
 pub use crate::cabi::{Mode, Output, Recording, RuntimeError};
 use crate::format;
+use crate::host::{HostCallContext, HostTable};
 use crate::int::Int;
 use crate::sized;
 use crate::value::{Observable, Pauli, Pointer, Value};
@@ -83,6 +84,7 @@ impl Machine<'_> {
 pub struct Machine<'p> {
     program: &'p Program,
     backend: &'p dyn Backend,
+    hosts: Option<Rc<HostTable<'p>>>,
     /// The runtime C ABI instance driving quantum operations, recording, PRNG and output.
     rt: NoevRuntime,
     frames: Vec<Vec<Value>>,
@@ -96,9 +98,23 @@ impl<'p> Machine<'p> {
         Machine {
             program,
             backend,
+            hosts: None,
             rt,
             frames: Vec::new(),
         }
+    }
+
+    /// Provides host implementations for the program's `extern fn` declarations.
+    pub fn with_hosts(mut self, hosts: Rc<HostTable<'p>>) -> Self {
+        self.hosts = Some(hosts);
+        self
+    }
+
+    pub(crate) fn with_opt_hosts(mut self, hosts: Option<&Rc<HostTable<'p>>>) -> Self {
+        if let Some(hosts) = hosts {
+            self.hosts = Some(hosts.clone());
+        }
+        self
     }
 
     /// A machine in `mode`.
@@ -154,6 +170,9 @@ impl<'p> Machine<'p> {
     pub fn call(&mut self, func: FuncId, args: Vec<Value>) -> Result<Value> {
         let program = self.program;
         let function = &program.functions[func.index()];
+        if function.is_extern {
+            return self.call_host(func, function, args);
+        }
         let mut locals: Vec<Value> = function.locals.iter().map(|l| self.default(l.ty)).collect();
         for (i, arg) in args.into_iter().enumerate() {
             locals[i + 1] = arg;
@@ -166,6 +185,51 @@ impl<'p> Machine<'p> {
         let mut frame = self.frames.pop().expect("pushed above");
         result?;
         Ok(std::mem::replace(&mut frame[0], Value::Unit))
+    }
+
+    fn call_host(
+        &mut self,
+        func: FuncId,
+        function: &'p Function,
+        mut args: Vec<Value>,
+    ) -> Result<Value> {
+        // A host function only ever sees concrete classical values, never recorded circuit
+        // placeholders (`Value::Clbit` / `Value::Cond`).
+        if args.iter().any(Value::has_clbits) {
+            match &self.rt.mode {
+                Mode::Build(Recording {
+                    known: Some(bits), ..
+                }) => {
+                    let bits = *bits;
+                    for arg in &mut args {
+                        *arg = arg.with_clbits(bits);
+                    }
+                }
+                Mode::Build(Recording { known: None, .. }) => {
+                    self.rt.needs_values.set(true);
+                    return Err(RuntimeError::unknown(format!(
+                        "host function `{}` needs a measurement result",
+                        function.name
+                    )));
+                }
+                Mode::Simulate => {}
+            }
+        }
+        let Some(hosts) = self.hosts.clone() else {
+            return Err(RuntimeError::new(format!(
+                "no host implementation registered for `extern fn {}`",
+                function.name
+            )));
+        };
+        let seed = self.rt.next_seed();
+        let mut ctx = HostCallContext::new(
+            self.program,
+            self.backend,
+            hosts.clone(),
+            seed,
+            self.rt.output_clone(),
+        );
+        hosts.invoke(&function.name, func, &mut ctx, args)
     }
 
     /// Runs `function`'s blocks from `start` until it returns, or until it reaches `stop`.
@@ -777,9 +841,10 @@ impl Machine<'_> {
                     let seed = unsafe { cabi::noev_rt_next_seed(&mut m.rt) };
                     let program = m.program;
                     let elem = *elem;
-                    let dist = crate::sampling::sample(
+                    let dist = crate::sampling::sample_with_hosts(
                         program,
                         m.backend,
+                        m.hosts.as_ref(),
                         *func,
                         args,
                         shots,
@@ -836,6 +901,7 @@ impl Machine<'_> {
                     let (re, im) = overlap(
                         m.program,
                         m.backend,
+                        m.hosts.as_ref(),
                         &sides,
                         observable.as_ref(),
                         precision,
@@ -875,6 +941,7 @@ impl Machine<'_> {
                     let value = expectation(
                         m.program,
                         m.backend,
+                        m.hosts.as_ref(),
                         prep,
                         prep_args,
                         &observable,
@@ -1703,9 +1770,11 @@ fn maths(math: Math, args: &[Value]) -> Result<Value> {
 /// `<prep| observable |prep> within precision` (`spec/types.md` §3). On a backend that sees
 /// the state, exact when the preparation measures nothing, and otherwise the average of the
 /// exact value over enough runs for `precision`. On any other backend, estimated by measuring.
-fn expectation(
-    program: &Program,
-    backend: &dyn Backend,
+#[allow(clippy::too_many_arguments)]
+fn expectation<'p>(
+    program: &'p Program,
+    backend: &'p dyn Backend,
+    hosts: Option<&Rc<HostTable<'p>>>,
     prep: &Prep,
     args: Vec<Value>,
     observable: &Observable,
@@ -1715,10 +1784,10 @@ fn expectation(
     let mut seeds = SmallRng::seed_from_u64(seed);
     if !backend.exact_expectations() {
         return estimate(
-            program, backend, prep, &args, observable, precision, &mut seeds,
+            program, backend, hosts, prep, &args, observable, precision, &mut seeds,
         );
     }
-    let mut machine = Machine::new(program, backend, seeds.random());
+    let mut machine = Machine::new(program, backend, seeds.random()).with_opt_hosts(hosts);
     let qubits = machine.prepare(prep, args.clone())?;
     let first = machine.exact_expectation(observable, &qubits)?;
     if !machine.measured() {
@@ -1734,7 +1803,7 @@ fn expectation(
     let runs = runs_for(weight, weight, precision)?;
     let mut total = first;
     for _ in 1..runs {
-        let mut machine = Machine::new(program, backend, seeds.random());
+        let mut machine = Machine::new(program, backend, seeds.random()).with_opt_hosts(hosts);
         let qubits = machine.prepare(prep, args.clone())?;
         total += machine.exact_expectation(observable, &qubits)?;
     }
@@ -1752,9 +1821,10 @@ struct Sides<'p> {
 /// `<φ|ψ>`, or `<φ| H |ψ>` with an observable (`spec/types.md` §3), as (real, imaginary)
 /// parts: ⟨0…0| U_φ† P U_ψ |0…0⟩ summed over the terms P. Exact on a backend that sees the
 /// state; otherwise estimated with Hadamard tests.
-fn overlap(
-    program: &Program,
-    backend: &dyn Backend,
+fn overlap<'p>(
+    program: &'p Program,
+    backend: &'p dyn Backend,
+    hosts: Option<&Rc<HostTable<'p>>>,
     sides: &Sides,
     observable: Option<&Observable>,
     precision: f64,
@@ -1767,7 +1837,7 @@ fn overlap(
     let (mut re, mut im) = (0.0, 0.0);
     for (coeff, product) in terms {
         let (a, b) = if backend.exact_expectations() {
-            let mut machine = Machine::new(program, backend, seeds.random());
+            let mut machine = Machine::new(program, backend, seeds.random()).with_opt_hosts(hosts);
             let qubits = machine.prepare(sides.ket, sides.ket_args.clone())?;
             machine.paulis(product, &qubits, None)?;
             machine.unprepare(sides.bra, sides.bra_args.clone(), &qubits, None)?;
@@ -1781,7 +1851,7 @@ fn overlap(
             let shots = runs_for(coeff.abs(), weight, precision)?;
             let mut part = |imaginary| {
                 hadamard_test(
-                    program, backend, sides, product, imaginary, shots, &mut seeds,
+                    program, backend, hosts, sides, product, imaginary, shots, &mut seeds,
                 )
             };
             (part(false)?, part(true)?)
@@ -1795,17 +1865,20 @@ fn overlap(
 /// One part of ⟨0…0| U_φ† P U_ψ |0…0⟩ by a Hadamard test, run as one circuit: an extra qubit in
 /// \|+⟩ (turned by `adj s` for the imaginary part) controls the whole of U_φ† P U_ψ, and the
 /// difference between its outcomes in the X basis is the part.
-fn hadamard_test(
-    program: &Program,
-    backend: &dyn Backend,
+#[allow(clippy::too_many_arguments)]
+fn hadamard_test<'p>(
+    program: &'p Program,
+    backend: &'p dyn Backend,
+    hosts: Option<&Rc<HostTable<'p>>>,
     sides: &Sides,
     product: &[(usize, Pauli)],
     imaginary: bool,
     shots: usize,
     seeds: &mut SmallRng,
 ) -> Result<f64> {
-    let mut builder =
-        Machine::new(program, backend, seeds.random()).with_mode(Mode::Build(Recording::default()));
+    let mut builder = Machine::new(program, backend, seeds.random())
+        .with_opt_hosts(hosts)
+        .with_mode(Mode::Build(Recording::default()));
     let control = builder.allocate()?;
     builder.apply_gate(Gate::H, false, &[], &[control])?;
     if imaginary {
@@ -1859,9 +1932,11 @@ struct TermGroup<'o> {
 /// grouped, and each group is measured over enough runs of the preparation for `precision`, as one
 /// circuit when the preparation is one, otherwise run by run. A term's value is the average of
 /// ±1, the parity of its qubits' outcomes.
-fn estimate(
-    program: &Program,
-    backend: &dyn Backend,
+#[allow(clippy::too_many_arguments)]
+fn estimate<'p>(
+    program: &'p Program,
+    backend: &'p dyn Backend,
+    hosts: Option<&Rc<HostTable<'p>>>,
     prep: &Prep,
     args: &[Value],
     observable: &Observable,
@@ -1906,8 +1981,16 @@ fn estimate(
         // Outcomes with bit `k` for `group.basis[k]`.
         let mut outcomes = None;
         if is_circuit {
-            outcomes =
-                measure_as_circuit(program, backend, prep, args, &group.basis, shots, seeds)?;
+            outcomes = measure_as_circuit(
+                program,
+                backend,
+                hosts,
+                prep,
+                args,
+                &group.basis,
+                shots,
+                seeds,
+            )?;
         }
         let outcomes = match outcomes {
             Some(outcomes) => outcomes,
@@ -1919,7 +2002,8 @@ fn estimate(
             None => {
                 let mut counts: std::collections::BTreeMap<u64, usize> = Default::default();
                 for _ in 0..shots {
-                    let mut machine = Machine::new(program, backend, seeds.random());
+                    let mut machine =
+                        Machine::new(program, backend, seeds.random()).with_opt_hosts(hosts);
                     let qubits = machine.prepare(prep, args.to_vec())?;
                     let mut bits = 0u64;
                     for (k, value) in machine
@@ -1972,17 +2056,20 @@ fn estimate(
 
 /// Records the preparation followed by measurements in `basis` as one circuit and runs it.
 /// `None` if it cannot be recorded or the backend does not take it, so it runs run by run.
-fn measure_as_circuit(
-    program: &Program,
-    backend: &dyn Backend,
+#[allow(clippy::too_many_arguments)]
+fn measure_as_circuit<'p>(
+    program: &'p Program,
+    backend: &'p dyn Backend,
+    hosts: Option<&Rc<HostTable<'p>>>,
     prep: &Prep,
     args: &[Value],
     basis: &[(usize, Pauli)],
     shots: usize,
     seeds: &mut SmallRng,
 ) -> Result<Option<Vec<(u64, usize)>>> {
-    let mut builder =
-        Machine::new(program, backend, seeds.random()).with_mode(Mode::Build(Recording::default()));
+    let mut builder = Machine::new(program, backend, seeds.random())
+        .with_opt_hosts(hosts)
+        .with_mode(Mode::Build(Recording::default()));
     let Ok(qubits) = builder.prepare(prep, args.to_vec()) else {
         return Ok(None);
     };

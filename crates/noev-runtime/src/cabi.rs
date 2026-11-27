@@ -368,6 +368,11 @@ impl NoevRuntime {
         self.output = Some(output);
     }
 
+    /// Returns a handle to the configured output streams, if any.
+    pub(crate) fn output_clone(&self) -> Option<Rc<RefCell<Output>>> {
+        self.output.clone()
+    }
+
     /// The underlying backend.
     pub fn backend(&self) -> &dyn Backend {
         self.backend.get()

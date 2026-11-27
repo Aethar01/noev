@@ -1134,6 +1134,7 @@ impl<'a> Checker<'a> {
         self.t.types.refill_instances();
         self.impl_assoc.clear();
         self.resolve_all_fn_borrows();
+        self.check_extern_fns();
         for index in 0..self.t.impls.len() {
             self.check_impl(index);
         }
@@ -1928,7 +1929,9 @@ impl<'a> Checker<'a> {
             params,
             ret,
             is_unsafe: decl.is_unsafe,
-            reversible: if decl.is_rev {
+            reversible: if decl.is_extern {
+                Reversible::No
+            } else if decl.is_rev {
                 Reversible::Yes
             } else if in_trait {
                 Reversible::No
@@ -1936,6 +1939,76 @@ impl<'a> Checker<'a> {
                 Reversible::Infer
             },
         };
+    }
+
+    /// Checks `extern fn` host function rules (`spec/interop.md` §1, §2, §4):
+    /// - cannot be `rev`, `unsafe`, `circuit`, or generic,
+    /// - every parameter and return type must be classical copyable data (no qubits, no refs).
+    fn check_extern_fns(&mut self) {
+        let count = self.ast.all_fns().len();
+        for index in 0..count {
+            let f = FnId::from_index(index);
+            let decl = *self.ast.function(f);
+            if !decl.is_extern {
+                continue;
+            }
+            if decl.is_rev {
+                self.error(
+                    decl.name_span,
+                    "an `extern fn` cannot be `rev` (foreign calls are not reversible)",
+                );
+            }
+            if decl.is_unsafe {
+                self.error(
+                    decl.name_span,
+                    "a host `extern fn` is safe and does not take `unsafe`",
+                );
+            }
+            if decl.is_circuit {
+                self.error(decl.name_span, "an `extern fn` cannot be `circuit fn`");
+            }
+            if !self.t.fns[index].generics.is_empty() {
+                self.error(
+                    decl.name_span,
+                    "an `extern fn` cannot have generic parameters",
+                );
+                continue;
+            }
+            let params = self.t.fns[index].sig.params.clone();
+            let ret = self.t.fns[index].sig.ret;
+            let param_spans: Vec<Span> = self
+                .ast
+                .list(decl.params)
+                .iter()
+                .map(|p| self.ast.ty(p.ty).span)
+                .collect();
+            for (ty, span) in params.into_iter().zip(param_spans) {
+                self.check_extern_boundary_ty(ty, span, "parameter");
+            }
+            if let Some(ret_expr) = decl.ret {
+                let span = self.ast.ty(ret_expr).span;
+                self.check_extern_boundary_ty(ret, span, "return type");
+            }
+        }
+    }
+
+    fn check_extern_boundary_ty(&mut self, ty: Ty, span: Span, role: &str) {
+        if ty == Ty::ERROR {
+            return;
+        }
+        if self.t.types.has_ref(ty) {
+            let shown = self.show(ty);
+            self.error(
+                span,
+                format!("an `extern fn` {role} cannot hold a reference (found `{shown}`)"),
+            );
+        } else if self.t.types.linearity(ty) != Kind::Copyable {
+            let shown = self.show(ty);
+            self.error(
+                span,
+                format!("an `extern fn` {role} must be classical and copyable (found `{shown}`)"),
+            );
+        }
     }
 
     /// Resolves return-type borrow annotations (`ref[a, b] T`, `Window[r]`, `mut[self.s] T`)

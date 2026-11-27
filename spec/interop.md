@@ -1,7 +1,9 @@
 # Interop
 
-Status: **Reserved.** Nothing here is implemented yet; the syntax and rules are fixed now so that the
-type checker and runtime are designed with them in mind. The order they arrive in is in
+Status: **Partially implemented.** Host `extern fn` declarations, boundary type and
+reversibility checks (§1, §4, §5), and the safe Rust embedding API with re-entrant callbacks
+(§2) are implemented in the `noev` crate (`noev::Program`, `noev::Runtime`,
+`noev::HostContext`). Python bindings (§2) and C interop (§3) remain reserved; see
 `docs/PLAN.md` §11.
 
 Hybrid programs lean on classical libraries Noev will not reimplement (optimisers, linear
@@ -64,12 +66,16 @@ to run otherwise. Host functions are written in a memory-safe language behind a 
 interface, so calling one is **safe**: no `unsafe` is needed.
 
 ```rust
-// Rust host (sketch).
+// Rust host (`noev` crate).
 let program = noev::Program::compile_file("vqe.nv")?;
 let mut runtime = noev::Runtime::new(&program)
     .host_fn("minimize_step", |energy: f64, theta: f64| optimiser.step(energy, theta));
 let energy: f64 = runtime.call("vqe", ())?;
 ```
+
+To call back into Noev from inside a host function, register it with
+`host_fn_with_context`: its first parameter is `&mut noev::HostContext`, which exposes the
+same checked `call` method.
 
 Python bindings expose the same API.
 

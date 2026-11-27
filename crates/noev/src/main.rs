@@ -1,8 +1,9 @@
 //! The `noev` command-line interface.
 
 mod lsp;
-mod package;
 mod report;
+
+use noev::package;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

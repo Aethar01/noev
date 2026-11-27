@@ -69,6 +69,12 @@ pub fn emit_module(program: &Program, opts: CodegenOptions) -> Result<String, Co
 
     // 1. Emit every IR function.
     for (i, func) in program.functions.iter().enumerate() {
+        if func.is_extern {
+            return Err(CodegenError(format!(
+                "`extern fn {}` is a host function and requires an embedding host runtime",
+                func.name
+            )));
+        }
         let facts = analyze_enum_variants(func);
         let mut emitter = FnEmitter {
             program,

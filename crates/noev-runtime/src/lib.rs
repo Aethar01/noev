@@ -5,6 +5,7 @@ pub mod cabi;
 pub mod cabi_compiled;
 pub mod format;
 pub mod fourier;
+pub mod host;
 pub mod int;
 pub mod kak;
 pub mod machine;

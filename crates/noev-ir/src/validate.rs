@@ -11,6 +11,15 @@ pub fn validate(program: &Program) -> Vec<String> {
         let mut report = |message: String| problems.push(format!("{}: {message}", function.name));
         let blocks = function.blocks.len();
         let locals = function.locals.len();
+        if function.is_extern {
+            if blocks != 0 {
+                report("extern function has blocks".into());
+            }
+            if locals < function.params + 1 {
+                report("extern function is missing parameter locals".into());
+            }
+            continue;
+        }
         if blocks == 0 {
             report("no blocks".into());
             continue;

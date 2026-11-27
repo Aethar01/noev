@@ -72,6 +72,14 @@ before 1.0.
   calls for linking against external QIR runtimes), verified all 39 `tests/run/*.nv` programs
   compiled with LLVM `-O2` against the interpreter plus end-to-end C QIR shim linking, and
   added LLVM IR and `-O2` object benchmarks alongside Cranelift.
+- Rust embedding API (`spec/interop.md` §1, §2, §4, §5): added `extern fn` host-function
+  declarations in syntax/sema/IR (enforcing classical copyable, reference-free boundary
+  types, N013 irreversibility, and measurement-tainted circuit classification), host dispatch
+  and re-entrant callbacks in `noev-runtime::host`, and a safe zero-`unsafe` Rust embedding
+  library in `noev` (`Program::compile_file` / `compile_source`, `Runtime::new` /
+  `with_backend`, `.host_fn`, `.host_fn_with_context`, `.validate`, `.call`, `HostContext`,
+  `Bit`, `Complex`, `C32`, `Observable`, `Value`), with UI tests, integration tests (including
+  VQE, re-entrant callbacks, and `--no-default-features`), and an embedding benchmark.
 - Arithmetic in sizes: `[Qubit; N + 1]`, `[Bit; 2 * N]` and `Reg<{N + 1}>`, compared after
   normalising and solved by calls (`[Qubit; 5]` for `[Qubit; N + 1]` makes `N` 4), so a
   quantum integer can be a library type (`tests/run/qint.nv`). A call also infers a parameter

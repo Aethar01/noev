@@ -1442,6 +1442,16 @@ impl<'a> Walker<'a> {
                 }
                 false
             }
+            Some(Callee::Fn(f)) if ast.function(f).is_extern => {
+                if let Some(&(arg, _)) = tainted_args.iter().find(|&&(_, t)| t)
+                    && before
+                {
+                    let name = ast.name(ast.function(f).name);
+                    let what = format!("passed to foreign function `{name}`");
+                    self.violate(ast.expr(arg).span, &what);
+                }
+                any
+            }
             Some(Callee::Fn(f)) if unknown_body(typed, f) => {
                 let name = ast.name(ast.function(f).name);
                 let why = format!(

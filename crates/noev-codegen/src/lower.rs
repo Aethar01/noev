@@ -83,6 +83,12 @@ pub fn compile_program(module: &mut ObjectModule, program: &Program) -> Result<(
 
     // 3. Compile each IR function.
     for (i, func) in program.functions.iter().enumerate() {
+        if func.is_extern {
+            return Err(CodegenError(format!(
+                "`extern fn {}` is a host function and requires an embedding host runtime",
+                func.name
+            )));
+        }
         ctx.clear();
         ctx.func.signature = fn_signature(module, &mut layouts, func);
         let facts = analyze_enum_variants(func);

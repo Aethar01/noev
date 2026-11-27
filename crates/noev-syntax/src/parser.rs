@@ -405,21 +405,43 @@ impl Parser<'_> {
             TokenKind::Trait => self.trait_def(),
             TokenKind::Impl => self.impl_def(),
             TokenKind::Extern => {
-                let span = self.span();
-                self.error(span, "`extern` functions are not supported yet")
-                    .with_help_mut("see spec/interop.md for what is planned");
+                let extern_span = self.span();
                 self.bump();
-                // Read the declaration so it is not reported again as a broken item.
-                if self.at_fn_start() {
-                    self.fn_decl(false, vis);
-                } else {
+                if self.at(TokenKind::Str) {
+                    self.error(
+                        extern_span,
+                        "`extern \"C\"` declarations are not supported yet",
+                    )
+                    .with_help_mut("see spec/interop.md §3 for what is planned");
                     self.recover_item();
+                    return Some(self.ast.push_item(Item {
+                        kind: ItemKind::Error,
+                        vis,
+                        span: start.to(self.prev_span()),
+                    }));
                 }
-                return Some(self.ast.push_item(Item {
-                    kind: ItemKind::Error,
-                    vis,
-                    span: start.to(self.prev_span()),
-                }));
+                if !self.at_fn_start() {
+                    self.expected("`fn` after `extern`");
+                    self.recover_item();
+                    return Some(self.ast.push_item(Item {
+                        kind: ItemKind::Error,
+                        vis,
+                        span: start.to(self.prev_span()),
+                    }));
+                }
+                let f = self.fn_decl(false, vis);
+                let decl = self.ast.function_mut(f);
+                decl.is_extern = true;
+                decl.span = start.to(decl.span);
+                if let Some(body) = decl.body {
+                    let body_span = self.ast.block(body).span;
+                    self.error(body_span, "an `extern fn` cannot have a body")
+                        .with_help_mut(
+                            "host functions are provided by the host program (`spec/interop.md` §2)",
+                        );
+                    self.ast.function_mut(f).body = None;
+                }
+                ItemKind::Fn(f)
             }
             _ => return None,
         };
@@ -608,6 +630,7 @@ impl Parser<'_> {
             is_unsafe,
             is_rev,
             is_circuit,
+            is_extern: false,
             receiver,
             params,
             ret,

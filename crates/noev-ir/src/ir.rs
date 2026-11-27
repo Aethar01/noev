@@ -72,6 +72,8 @@ pub struct Function {
     /// Whether repeated runs of it can be computed once and sampled: a circuit whose control
     /// flow does not depend on measurement results (`spec/execution.md` §4).
     pub sampled: bool,
+    /// Whether this is a host `extern fn` declaration (`spec/interop.md` §2).
+    pub is_extern: bool,
 }
 
 /// A local's type, and its source name if it has one.
@@ -530,6 +532,15 @@ impl Program {
         let params: Vec<String> = (1..=function.params)
             .map(|i| format!("_{i}: {}", self.type_name(function.locals[i].ty)))
             .collect();
+        if function.is_extern {
+            return writeln!(
+                f,
+                "extern fn {}({}) -> {}",
+                function.name,
+                params.join(", "),
+                self.type_name(function.locals[0].ty)
+            );
+        }
         writeln!(
             f,
             "fn {}({}) -> {} {{",
