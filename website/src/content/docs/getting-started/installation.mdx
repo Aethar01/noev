@@ -37,6 +37,13 @@ Building from source requires **Rust 1.88 or later**.
 
     The binary is written to `target/release/noev`.
   </TabItem>
+  <TabItem label="GPU simulator">
+    Enables Vulkan GPU statevector backends (`ketrs:gpu`, `ketrs:gpu32`; requires `glslc` at build time):
+
+    ```bash
+    cargo build --release --features ketrs-gpu
+    ```
+  </TabItem>
   <TabItem label="Minimal build (no optional features)">
     Builds the compiler without `ketrs`, Cranelift, or LLVM:
 

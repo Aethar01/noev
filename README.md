@@ -168,7 +168,7 @@ cargo build --release
 
 The compiler binary is `target/release/noev`.
 
-> **Optional features:** Default builds include the [`ketrs`](https://crates.io/crates/ketrs) simulator (`ketrs`) and both native code generators (`cranelift`, `llvm`). Build without optional dependencies with `cargo build --release --no-default-features`. Type checking, circuit planning, and OpenQASM 3 / QIR export work without a simulator; `noev run` then uses `--backend=export`.
+> **Optional features:** Default builds include the [`ketrs`](https://crates.io/crates/ketrs) simulator (`ketrs`) and both native code generators (`cranelift`, `llvm`). Enable Vulkan GPU statevector simulation (`ketrs:gpu`, `ketrs:gpu32`) with `--features ketrs-gpu`. Build without optional dependencies with `cargo build --release --no-default-features`. Type checking, circuit planning, and OpenQASM 3 / QIR export work without a simulator; `noev run` then uses `--backend=export`.
 
 ---
 
@@ -177,9 +177,9 @@ The compiler binary is `target/release/noev`.
 | Command | Description |
 | --- | --- |
 | `noev check prog.nv` | Check types, ownership, and target capabilities |
-| `noev run prog.nv [--seed N]` | Run `main` (reproducible with `--seed`, or choose `--backend`) |
+| `noev run prog.nv [--seed N]` | Run `main` (reproducible with `--seed`, `-O0..3`, or `--backend=ketrs:sv\|sv32\|mps\|pmps\|density\|gpu\|gpu32`) |
 | `noev test [FILTER] [--compile]` | Run `test fn` suites in a file, package, or directory |
-| `noev build prog.nv` | Compile to a native binary (`--codegen=cranelift\|llvm`, `--qir-runtime`) |
+| `noev build prog.nv` | Compile to a native binary (`--codegen=cranelift\|llvm`, `-O0..3`, `--target-cpu`, `--cranelift-arg`, `--llvm-passes`, `--llvm-arg`, `--qir-runtime`) |
 | `noev build prog.nv --emit=plan` | Report whether each run executes as a circuit or shot by shot, and why |
 | `noev build prog.nv --emit=qir` | Emit QIR 1.0 LLVM IR (Base or Adaptive profile) |
 | `noev export prog.nv -o out/` | Export circuits without simulating (`--format=qasm3\|qir`) |

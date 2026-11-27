@@ -81,6 +81,11 @@ noev test [OPTIONS] [PATH] [FILTER]
 | `--circuit-opt <0..3>` | Override quantum circuit optimization level independently of `-O` |
 | `--cranelift-opt <none\|speed\|speed-and-size>` | Override Cranelift `opt_level` independently of `-O` |
 | `--llvm-opt <0\|1\|2\|3\|s\|z>` | Override LLVM optimization level independently of `-O` |
+| `--target-cpu <CPU>` | Target CPU for native code generation |
+| `--target-feature <FEATURES>` | Comma-separated target features (e.g. `+avx2,+fma`) |
+| `--cranelift-arg <KEY=VALUE>` | Forward a native setting to Cranelift (repeatable) |
+| `--llvm-passes <PIPELINE>` | Custom LLVM pass pipeline (overrides `default<O*>`) |
+| `--llvm-arg <ARG>` | Forward a native CLI flag to LLVM (repeatable) |
 | `--nocapture` | Print test stdout as it runs instead of hiding output for passing tests |
 | `--message-format <human\|short>` | Diagnostic output format |
 
@@ -115,3 +120,13 @@ Start the Language Server Protocol server over standard input and output.
 ```bash
 noev lsp
 ```
+
+## Environment variables
+
+| Variable | Description |
+| --- | --- |
+| `NOEV_BACKEND` | Default backend for compiled binaries (`ketrs`, `ketrs:mps`, `export`, or plug-in path) |
+| `NOEV_OPT_LEVEL` | Circuit optimization level (`0`..`3`) for compiled binaries |
+| `NOEV_CIRCUIT_OPT` | Overrides `NOEV_OPT_LEVEL` for circuit optimization |
+| `NOEV_MPS_MAX_BOND` | Maximum bond dimension for `ketrs:mps` and `ketrs:pmps` (default `64`) |
+| `NOEV_MPS_CUTOFF` | Singular-value truncation cutoff for `ketrs:mps` and `ketrs:pmps` (default `1e-10`) |

@@ -70,11 +70,14 @@ Multi-controlled gates, arbitrary unitary matrix gates, and `U`/`P` gates are de
 `noev build` compiles the full hybrid program (classical + quantum) to a standalone executable or object file:
 
 ```bash
-noev build prog.nv                          # Cranelift native binary (default)
-noev build prog.nv --codegen=llvm           # LLVM -O2 native binary
+noev build prog.nv                          # Cranelift native binary (default, -O2)
+noev build prog.nv -O3 --codegen=llvm       # LLVM -O3 native binary
+noev build prog.nv --target-cpu=native      # Optimize for the host CPU
 noev build prog.nv --emit=llvm-ir           # Inspect LLVM IR
 noev build prog.nv --codegen=llvm --qir-runtime --emit=object
 ```
+
+Optimization levels (`-O0` through `-O3`, default `-O2`) tune both native code generation and lossless quantum circuit optimization. You can override individual layers with `--circuit-opt`, `--cranelift-opt`, and `--llvm-opt`, or forward native backend flags directly with `--target-cpu`, `--target-feature`, `--cranelift-arg KEY=VALUE`, `--llvm-passes`, and `--llvm-arg`.
 
 Passing `--qir-runtime` emits standard `__quantum__qis__*` and `__quantum__rt__*` calls so compiled object files link directly against external QIR runtimes.
 

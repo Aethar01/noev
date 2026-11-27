@@ -7,6 +7,23 @@ before 1.0.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-27
+
+### Simulator & Backends
+
+- Upgraded `ketrs` to `0.2.3`: automatic `RealStatevector` / `RealStatevector32` dispatch when circuits stay real-valued, native lossless `Circuit::optimize`, controlled 2-qubit `Unitary2` gates, and unitary inline `qasm` execution.
+- Exposed all `ketrs` simulation engines as `--backend ketrs:<device>` targets: `ketrs` / `ketrs:sv` (FP64 statevector), `ketrs:sv32` (FP32 statevector), `ketrs:mps` (open-boundary MPS for 30+ qubits, tunable with `NOEV_MPS_MAX_BOND` / `NOEV_MPS_CUTOFF`), `ketrs:pmps` (periodic-ring MPS), `ketrs:density` (density matrix), and opt-in Vulkan GPU targets `ketrs:gpu` and `ketrs:gpu32` behind the `ketrs-gpu` Cargo feature.
+
+### Compiler & CLI
+
+- Added unified optimization levels `-O0`..`-O3` (`--opt-level`, default `2`) across `noev build`, `noev run`, `noev test`, and compiled binaries (`NOEV_OPT_LEVEL`), plus independent per-layer overrides `--circuit-opt <0..3>` (`NOEV_CIRCUIT_OPT`), `--cranelift-opt <none|speed|speed-and-size>`, and `--llvm-opt <0|1|2|3|s|z>`.
+- Added native codegen flag passthrough on `noev build` and `noev test`: `--target-cpu`, `--target-feature`, `--cranelift-arg KEY=VALUE`, `--llvm-passes`, and `--llvm-arg`, organized under `Optimization` and `Codegen Options` help headings.
+
+### Documentation & Spec
+
+- Updated `spec/` to 0.5 and removed implementation-specific status notes so the specification stands independently of the Rust compiler.
+- Added the Astro Starlight documentation site (`website/`) deployed to GitHub Pages with custom Noev/EBNF syntax highlighting, guides, API reference pages, and synced spec pages; refreshed `README.md`.
+
 ## [0.5.0] - 2026-11-27
 
 ### Spec
@@ -434,6 +451,8 @@ compiler that checks, runs and exports it.
 - A tree-sitter grammar (`editors/tree-sitter-noev`) with highlight, indent and fold queries,
   and Neovim runtime files (`editors/nvim`).
 
+[0.5.1]: https://github.com/Aethar01/noev/releases/tag/v0.5.1
+[0.5.0]: https://github.com/Aethar01/noev/releases/tag/v0.5.0
 [0.4.2]: https://github.com/Aethar01/noev/releases/tag/v0.4.2
 [0.4.1]: https://github.com/Aethar01/noev/releases/tag/v0.4.1
 [0.4.0]: https://github.com/Aethar01/noev/releases/tag/v0.4.0

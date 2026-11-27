@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "noev"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1158,7 +1158,7 @@ dependencies = [
 
 [[package]]
 name = "noev-c"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "noev",
  "noev-ir",
@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "noev-codegen"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -1184,7 +1184,7 @@ dependencies = [
 
 [[package]]
 name = "noev-ir"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "noev-sema",
  "noev-syntax",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "noev-py"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "noev",
  "noev-ir",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "noev-runtime"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "criterion",
  "ketrs",
@@ -1218,14 +1218,14 @@ dependencies = [
 
 [[package]]
 name = "noev-sema"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "noev-syntax",
 ]
 
 [[package]]
 name = "noev-syntax"
-version = "0.5.0"
+version = "0.5.1"
 
 [[package]]
 name = "npyz"

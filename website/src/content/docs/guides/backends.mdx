@@ -20,7 +20,8 @@ Select a backend on the CLI or in `noev.toml`:
 
 ```bash
 noev check prog.nv --backend=target.toml
-noev run prog.nv --backend=ketrs
+noev run prog.nv --backend=ketrs:mps --opt-level=3
+noev run prog.nv --backend=ketrs:sv32 --circuit-opt=2
 noev build prog.nv --backend=target.toml
 ```
 
