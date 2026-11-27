@@ -270,6 +270,17 @@ pub enum FormatPart {
     Value(Operand, Ty, Option<FormatSpec>),
 }
 
+/// A piece of an inline OpenQASM snippet (`Stmt::Qasm`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum QasmPart {
+    /// Literal OpenQASM text.
+    Text(String),
+    /// A qubit placeholder indexing into `Stmt::Qasm::qubits`.
+    Qubit(usize),
+    /// A classical scalar placeholder formatted into OpenQASM text at run time.
+    Value(Operand, Ty),
+}
+
 /// A statement.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Stmt {
@@ -280,6 +291,13 @@ pub enum Stmt {
         stderr: bool,
         /// The values and their types.
         args: Vec<(Operand, Ty)>,
+    },
+    /// Emit inline OpenQASM 3 statements (`unsafe { qasm("…") }`).
+    Qasm {
+        /// The interleaved text, qubit, and classical scalar parts.
+        parts: Vec<QasmPart>,
+        /// Distinct qubit places referenced by [`QasmPart::Qubit`] indices.
+        qubits: Vec<Place>,
     },
     /// `place = value`.
     Assign(Place, Rvalue),
@@ -698,6 +716,18 @@ impl Program {
                     if *stderr { "eprint" } else { "print" },
                     args.join(", ")
                 )
+            }
+            Stmt::Qasm { parts, qubits } => {
+                let qs: Vec<String> = qubits.iter().map(place_text).collect();
+                let ps: Vec<String> = parts
+                    .iter()
+                    .map(|p| match p {
+                        QasmPart::Text(t) => format!("\"{}\"", t.escape_debug()),
+                        QasmPart::Qubit(i) => format!("${i}"),
+                        QasmPart::Value(op, _) => format!("{{{}}}", operand_text(op)),
+                    })
+                    .collect();
+                format!("qasm [{}] [{}]", ps.join(", "), qs.join(", "))
             }
             Stmt::Overlap {
                 dest,

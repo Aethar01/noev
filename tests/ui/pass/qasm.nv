@@ -1,0 +1,29 @@
+// Valid inline OpenQASM usage (`spec/interop.md` §4).
+
+fn apply_sx(q: mut Qubit) {
+    unsafe { qasm("sx {q};") }
+}
+
+fn main() {
+    let a = |0>
+    let b = |0>
+    let theta = 0.5
+    let n: Int = 2
+    apply_sx(a)
+    unsafe {
+        qasm("sx {a}; rz({theta}) {a}; cx {a}, {b};")
+    }
+    let r = |00>
+    unsafe {
+        qasm("ecr {r[0]}, {r[1]}; delay[{n}0ns] {r[0]};")
+    }
+    mv a.discard()
+    mv b.discard()
+    let _ = mv r.measure()
+
+    let _ = sample 10 {
+        let q = |0>
+        unsafe { qasm("sx {q};") }
+        mv q.measure()
+    }
+}

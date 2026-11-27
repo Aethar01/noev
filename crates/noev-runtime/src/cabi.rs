@@ -671,6 +671,33 @@ impl NoevRuntime {
         }
     }
 
+    fn qasm_inner(&mut self, template: &str, qubits: &[usize]) -> Result<(), RuntimeError> {
+        if !self.controls.is_empty() {
+            return Err(RuntimeError::new(
+                "inline OpenQASM cannot run inside `ctrl`",
+            ));
+        }
+        if !self.recording.is_empty() || !self.with_active.is_empty() {
+            return Err(RuntimeError::new(
+                "inline OpenQASM cannot run inside a reversible or `with` block",
+            ));
+        }
+        let code = resolve_qasm_placeholders(template, qubits)?;
+        match &mut self.mode {
+            Mode::Simulate => self
+                .session_mut()?
+                .qasm(&code, qubits)
+                .map_err(backend_error),
+            Mode::Build(recording) => {
+                recording.circuit.instructions.push(Instruction::Qasm {
+                    code,
+                    qubits: qubits.to_vec(),
+                });
+                Ok(())
+            }
+        }
+    }
+
     fn with_end_inner(&mut self) -> Result<(), RuntimeError> {
         let frame = self
             .with_pending
@@ -1266,6 +1293,72 @@ pub unsafe extern "C" fn noev_qis_mz(
             unsafe { *out = result };
             true
         }
+        Err(err) => rt_ref.fail(err),
+    }
+}
+
+/// Substitutes internal qubit placeholders (`\x01<k>\x01`) with `q[<qubits[k]>]`.
+fn resolve_qasm_placeholders(template: &str, qubits: &[usize]) -> Result<String, RuntimeError> {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find('\x01') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('\x01') else {
+            return Err(RuntimeError::new(
+                "malformed inline OpenQASM qubit placeholder",
+            ));
+        };
+        let idx: usize = after[..end]
+            .parse()
+            .map_err(|_| RuntimeError::new("invalid inline OpenQASM qubit placeholder index"))?;
+        let &q = qubits.get(idx).ok_or_else(|| {
+            RuntimeError::new("inline OpenQASM qubit placeholder index out of bounds")
+        })?;
+        use std::fmt::Write as _;
+        let _ = write!(out, "q[{q}]");
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Executes or records inline OpenQASM 3 statements (`unsafe { qasm("…") }`).
+///
+/// `code_ptr`/`code_len` holds UTF-8 text where `\x01<k>\x01` refers to `qubits[k]`.
+///
+/// # Safety
+/// `rt` must be valid; `code_ptr` must point to `code_len` valid UTF-8 bytes;
+/// `qubits` must point to `n_qubits` valid [`NoevQubit`] handles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noev_qis_qasm(
+    rt: *mut NoevRuntime,
+    code_ptr: *const u8,
+    code_len: usize,
+    qubits: *const NoevQubit,
+    n_qubits: usize,
+) -> bool {
+    let Some(rt_ref) = (unsafe { rt_mut(rt) }) else {
+        return false;
+    };
+    let bytes = if code_len == 0 || code_ptr.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(code_ptr, code_len) }
+    };
+    let Ok(template) = std::str::from_utf8(bytes) else {
+        return rt_ref.fail(RuntimeError::new("inline OpenQASM text is not valid UTF-8"));
+    };
+    let qubit_ids: Vec<usize> = if n_qubits == 0 || qubits.is_null() {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(qubits, n_qubits) }
+            .iter()
+            .map(|q| q.0)
+            .collect()
+    };
+    match rt_ref.qasm_inner(template, &qubit_ids) {
+        Ok(()) => true,
         Err(err) => rt_ref.fail(err),
     }
 }

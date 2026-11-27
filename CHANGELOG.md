@@ -72,6 +72,14 @@ before 1.0.
   calls for linking against external QIR runtimes), verified all 39 `tests/run/*.nv` programs
   compiled with LLVM `-O2` against the interpreter plus end-to-end C QIR shim linking, and
   added LLVM IR and `-O2` object benchmarks alongside Cranelift.
+- Inline OpenQASM (`spec/interop.md` §4, `spec/ownership.md` §11): added the `unsafe`
+  built-in `qasm("…")` for hardware-specific OpenQASM 3 statements with interpolated `{q}`
+  qubit places (mut-lent, checking N002/N005/N018 and clearing `|0>`-tracking) and classical
+  scalar placeholders (`Float`, `f32`, `Int`, sized integers, `Bit`, `Bool`); requires
+  `unsafe` (N019) and is irreversible (N013); records into circuits and exports verbatim in
+  `noev export` (rejecting QIR export/ABI cleanly); simulates via `ketrs::qasm::parse` on
+  both gate-level sessions and circuits, across the interpreter, Cranelift, and LLVM
+  backends, with UI/run/export tests and C ABI benchmarks.
 - C and C++ interop, both ways (`spec/interop.md` §1, §3–§6): added `extern "C" { fn … }`
   imports (N019 outside `unsafe`, N013 in reversible contexts), `extern "C" struct` with
   C layout, `ref`/`mut` array and struct parameters, `extern "C" fn` exports/callbacks and

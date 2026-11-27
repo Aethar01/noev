@@ -16,7 +16,7 @@ use cranelift_object::ObjectModule;
 use noev_ir::Program;
 use noev_ir::ir::{
     Align, BinOp, Block, Const, ExternKind, FormatKind, FormatPart, FuncId, Function, Operand,
-    Place, Prep, Proj, Rvalue, Stmt, Terminator, UnOp,
+    Place, Prep, Proj, QasmPart, Rvalue, Stmt, Terminator, UnOp,
 };
 use noev_runtime::cabi_compiled::{NoevFormatPart, NoevPrintArg};
 use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli};
@@ -1259,6 +1259,7 @@ impl<'a, 'b, 'p> FnLowerer<'a, 'b, 'p> {
                 Ok(())
             }
             Stmt::Print { stderr, args } => self.lower_print(*stderr, args),
+            Stmt::Qasm { parts, qubits } => self.lower_qasm(parts, qubits),
             Stmt::Sample {
                 dest,
                 func,
@@ -1426,6 +1427,35 @@ impl<'a, 'b, 'p> FnLowerer<'a, 'b, 'p> {
             Some(types::I8),
         )?;
         let call = self.call_clif(id, &[self.rt_val, stderr_val, arr_ptr, n_val]);
+        let ok = self.builder.inst_results(call)[0];
+        self.check_ok(ok);
+        Ok(())
+    }
+
+    fn lower_qasm(&mut self, parts: &[QasmPart], qubits: &[Place]) -> Result<(), CodegenError> {
+        let fmt_parts: Vec<FormatPart> = parts
+            .iter()
+            .map(|p| match p {
+                QasmPart::Text(t) => FormatPart::Text(t.clone()),
+                QasmPart::Qubit(idx) => FormatPart::Text(format!("\x01{idx}\x01")),
+                QasmPart::Value(op, ty) => FormatPart::Value(op.clone(), *ty, None),
+            })
+            .collect();
+        let str_slot = self.alloc_temp_slot(8, 8);
+        self.lower_format(Some(str_slot), &fmt_parts)?;
+        let str_handle = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlagsData::new(), str_slot, 0);
+        let (q_ptr, q_count) = self.collect_qubit_handles(qubits)?;
+        let n_val = self.builder.ins().iconst(self.ptr_ty, q_count as i64);
+        let id = self.rt_imports.get(
+            self.module,
+            "noev_qis_qasm_str",
+            &[self.ptr_ty, types::I64, self.ptr_ty, self.ptr_ty],
+            Some(types::I8),
+        )?;
+        let call = self.call_clif(id, &[self.rt_val, str_handle, q_ptr, n_val]);
         let ok = self.builder.inst_results(call)[0];
         self.check_ok(ok);
         Ok(())

@@ -4131,6 +4131,35 @@ impl Owner<'_> {
         self.callee_rules(callee, span);
         self.check_size_requirements(id, span);
 
+        if callee == Some(Callee::Builtin(Builtin::Qasm)) {
+            if let Some(&arg) = args.first()
+                && let ExprKind::Str(parts) = self.ast.expr(arg).kind
+            {
+                for part in self.ast.list(parts) {
+                    let StrPart::Value { expr, .. } = *part else {
+                        continue;
+                    };
+                    let ty = self.typed.ty(expr);
+                    if self.typed.types.deref(ty) == Ty::QUBIT {
+                        self.place_subexprs(expr);
+                        if let Some(place) = self.place_of(expr)
+                            && let Some(i) =
+                                self.lend_place(&place, expr, true, false, Holder::Pending)
+                        {
+                            self.release(&[i]);
+                        }
+                    } else {
+                        self.expr(expr, Use::Read);
+                    }
+                }
+            } else {
+                for &arg in args {
+                    self.expr(arg, Use::Value);
+                }
+            }
+            return Vec::new();
+        }
+
         // Two-phase receiver lends (`spec/ownership.md` §5): for a place receiver taken by
         // `ref` or `mut`, evaluate its index subexpressions and all call arguments BEFORE
         // starting the receiver's lend, so `c.add(c.get())` and `e.rotate_by(e.angle)` work.
@@ -4440,6 +4469,8 @@ impl Owner<'_> {
         if is_unsafe && self.unsafe_depth == 0 {
             let message = if name == "release" {
                 "`release` is unsafe: it trusts that the qubit is in |0⟩".to_string()
+            } else if name == "qasm" {
+                "`qasm` is unsafe: inline OpenQASM bypasses gate verification".to_string()
             } else if matches!(callee, Callee::FnPtr) {
                 "calling an `extern \"C\" fn` pointer needs `unsafe`".to_string()
             } else if matches!(callee, Callee::Fn(f) if self.ast.function(f).extern_kind == ExternKind::CImport)

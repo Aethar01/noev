@@ -4990,6 +4990,7 @@ impl<'a> Checker<'a> {
         }
         Some(match text {
             "print" | "eprint" => self.print_call(id, text == "eprint", args),
+            "qasm" => self.qasm_call(id, args, span),
             "measure" => self.measure_fn(id, args, span),
             "amplitudes" => self.amplitudes_fn(id, args, span),
             "fft" | "ifft" => self.fourier_fn(id, text == "ifft", args, span),
@@ -5958,6 +5959,91 @@ impl<'a> Checker<'a> {
         for &arg in args {
             let ty = self.expr(arg, Expect::None);
             self.require_printable(arg, ty);
+        }
+        Ty::UNIT
+    }
+
+    /// `qasm("…")`: inline OpenQASM (`spec/interop.md` §4).
+    fn qasm_call(&mut self, id: ExprId, args: &[ExprId], span: Span) -> Ty {
+        self.t.callees[id.index()] = Some(Callee::Builtin(Builtin::Qasm));
+        if args.len() != 1 {
+            self.error(
+                span,
+                format!(
+                    "`qasm` takes 1 argument (a string literal), but {} {} given",
+                    args.len(),
+                    if args.len() == 1 { "was" } else { "were" }
+                ),
+            );
+            self.skip_args(args);
+            return Ty::UNIT;
+        }
+        let arg = args[0];
+        let ExprKind::Str(parts) = self.ast.expr(arg).kind else {
+            self.expr(arg, Expect::None);
+            self.error(self.ast.expr(arg).span, "`qasm` takes a string literal");
+            return Ty::UNIT;
+        };
+        self.t.expr_types[arg.index()] = Ty::STRING;
+        for part in self.ast.list(parts) {
+            let StrPart::Value { expr, spec } = *part else {
+                continue;
+            };
+            let pspan = self.ast.expr(expr).span;
+            if spec.is_some() {
+                self.error(
+                    pspan,
+                    "inline OpenQASM placeholders do not take format specs",
+                );
+            }
+            let ty = self.expr(expr, Expect::None);
+            if self.t.types.is_wildcard(ty) {
+                continue;
+            }
+            let is_qubit_mut = ty == Ty::QUBIT
+                || matches!(
+                    self.t.types.kind(ty),
+                    TyKind::Ref {
+                        mutable: true,
+                        inner: Ty::QUBIT,
+                    }
+                );
+            let is_qubit_ref = matches!(
+                self.t.types.kind(ty),
+                TyKind::Ref {
+                    mutable: false,
+                    inner: Ty::QUBIT,
+                }
+            );
+            if is_qubit_mut {
+                if !matches!(
+                    self.ast.expr(expr).kind,
+                    ExprKind::Name(_)
+                        | ExprKind::Field { .. }
+                        | ExprKind::TupleIndex { .. }
+                        | ExprKind::Index { .. }
+                ) {
+                    self.error(
+                        pspan,
+                        "inline OpenQASM qubit placeholders must name a qubit place",
+                    );
+                }
+            } else if is_qubit_ref {
+                self.error(
+                    pspan,
+                    "inline OpenQASM needs mutable access to qubits, not `ref Qubit`",
+                );
+            } else {
+                let inner = self.t.types.deref(ty);
+                if !(inner.is_float() || inner.is_integer() || matches!(inner, Ty::BIT | Ty::BOOL))
+                {
+                    let message = format!(
+                        "inline OpenQASM placeholder must be a `Qubit` or classical scalar, not {}",
+                        self.show(ty)
+                    );
+                    self.error(pspan, message);
+                }
+            }
         }
         Ty::UNIT
     }

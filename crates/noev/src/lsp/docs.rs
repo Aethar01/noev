@@ -115,6 +115,13 @@ pub fn builtin(b: Builtin) -> (String, String) {
         Builtin::Print { stderr: true } => {
             ("fn eprint(values…)", "Like `print`, on standard error.")
         }
+        Builtin::Qasm => (
+            "unsafe fn qasm(code: String)",
+            "Emits raw OpenQASM 3 statements (`spec/interop.md` §4). Interpolated `{q}` \
+             placeholders resolve qubit places to OpenQASM registers; classical scalar \
+             placeholders format their values into the statement text. Requires `unsafe` (N019) \
+             and is not reversible (N013).",
+        ),
     };
     (sig.into(), doc.into())
 }

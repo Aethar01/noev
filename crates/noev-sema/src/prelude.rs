@@ -48,6 +48,8 @@ pub enum Builtin {
         /// Whether it writes to standard error.
         stderr: bool,
     },
+    /// `qasm("…")`: inline OpenQASM (unsafe; `spec/interop.md` §4).
+    Qasm,
 }
 
 impl Builtin {
@@ -62,12 +64,13 @@ impl Builtin {
                 | Builtin::Release
                 | Builtin::Amplitudes
                 | Builtin::Print { .. }
+                | Builtin::Qasm
         )
     }
 
     /// Whether calling it needs `unsafe`.
     pub fn is_unsafe(self) -> bool {
-        self == Builtin::Release
+        matches!(self, Builtin::Release | Builtin::Qasm)
     }
 
     /// The name it is called by, for messages.
@@ -89,6 +92,7 @@ impl Builtin {
             Builtin::Amplitudes => "amplitudes",
             Builtin::Print { stderr: false } => "print",
             Builtin::Print { stderr: true } => "eprint",
+            Builtin::Qasm => "qasm",
         }
     }
 }

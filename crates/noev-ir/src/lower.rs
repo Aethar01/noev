@@ -2723,6 +2723,42 @@ impl Builder<'_> {
                     .collect();
                 self.push(Stmt::Print { stderr, args });
             }
+            Builtin::Qasm => {
+                if let Some(&arg) = args.first()
+                    && let ExprKind::Str(str_parts) = self.ast.expr(arg).kind
+                {
+                    let mut parts = Vec::new();
+                    let mut qubits: Vec<Place> = Vec::new();
+                    for part in self.ast.list(str_parts) {
+                        match *part {
+                            ast::StrPart::Text(text) => {
+                                parts.push(QasmPart::Text(self.ast.name(text).to_string()));
+                            }
+                            ast::StrPart::Value { expr, .. } => {
+                                let ty = {
+                                    let ty = self.ty(expr);
+                                    self.types.deref(ty)
+                                };
+                                if ty == Ty::QUBIT {
+                                    let place = self.qubit_place(expr);
+                                    let idx = match qubits.iter().position(|p| *p == place) {
+                                        Some(i) => i,
+                                        None => {
+                                            qubits.push(place);
+                                            qubits.len() - 1
+                                        }
+                                    };
+                                    parts.push(QasmPart::Qubit(idx));
+                                } else {
+                                    let op = self.value_operand(expr);
+                                    parts.push(QasmPart::Value(op, ty));
+                                }
+                            }
+                        }
+                    }
+                    self.push(Stmt::Qasm { parts, qubits });
+                }
+            }
             Builtin::Convert(_) | Builtin::Const(_) => {}
         }
     }

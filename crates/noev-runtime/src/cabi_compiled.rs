@@ -1472,6 +1472,30 @@ pub unsafe extern "C" fn noev_rt_format(
     store_str(rt, out)
 }
 
+/// Executes or records inline OpenQASM 3 statements whose formatted template is stored at
+/// `str_handle` in `rt.strings`.
+///
+/// # Safety
+/// `rt` must be valid; `qubits` must point to `n_qubits` valid [`NoevQubit`] handles.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noev_qis_qasm_str(
+    rt: *mut NoevRuntime,
+    str_handle: u64,
+    qubits: *const NoevQubit,
+    n_qubits: usize,
+) -> bool {
+    let template = {
+        let rt_ref = unsafe { &*rt };
+        rt_ref
+            .strings
+            .get(str_handle as usize)
+            .map_or("", String::as_str)
+            .to_string()
+    };
+    let bytes = template.as_bytes();
+    unsafe { cabi::noev_qis_qasm(rt, bytes.as_ptr(), bytes.len(), qubits, n_qubits) }
+}
+
 /// Prints `n_args` values separated by spaces and a trailing newline.
 ///
 /// # Safety

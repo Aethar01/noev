@@ -120,6 +120,23 @@ pub fn validate(program: &Program) -> Vec<String> {
                     Stmt::Print { args, .. } => args
                         .iter()
                         .for_each(|(op, _)| check_operand(op, &mut report)),
+                    Stmt::Qasm { parts, qubits } => {
+                        qubits.iter().for_each(|q| check_place(q, &mut report));
+                        for part in parts {
+                            match part {
+                                QasmPart::Text(_) => {}
+                                QasmPart::Qubit(idx) => {
+                                    if *idx >= qubits.len() {
+                                        report(format!(
+                                            "inline qasm qubit index {idx} out of range (len {})",
+                                            qubits.len()
+                                        ));
+                                    }
+                                }
+                                QasmPart::Value(op, _) => check_operand(op, &mut report),
+                            }
+                        }
+                    }
                     Stmt::Overlap {
                         dest,
                         bra,

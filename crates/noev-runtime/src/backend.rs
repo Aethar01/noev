@@ -66,6 +66,14 @@ pub enum Instruction {
         /// Its new value.
         value: Condition,
     },
+    /// Raw inline OpenQASM 3 statements (`unsafe { qasm("…") }`) with qubits resolved to
+    /// `q[k]`.
+    Qasm {
+        /// The OpenQASM 3 statement text.
+        code: String,
+        /// The qubit indices referenced by the snippet.
+        qubits: Vec<usize>,
+    },
 }
 
 /// A condition on a circuit's classical bits: logic on measurement results.
@@ -201,6 +209,14 @@ pub trait Session {
     /// claim (`spec/ownership.md` §11); hardware cannot.
     fn release(&mut self, _qubit: usize) -> Result<(), BackendError> {
         Ok(())
+    }
+
+    /// Runs raw inline OpenQASM 3 statements (`unsafe { qasm("…") }`), with qubits already
+    /// substituted as `q[k]`.
+    fn qasm(&mut self, _code: &str, _qubits: &[usize]) -> Result<(), BackendError> {
+        Err(BackendError(
+            "this backend does not support inline OpenQASM".into(),
+        ))
     }
 
     // What only a simulator can do. Each returns `None` on a backend that cannot.

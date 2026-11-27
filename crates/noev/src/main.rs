@@ -367,6 +367,15 @@ fn build_qir(
     };
     let result = noev_runtime::run_main(program, &exporter, 0, sink);
     let jobs = exporter.jobs.borrow();
+    if jobs
+        .iter()
+        .any(|(c, _)| noev_runtime::qir::has_inline_qasm(c))
+    {
+        anstream::eprintln!(
+            "{ERROR}error:{ERROR:#} inline OpenQASM (`qasm(\"…\")`) cannot be exported to QIR; use `noev export` for OpenQASM 3"
+        );
+        return ExitCode::from(1);
+    }
     let header = [format!("Generated from {} by noev", file.display())];
     let text = noev_runtime::qir::to_qir_module(&jobs, &header);
     let write_res = match output {

@@ -98,9 +98,48 @@ fn convert(
                 };
                 converted.push_instruction(instruction).map_err(sim_error)?;
             }
+            Instruction::Qasm { code, .. } => {
+                let parsed = parse_inline_qasm(circuit.qubits, code)?;
+                let ops = parsed.ops();
+                let mut op_idx = 0usize;
+                for (pos, inst) in parsed.instructions() {
+                    while op_idx < *pos && op_idx < ops.len() {
+                        converted.push(ops[op_idx].clone()).map_err(sim_error)?;
+                        op_idx += 1;
+                    }
+                    match inst {
+                        ketrs::Instruction::Reset { qubit } => {
+                            converted.reset(*qubit);
+                        }
+                        other => {
+                            return Err(BackendError(format!(
+                                "inline OpenQASM instruction `{other:?}` cannot be simulated in `qasm(\"…\")`; \
+                                 use Noev's `measure` and classical control instead"
+                            )));
+                        }
+                    }
+                }
+                while op_idx < ops.len() {
+                    converted.push(ops[op_idx].clone()).map_err(sim_error)?;
+                    op_idx += 1;
+                }
+            }
         }
     }
     Ok(converted)
+}
+
+/// Parses an inline OpenQASM 3 snippet against a register `qubit[n_qubits] q;`.
+fn parse_inline_qasm(n_qubits: usize, code: &str) -> Result<ketrs::Circuit, BackendError> {
+    let mut full = String::from("OPENQASM 3.0;\ninclude \"stdgates.inc\";\n");
+    if n_qubits > 0 {
+        use std::fmt::Write as _;
+        let _ = writeln!(full, "qubit[{n_qubits}] q;");
+    }
+    full.push_str(code);
+    full.push('\n');
+    ketrs::qasm::parse(&full)
+        .map_err(|e| BackendError(format!("cannot simulate inline OpenQASM on ketrs: {e}")))
 }
 
 /// A condition as a ketrs classical expression, which is 0 or 1.
@@ -157,6 +196,34 @@ impl Session for KetrsSession {
             return Err(BackendError(format!(
                 "a released qubit was not in |0⟩ (probability of 1: {p1:.3})"
             )));
+        }
+        Ok(())
+    }
+
+    fn qasm(&mut self, code: &str, _qubits: &[usize]) -> Result<(), BackendError> {
+        let parsed = parse_inline_qasm(self.state.n_qubits(), code)?;
+        let ops = parsed.ops();
+        let mut op_idx = 0usize;
+        for (pos, inst) in parsed.instructions() {
+            while op_idx < *pos && op_idx < ops.len() {
+                self.state.apply(&ops[op_idx]).map_err(sim_error)?;
+                op_idx += 1;
+            }
+            match inst {
+                ketrs::Instruction::Reset { qubit } => {
+                    self.state.reset(*qubit, &mut self.rng).map_err(sim_error)?;
+                }
+                other => {
+                    return Err(BackendError(format!(
+                        "inline OpenQASM instruction `{other:?}` cannot be simulated in `qasm(\"…\")`; \
+                         use Noev's `measure` and classical control instead"
+                    )));
+                }
+            }
+        }
+        while op_idx < ops.len() {
+            self.state.apply(&ops[op_idx]).map_err(sim_error)?;
+            op_idx += 1;
         }
         Ok(())
     }

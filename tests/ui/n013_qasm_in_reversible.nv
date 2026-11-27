@@ -1,0 +1,27 @@
+// N013: inline OpenQASM (`qasm("…")`) is not reversible (`spec/interop.md` §4).
+
+rev fn in_rev(q: mut Qubit) {
+    unsafe { qasm("sx {q};") }      //~ N013
+}
+
+fn in_ctrl() {
+    let a = |+>
+    let b = |0>
+    ctrl a {
+        unsafe { qasm("sx {b};") }  //~ N013
+    }
+    mv a.discard()
+    mv b.discard()
+}
+
+fn in_with() {
+    let q = |0>
+    let t = |0>
+    with {
+        unsafe { qasm("sx {q};") }  //~ N013
+    } do {
+        t.z()
+    }
+    mv q.discard()
+    mv t.discard()
+}

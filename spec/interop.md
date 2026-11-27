@@ -1,10 +1,10 @@
 # Interop
 
-Status: **Implemented** (except inline OpenQASM in §4, which is Step 14 in `docs/PLAN.md`
-§11). Host `extern fn` declarations, the safe Rust embedding API (`noev` crate), the Python
-bindings (`noev-py` / `python/noev`), `extern "C"` imports, `extern "C" struct`,
-`extern "C" fn` callbacks and function pointers (Cranelift and LLVM), and the C/C++
-embedding API (`include/noev.h`, `noev-c`) are all implemented.
+Status: **Implemented.** Host `extern fn` declarations, the safe Rust embedding API (`noev`
+crate), the Python bindings (`noev-py` / `python/noev`), `extern "C"` imports,
+`extern "C" struct`, `extern "C" fn` callbacks and function pointers (Cranelift and LLVM),
+the C/C++ embedding API (`include/noev.h`, `noev-c`), and inline OpenQASM (`qasm("…")`) are
+all implemented.
 
 Hybrid programs lean on classical libraries Noev will not reimplement (optimisers, linear
 algebra, machine learning, plotting), and many users will want to call Noev from an existing
@@ -159,8 +159,29 @@ C++ programs embed Noev, with the same type mapping and re-entrant host callback
   in reversible contexts (N013).
 - A preparation in an expectation value is run many times, so foreign calls inside it run
   many times too.
-- Inline OpenQASM, for hardware-specific gates, will be an `unsafe` foreign construct of its
-  own; its syntax is not decided.
+- Inline OpenQASM, for hardware-specific gates and directives, is written with the `qasm`
+  built-in inside `unsafe`, taking an interpolated string literal:
+
+  ```noev
+  unsafe {
+      qasm("sx {a}; rz({theta}) {a}; cx {a}, {b};")
+  }
+  ```
+
+  - Every `{expr}` of type `Qubit` (or `mut Qubit`) borrows that qubit `mut` for the call
+    (N002 if moved, N005 if `ref`- or `ctrl`-lent, N018 for array indices). Mentioning the
+    same qubit place more than once in one `qasm("…")` refers to that same qubit.
+  - Every `{expr}` of classical scalar type (`Float`, `f32`, `Int`, sized integers, `Bit`,
+    `Bool`) is formatted into the OpenQASM text at run time. A literal `{` (such as in a
+    `gate` definition) is written `{{`, as in ordinary string literals.
+  - Calling `qasm` outside `unsafe` is N019; calling it in a reversible context (`rev fn`,
+    `ctrl`, `adj`, `with`) is N013.
+  - Inline OpenQASM is recorded into circuits (making `noev export` emit the statements
+    verbatim with each qubit resolved to its `q[k]` index) unless a classical placeholder
+    depends on a measurement result before the run's last quantum operation (§5). Simulators
+    that parse OpenQASM 3 (such as `ketrs`) execute standard and custom-defined gates
+    directly; hardware-only directives (such as pulse delays) export verbatim and report an
+    error if simulated.
 
 ## 5. Where foreign calls can run
 

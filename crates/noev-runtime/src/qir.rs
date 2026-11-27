@@ -116,8 +116,29 @@ fn scan_caps(
                 caps.adaptive = true;
                 caps.has_classical = true;
             }
+            Instruction::Qasm { .. } => {
+                if *measured {
+                    caps.adaptive = true;
+                }
+            }
         }
     }
+}
+
+/// Whether `circuit` contains inline OpenQASM (`unsafe { qasm("…") }`), which cannot be
+/// represented directly in QIR.
+pub fn has_inline_qasm(circuit: &Circuit) -> bool {
+    fn scan(list: &[Instruction]) -> bool {
+        list.iter().any(|inst| match inst {
+            Instruction::Qasm { .. } => true,
+            Instruction::If {
+                then, otherwise, ..
+            } => scan(then) || scan(otherwise),
+            Instruction::While { body, .. } => scan(body),
+            _ => false,
+        })
+    }
+    scan(&circuit.instructions)
 }
 
 /// Returns whether `circuit` fits QIR's Base Profile or needs the Adaptive Profile.
@@ -494,6 +515,14 @@ impl FnEmitter<'_> {
                     self.emit_instructions(body);
                     let _ = writeln!(self.out, "  br label %{cond_lbl}");
                     let _ = writeln!(self.out, "{end_lbl}:");
+                }
+                Instruction::Qasm { code, .. } => {
+                    for line in code.lines() {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            let _ = writeln!(self.out, "  ; inline qasm: {trimmed}");
+                        }
+                    }
                 }
             }
         }

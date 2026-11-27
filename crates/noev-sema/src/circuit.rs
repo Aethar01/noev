@@ -576,7 +576,8 @@ fn is_quantum_op(ast: &Ast, typed: &Typed, quantum: &[bool], e: ExprId) -> bool 
                 | Builtin::MeasureIn
                 | Builtin::Reset
                 | Builtin::Discard
-                | Builtin::Release,
+                | Builtin::Release
+                | Builtin::Qasm,
             )) => true,
             // A trait's function stands for `impl`s not known here.
             Some(Callee::Fn(f)) => quantum[f.index()] || typed.fn_traits.contains_key(&f),
@@ -1401,6 +1402,22 @@ impl<'a> Walker<'a> {
         // Qubits are never measurement results, even ones created under a condition on one.
         let typed = self.cx.typed;
         let classical = |e: ExprId| typed.types.linearity(typed.ty(e)) != Kind::Linear;
+        if callee == Some(Callee::Builtin(Builtin::Qasm)) {
+            if let Some(&arg) = args.first()
+                && let ExprKind::Str(parts) = ast.expr(arg).kind
+            {
+                for part in ast.list(parts) {
+                    if let StrPart::Value { expr, .. } = *part
+                        && self.expr(expr, before)
+                        && classical(expr)
+                        && before
+                    {
+                        self.violate(ast.expr(expr).span, "used in inline OpenQASM");
+                    }
+                }
+            }
+            return false;
+        }
         let mut tainted_args = Vec::new();
         if let Some(r) = receiver {
             let tainted = self.expr(r, before) && classical(r);

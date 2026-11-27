@@ -11,7 +11,7 @@ use std::mem::{align_of, offset_of, size_of};
 use noev_ir::Program;
 use noev_ir::ir::{
     Align, BinOp, Block, Const, ExternKind, FormatKind, FormatPart, FuncId, Function, Operand,
-    Place, Prep, Proj, Rvalue, Stmt, Terminator, UnOp,
+    Place, Prep, Proj, QasmPart, Rvalue, Stmt, Terminator, UnOp,
 };
 use noev_runtime::cabi_compiled::{NoevFormatPart, NoevPrintArg, TypeTag};
 use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli};
@@ -1410,6 +1410,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 Ok(())
             }
             Stmt::Print { stderr, args } => self.emit_print(*stderr, args),
+            Stmt::Qasm { parts, qubits } => self.emit_qasm(parts, qubits),
             Stmt::Sample {
                 dest,
                 func,
@@ -1638,6 +1639,41 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             self.body,
             "  {ok} = call i8 @noev_rt_print(ptr %rt, i8 {}, ptr {arr_ptr}, i64 {n})",
             u8::from(stderr)
+        );
+        self.check_ok(&ok);
+        Ok(())
+    }
+
+    fn emit_qasm(&mut self, parts: &[QasmPart], qubits: &[Place]) -> Result<(), CodegenError> {
+        if self.opts.runtime_abi == RuntimeAbi::Qir {
+            return Err(CodegenError(
+                "inline OpenQASM (`qasm(\"…\")`) is not supported with `--qir-runtime`".into(),
+            ));
+        }
+        let fmt_parts: Vec<FormatPart> = parts
+            .iter()
+            .map(|p| match p {
+                QasmPart::Text(t) => FormatPart::Text(t.clone()),
+                QasmPart::Qubit(idx) => FormatPart::Text(format!("\x01{idx}\x01")),
+                QasmPart::Value(op, ty) => FormatPart::Value(op.clone(), *ty, None),
+            })
+            .collect();
+        let str_slot = self.alloca_bytes(8, 8);
+        self.emit_format(Some(&str_slot), &fmt_parts)?;
+        let str_handle = self.fresh();
+        let _ = writeln!(
+            self.body,
+            "  {str_handle} = load i64, ptr {str_slot}, align 8"
+        );
+        let (q_ptr, q_count) = self.collect_qubit_handles(qubits)?;
+        self.declare(
+            "noev_qis_qasm_str",
+            "declare i8 @noev_qis_qasm_str(ptr, i64, ptr, i64)",
+        );
+        let ok = self.fresh();
+        let _ = writeln!(
+            self.body,
+            "  {ok} = call i8 @noev_qis_qasm_str(ptr %rt, i64 {str_handle}, ptr {q_ptr}, i64 {q_count})"
         );
         self.check_ok(&ok);
         Ok(())

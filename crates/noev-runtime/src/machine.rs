@@ -902,6 +902,43 @@ impl Machine<'_> {
                     Err(self.rt.take_error())
                 }
             }
+            Stmt::Qasm { parts, qubits } => {
+                let mut qubit_handles = Vec::with_capacity(qubits.len());
+                for place in qubits {
+                    qubit_handles.push(cabi::NoevQubit(self.qubit(place)?));
+                }
+                let mut template = String::new();
+                for part in parts {
+                    match part {
+                        QasmPart::Text(text) => template.push_str(text),
+                        QasmPart::Qubit(idx) => {
+                            use std::fmt::Write as _;
+                            let _ = write!(template, "\x01{idx}\x01");
+                        }
+                        QasmPart::Value(op, ty) => {
+                            template.push_str(&format::display(
+                                self.program,
+                                &self.value(op)?,
+                                *ty,
+                            ));
+                        }
+                    }
+                }
+                let bytes = template.as_bytes();
+                if unsafe {
+                    cabi::noev_qis_qasm(
+                        &mut self.rt,
+                        bytes.as_ptr(),
+                        bytes.len(),
+                        qubit_handles.as_ptr(),
+                        qubit_handles.len(),
+                    )
+                } {
+                    Ok(())
+                } else {
+                    Err(self.rt.take_error())
+                }
+            }
             Stmt::Overlap {
                 dest,
                 bra,
