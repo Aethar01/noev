@@ -1,10 +1,9 @@
 # Interop
 
 Status: **Partially implemented.** Host `extern fn` declarations, boundary type and
-reversibility checks (§1, §4, §5), and the safe Rust embedding API with re-entrant callbacks
-(§2) are implemented in the `noev` crate (`noev::Program`, `noev::Runtime`,
-`noev::HostContext`). Python bindings (§2) and C interop (§3) remain reserved; see
-`docs/PLAN.md` §11.
+reversibility checks (§1, §4, §5), the safe Rust embedding API (`noev` crate), and the
+Python bindings (`noev-py` / `python/noev` via PyO3) with re-entrant callbacks (§2) are
+implemented. C interop (§3) remains reserved; see `docs/PLAN.md` §11.
 
 Hybrid programs lean on classical libraries Noev will not reimplement (optimisers, linear
 algebra, machine learning, plotting), and many users will want to call Noev from an existing
@@ -77,7 +76,10 @@ To call back into Noev from inside a host function, register it with
 `host_fn_with_context`: its first parameter is `&mut noev::HostContext`, which exposes the
 same checked `call` method.
 
-Python bindings expose the same API.
+Python bindings (`python/noev`, built from `crates/noev-py` with PyO3/maturin) expose the
+same API (`noev.Program.compile_file`, `noev.Runtime(program).host_fn(...)`,
+`host_fn_with_context(...)`, `runtime.call(...)`, `noev.Observable`, `noev.Struct`,
+`noev.Enum`, `noev.Distribution`).
 
 A host function may call back into the program while it runs, through the same `call`: a
 Python optimiser can evaluate `energy(θ)` from inside the host function Noev called. The

@@ -202,14 +202,15 @@ noev/
 │   ├── std.md                 #   standard library, with reference definitions in Noev
 │   ├── runtime.md             #   code generators, the runtime and quantum backends (design)
 │   ├── modules.md             #   modules, imports, visibility, packages (reserved)
-│   └── interop.md             #   calling into and out of Noev (Rust embedding implemented; Python and C reserved)
+│   └── interop.md             #   calling into and out of Noev (Rust and Python embedding implemented; C reserved)
 ├── crates/
 │   ├── noev-syntax/           # tokens, lexer, parser, AST, spans
 │   ├── noev-sema/             # name resolution, type checker, ownership checker
 │   ├── noev-ir/               # quantum IR, lowering from AST
 │   ├── noev-runtime/          # Runtime C ABI, interpreter, backend interface (ketrs), OpenQASM 3 output
 │   ├── noev-codegen/          # Cranelift and LLVM native code generators (optional features)
-│   └── noev/                  # CLI binary: check / build / run / export, diagnostics rendering, language server
+│   ├── noev-py/               # Python extension module (PyO3 / maturin) on the Rust embedding API
+│   └── noev/                  # CLI binary and Rust embedding library: check / build / run / export, LSP
 ├── editors/                   # tree-sitter-noev grammar, nvim support
 ├── examples/                  # bell, hybrid, energy, qft, teleport, clone
 ├── tests/
@@ -440,7 +441,7 @@ gets a compile-fail test under `tests/ui/`.
 | 9  | QIR export                    | `--emit=qir`: base profile for circuits, adaptive profile for classical control | ☑ Done |
 | 10 | LLVM code generator           | Behind the same code-generation interface, optionally emitting QIR calls so programs link to QIR runtimes | ☑ Done |
 | 11 | Rust embedding API            | A Rust program loads a Noev program, calls its functions and provides `extern fn`s, checked when the program is loaded; host functions can call back into the program; safe, so no `unsafe` (`spec/interop.md` §2) | ☑ Done |
-| 12 | Python bindings               | On the Rust API, with PyO3 as in `ketrs-py`: Python optimisers driving Noev expectation values | ☐ |
+| 12 | Python bindings               | On the Rust API, with PyO3 as in `ketrs-py`: Python optimisers driving Noev expectation values | ☑ Done |
 | 13 | C, both ways                  | `extern "C"` imports called inside `unsafe`, arrays by reference, `extern "C" struct`, `extern "C" fn` callbacks, and a `noev.h` API for C and C++ hosts (`spec/interop.md` §3); imports use native code generation | ☐ |
 | 14 | Inline OpenQASM               | Hardware-specific gates, inside `unsafe`                              | ☐ |
 | 15 | Larger matrix gates           | Gates from unitary matrices on three or more qubits, decomposed as for two | ☐ |

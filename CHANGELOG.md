@@ -72,6 +72,12 @@ before 1.0.
   calls for linking against external QIR runtimes), verified all 39 `tests/run/*.nv` programs
   compiled with LLVM `-O2` against the interpreter plus end-to-end C QIR shim linking, and
   added LLVM IR and `-O2` object benchmarks alongside Cranelift.
+- Python bindings (`spec/interop.md` §1, §2): added `crates/noev-py` (PyO3 + maturin,
+  configured in `pyproject.toml`) and the `python/noev` package with type stubs
+  (`_noev.pyi`, `py.typed`), exposing `Program`, `Runtime`, `HostContext`, `Observable`,
+  `Struct`, `Enum`, `Distribution`, and structured exceptions (`NoevError`, `CompileError`,
+  `ValidationError`, `RuntimeError`) with arbitrary-precision `Int`, load-time arity checks,
+  re-entrant callbacks, and SciPy VQE tests plus a Python throughput benchmark.
 - Rust embedding API (`spec/interop.md` §1, §2, §4, §5): added `extern fn` host-function
   declarations in syntax/sema/IR (enforcing classical copyable, reference-free boundary
   types, N013 irreversibility, and measurement-tainted circuit classification), host dispatch

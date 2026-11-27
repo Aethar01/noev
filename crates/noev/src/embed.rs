@@ -221,6 +221,11 @@ impl Program {
         self.by_name.contains_key(name)
     }
 
+    /// Looks up a function's IR [`FuncId`] by name.
+    pub fn function_id(&self, name: &str) -> Option<FuncId> {
+        self.by_name.get(name).copied()
+    }
+
     /// The lowered IR program.
     pub fn ir(&self) -> &IrProgram {
         &self.ir
@@ -229,7 +234,12 @@ impl Program {
 
 /// Checks that `ty` can cross the host boundary (`spec/interop.md` §1): classical, copyable,
 /// and holding no references.
-fn check_boundary_ty(program: &IrProgram, ty: Ty, role: &str, fn_name: &str) -> Result<(), Error> {
+pub fn check_boundary_ty(
+    program: &IrProgram,
+    ty: Ty,
+    role: &str,
+    fn_name: &str,
+) -> Result<(), Error> {
     if program.types.has_ref(ty) {
         return Err(Error::BoundaryType(format!(
             "`{fn_name}` {role} has type `{}`, which holds a reference and cannot cross the host boundary",
@@ -246,7 +256,7 @@ fn check_boundary_ty(program: &IrProgram, ty: Ty, role: &str, fn_name: &str) -> 
 }
 
 /// Formats a Noev [`Ty`] for error messages.
-fn show_ty(program: &IrProgram, ty: Ty) -> String {
+pub fn show_ty(program: &IrProgram, ty: Ty) -> String {
     match program.types.kind(ty) {
         TyKind::Error => "<error>".into(),
         TyKind::Never => "Never".into(),

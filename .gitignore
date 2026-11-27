@@ -3,3 +3,11 @@
 /editors/tree-sitter-noev/*.so
 /editors/tree-sitter-noev/*.dylib
 /editors/tree-sitter-noev/*.dll
+# Python bindings build and test artifacts
+__pycache__/
+.pytest_cache/
+.venv/
+*.egg-info/
+/python/noev/*.so
+/python/noev/*.pyd
+/python/noev/*.dylib

@@ -1,0 +1,36 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "noev"
+description = "Python bindings for the Noev hybrid classical-quantum language"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+authors = [{ name = "Elliott Ashby" }]
+dependencies = []
+dynamic = ["version"]
+keywords = ["quantum", "compiler", "hybrid", "vqe", "noev"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Repository = "https://github.com/Aethar01/noev"
+Changelog = "https://github.com/Aethar01/noev/blob/main/CHANGELOG.md"
+
+[dependency-groups]
+dev = ["maturin>=1.9,<2", "pytest", "scipy"]
+
+[tool.maturin]
+manifest-path = "crates/noev-py/Cargo.toml"
+python-source = "python"
+module-name = "noev._noev"
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
