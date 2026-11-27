@@ -37,7 +37,7 @@ export default defineConfig({
       },
       customCss: ['./src/styles/custom.css'],
       expressiveCode: {
-        themes: ['vitesse-dark', 'vitesse-light'],
+        themes: ['github-dark-default', 'github-light-default'],
         shiki: {
           langs: [noevGrammar, ebnfGrammar],
         },
