@@ -37,6 +37,17 @@ index! {
     Block;
 }
 
+/// A `test fn` entry lowered from the root package (`spec/testing.md`).
+#[derive(Clone, Debug)]
+pub struct TestFn {
+    /// Module-qualified test name (e.g. `bell_correlation` or `ansatz::ry_norm`).
+    pub name: String,
+    /// The lowered function to execute (takes 0 params, returns `()`).
+    pub func: FuncId,
+    /// `None` for `test fn`, `Some(None)` for `test(fail)`, `Some(Some(s))` for `test(fail = "s")`.
+    pub expect_fail: Option<Option<String>>,
+}
+
 /// A lowered program.
 #[derive(Clone, Debug)]
 pub struct Program {
@@ -44,6 +55,8 @@ pub struct Program {
     pub functions: Vec<Function>,
     /// `main`, if the program has one.
     pub main: Option<FuncId>,
+    /// Every `test fn` declared in the root package, in declaration order.
+    pub tests: Vec<TestFn>,
     /// The program's types.
     pub types: Types,
     /// Struct names, indexed like [`Types::structs`].
@@ -498,6 +511,8 @@ pub enum Terminator {
     Assert {
         /// A `Bool`.
         cond: Operand,
+        /// Optional failure message (`String`), evaluated only when `cond` is false.
+        msg: Option<Operand>,
         /// Where to continue.
         next: Block,
         /// The `assert` statement, for the error message.
@@ -930,9 +945,17 @@ impl Program {
                     next.0
                 )
             }
-            Terminator::Assert { cond, next, .. } => {
-                format!("assert {} -> bb{}", operand_text(cond), next.0)
-            }
+            Terminator::Assert {
+                cond, msg, next, ..
+            } => match msg {
+                Some(m) => format!(
+                    "assert {}, {} -> bb{}",
+                    operand_text(cond),
+                    operand_text(m),
+                    next.0
+                ),
+                None => format!("assert {} -> bb{}", operand_text(cond), next.0),
+            },
             Terminator::CallIndirect {
                 callee,
                 args,

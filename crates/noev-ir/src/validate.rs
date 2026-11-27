@@ -235,8 +235,13 @@ pub fn validate(program: &Program) -> Vec<String> {
                     check_place(target, &mut report);
                     vec![*next]
                 }
-                Terminator::Assert { cond, next, .. } => {
+                Terminator::Assert {
+                    cond, msg, next, ..
+                } => {
                     check_operand(cond, &mut report);
+                    if let Some(m) = msg {
+                        check_operand(m, &mut report);
+                    }
                     vec![*next]
                 }
                 Terminator::Return | Terminator::Unreachable => vec![],

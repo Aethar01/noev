@@ -335,6 +335,89 @@ pub trait ShrAssign<Rhs = Self> {
 }
 ";
 
+/// The standard library's `std::backend` module (`spec/runtime.md` §3, §5), parsed when a
+/// program names `backend`: the `Backend` trait, `Target`, `Circuit`, and related classical
+/// types for writing quantum backends in Noev.
+const STD_BACKEND: &str = "
+pub enum Level {
+    Circuit,
+    Gate,
+    Both,
+}
+
+pub struct Capabilities {
+    pub read_state: Bool
+    pub check_release: Bool
+    pub exact_expectations: Bool
+    pub sample_state: Bool
+    pub foreign_while_live: Bool
+}
+
+pub struct Target {
+    pub name: String
+    pub level: Level
+    pub qubits: Int
+    pub gates: Vec<String>
+    pub coupling: Vec<(Int, Int)>
+    pub capabilities: Capabilities
+}
+
+pub enum GateKind {
+    X,
+    Y,
+    Z,
+    H,
+    S,
+    T,
+    Rx,
+    Ry,
+    Rz,
+    P,
+    U,
+    Swap,
+    Unitary,
+}
+
+pub struct Op {
+    pub gate: GateKind
+    pub adjoint: Bool
+    pub params: Vec<Float>
+    pub controls: Vec<Int>
+    pub targets: Vec<Int>
+}
+
+pub enum Instruction {
+    Gate(Op),
+    Measure { qubit: Int, clbit: Int },
+    Reset(Int),
+    Qasm(String),
+}
+
+pub struct Circuit {
+    pub qubits: Int
+    pub clbits: Int
+    pub instructions: Vec<Instruction>
+}
+
+pub struct ShotCount {
+    pub bits: u64
+    pub count: Int
+}
+
+pub struct Shots {
+    pub counts: Vec<ShotCount>
+}
+
+pub struct BackendError {
+    pub message: String
+}
+
+pub trait Backend {
+    fn target(ref self) -> Target
+    fn run(mut self, circuit: ref Circuit, shots: Int) -> Result<Shots, BackendError>
+}
+";
+
 /// The standard library's `std::cmp` module (`spec/types.md` §6), parsed when a program names
 /// `cmp`: the traits behind `==`, `!=`, `<`, `<=`, `>` and `>=` on a program's own types.
 const STD_CMP: &str = "
@@ -555,6 +638,7 @@ impl Ast {
         let measure = named("Measure") || (generic && named("measure"));
         let ops = named("ops");
         let cmp = named("cmp");
+        let backend = named("backend");
         if self.std.is_none() && (named("std") || measure) {
             let std = self.add_package("std");
             let root = self.package(std).root;
@@ -568,6 +652,10 @@ impl Ast {
             if cmp {
                 let module = self.add_module(root, "cmp");
                 self.std_module(module, STD_CMP);
+            }
+            if backend {
+                let module = self.add_module(root, "backend");
+                self.std_module(module, STD_BACKEND);
             }
             if measure {
                 let item = self.measure_trait();
@@ -689,6 +777,7 @@ impl Ast {
             is_unsafe: false,
             is_rev: false,
             is_circuit: false,
+            test: TestKind::None,
             extern_kind: ExternKind::None,
             receiver: Some(Receiver {
                 kind: OwnKind::Mv,
@@ -1165,8 +1254,13 @@ pub enum StmtKind {
     Break,
     /// `continue`.
     Continue,
-    /// `assert cond`.
-    Assert(ExprId),
+    /// `assert cond [, msg]`.
+    Assert {
+        /// The condition, which must be `Bool`.
+        cond: ExprId,
+        /// Optional failure message, which must be `String`.
+        msg: Option<ExprId>,
+    },
     /// An expression used as a statement.
     Expr {
         /// The expression.
@@ -1594,6 +1688,19 @@ pub enum ExternKind {
     CExport,
 }
 
+/// Whether a function is a test (`spec/testing.md`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TestKind {
+    /// An ordinary function.
+    #[default]
+    None,
+    /// `test fn name()`: must succeed without runtime error.
+    Pass,
+    /// `test(fail)` or `test(fail = "substring")`: must fail with a runtime error (matching the
+    /// optional substring).
+    Fail(Option<Symbol>),
+}
+
 /// A function or method declaration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FnDecl {
@@ -1611,6 +1718,8 @@ pub struct FnDecl {
     pub is_rev: bool,
     /// Whether it is `circuit fn`.
     pub is_circuit: bool,
+    /// Whether this is a `test fn` (`spec/testing.md`).
+    pub test: TestKind,
     /// Whether this is a host `extern fn`, an `extern "C"` import, or an `extern "C" fn` export.
     pub extern_kind: ExternKind,
     /// `mv self`, `ref self` or `mut self`, for methods.

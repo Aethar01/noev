@@ -29,8 +29,8 @@ module.exports = grammar({
 
   extras: ($) => [/\s/, $.line_comment, $.block_comment],
 
-  // A `<` or `-` starting a line (src/scanner.c).
-  externals: ($) => [$._line_start_angle, $._line_start_minus],
+  // A `<`, `-` or `[` starting a line (src/scanner.c).
+  externals: ($) => [$._line_start_angle, $._line_start_minus, $._line_start_lbracket],
 
   word: ($) => $.identifier,
 
@@ -103,9 +103,20 @@ module.exports = grammar({
       seq('<', sepBy(',', choice($.type_parameter, $.size_parameter)), '>'),
 
     type_parameter: ($) =>
-      seq(field('name', alias($.identifier, $.type_identifier)), optional(seq(':', $.bounds))),
+      seq(
+        field('name', alias($.identifier, $.type_identifier)),
+        optional(seq(':', $.bounds)),
+        optional(seq('=', field('default', $._type))),
+      ),
 
-    size_parameter: ($) => seq('const', field('name', $.identifier), ':', field('type', $._type)),
+    size_parameter: ($) =>
+      seq(
+        'const',
+        field('name', $.identifier),
+        ':',
+        field('type', $._type),
+        optional(seq('=', field('default', $._type_argument))),
+      ),
 
     bounds: ($) => seq($.bound, repeat(seq('+', $.bound))),
 
@@ -181,9 +192,13 @@ module.exports = grammar({
 
     function_item: ($) => seq($._function_signature, field('body', $.block)),
 
+    test_modifier: ($) =>
+      seq('test', optional(seq('(', 'fail', optional(seq('=', $.string)), ')'))),
+
     _function_signature: ($) =>
       seq(
         optional($.visibility_modifier),
+        optional($.test_modifier),
         optional(alias('unsafe', $.modifier)),
         optional(alias('rev', $.modifier)),
         optional(alias('circuit', $.modifier)),
@@ -236,29 +251,63 @@ module.exports = grammar({
 
     extern_item: ($) =>
       seq(
+        optional($.visibility_modifier),
         'extern',
         choice(
           $.function_signature_item,
           seq($.string, '{', repeat(choice($.function_signature_item, ';')), '}'),
+          seq($.string, $.struct_item),
+          seq($.string, $.function_item),
         ),
       ),
 
     // Types
 
     _type: ($) =>
-      choice($.type_path, $.generic_type, $.reference_type, $.unit_type, $.tuple_type, $.array_type),
+      choice(
+        $.type_path,
+        $.generic_type,
+        $.reference_type,
+        $.extern_fn_type,
+        $.unit_type,
+        $.tuple_type,
+        $.array_type,
+      ),
+
+    borrow_list: ($) => seq('[', sepBy(',', $._borrow_place), ']'),
+
+    _borrow_place: ($) => seq(choice($.identifier, $.self), repeat(seq('.', $.identifier))),
 
     type_path: ($) =>
       prec.right(
         seq(
           choice(alias($.identifier, $.type_identifier), alias('Self', $.type_identifier)),
           repeat(seq('::', alias($.identifier, $.type_identifier))),
+          optional($.borrow_list),
         ),
       ),
 
-    generic_type: ($) => seq($.type_path, '<', sepBy(',', $._type_argument), '>'),
+    generic_type: ($) =>
+      seq(
+        $.type_path,
+        '<',
+        sepBy(',', $._type_argument),
+        '>',
+        optional($.borrow_list),
+      ),
 
-    reference_type: ($) => prec.right(seq(choice('ref', 'mut'), $._type)),
+    reference_type: ($) => prec.right(seq(choice('ref', 'mut'), optional($.borrow_list), $._type)),
+
+    extern_fn_type: ($) =>
+      seq(
+        'extern',
+        $.string,
+        'fn',
+        '(',
+        sepBy(',', $._type),
+        ')',
+        optional(seq('->', $._type)),
+      ),
 
     unit_type: (_) => seq('(', ')'),
 
@@ -307,7 +356,7 @@ module.exports = grammar({
 
     continue_statement: (_) => 'continue',
 
-    assert_statement: ($) => seq('assert', $._expression),
+    assert_statement: ($) => seq('assert', $._expression, optional(seq(',', $._expression))),
 
     _pattern: ($) =>
       choice(
@@ -347,7 +396,7 @@ module.exports = grammar({
 
     // Contextual keywords are ordinary names everywhere else (`let adj = …`).
     _contextual_name: ($) =>
-      alias(choice('mv', 'rev', 'circuit', 'adj', 'ctrl', 'with', 'do', 'within'), $.identifier),
+      alias(choice('mv', 'rev', 'circuit', 'adj', 'ctrl', 'with', 'do', 'within', 'test'), $.identifier),
 
     wildcard: (_) => '_',
 
@@ -490,14 +539,17 @@ module.exports = grammar({
         $.block,
       ),
 
-    // `swap::<Int>`: a function given its type arguments.
+    // `swap::<Int>` or `Vec::<Int>::new`: a function or type given its type arguments.
     generic_function: ($) =>
-      seq(
-        field('function', choice($.identifier, $.path)),
-        // One token, so that after `a::b` the next `::` needs no second token to decide.
-        '::<',
-        sepBy(',', $._type_argument),
-        '>',
+      prec.right(
+        seq(
+          field('function', choice($.identifier, $.path)),
+          // One token, so that after `a::b` the next `::` needs no second token to decide.
+          '::<',
+          sepBy(',', $._type_argument),
+          '>',
+          repeat(seq('::', $.identifier)),
+        ),
       ),
 
     path: ($) =>
@@ -526,9 +578,17 @@ module.exports = grammar({
 
     tuple_expression: ($) => seq('(', $._expression, ',', sepBy(',', $._expression), ')'),
 
-    array_expression: ($) => seq('[', sepBy(',', $._expression), ']'),
+    array_expression: ($) =>
+      seq(choice('[', alias($._line_start_lbracket, '[')), sepBy(',', $._expression), ']'),
 
-    array_repeat_expression: ($) => seq('[', $._expression, ';', $._expression, ']'),
+    array_repeat_expression: ($) =>
+      seq(
+        choice('[', alias($._line_start_lbracket, '[')),
+        $._expression,
+        ';',
+        $._expression,
+        ']',
+      ),
 
     // `<ψ| H |ψ>`, and `<+| H |+>` with a bra and a ket. Preferred to a preparation test
     // followed by `|`, as a bra is.

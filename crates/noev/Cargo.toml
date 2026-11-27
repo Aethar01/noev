@@ -39,6 +39,11 @@ cranelift = ["dep:noev-codegen", "noev-codegen/cranelift"]
 # The LLVM native code generator (`noev build --codegen=llvm`).
 llvm = ["dep:noev-codegen", "noev-codegen/llvm"]
 
+# The package integration suite runs `vqe` on the ketrs simulator.
+[[test]]
+name = "packages"
+required-features = ["ketrs"]
+
 # The run suite needs a simulator.
 [[test]]
 name = "run"
@@ -62,6 +67,16 @@ required-features = ["ketrs"]
 # The C/C++ interop suite needs Cranelift, LLVM, and the ketrs simulator.
 [[test]]
 name = "c_interop"
+required-features = ["ketrs", "cranelift", "llvm"]
+
+# The targets & plug-in backend suite needs ketrs and Cranelift.
+[[test]]
+name = "targets"
+required-features = ["ketrs", "cranelift"]
+
+# The `noev test` suite tests interpreter, Cranelift, and LLVM.
+[[test]]
+name = "testing"
 required-features = ["ketrs", "cranelift", "llvm"]
 
 [[bench]]

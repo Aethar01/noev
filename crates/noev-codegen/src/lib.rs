@@ -5,7 +5,9 @@
 //! file or standalone executable linked against `libnoev_runtime.a` (or, with LLVM and
 //! [`RuntimeAbi::Qir`], calling QIR runtime functions directly).
 
+#[cfg(any(feature = "cranelift", feature = "llvm"))]
 pub(crate) mod analysis;
+#[cfg(any(feature = "cranelift", feature = "llvm"))]
 pub(crate) mod layout;
 
 #[cfg(feature = "cranelift")]
@@ -71,10 +73,12 @@ pub struct CodegenOptions {
     pub opt: OptLevel,
     /// Which runtime ABI quantum operations target.
     pub runtime_abi: RuntimeAbi,
+    /// Emit a native test runner `main` executing `program.tests` instead of `program.main`.
+    pub test_harness: bool,
 }
 
 /// Common interface implemented by every native code generator (`spec/runtime.md` §2).
-pub trait CodeGenerator {
+pub trait CodeGenerator: Sync {
     /// Short backend name (`"cranelift"`, `"llvm"`).
     fn name(&self) -> &'static str;
 
@@ -120,8 +124,15 @@ pub fn link_object_with_args(
         ))
     })?;
 
-    let mut cmd = Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()));
-    cmd.arg(&obj_path);
+    let mut cmd = if cfg!(target_os = "windows") && std::env::var_os("CC").is_none() {
+        let mut c = Command::new("clang");
+        c.arg(&obj_path);
+        c
+    } else {
+        let mut c = Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()));
+        c.arg(&obj_path);
+        c
+    };
     for arg in extra_args {
         if Path::new(arg).exists() || arg.starts_with('-') {
             cmd.arg(arg);
@@ -134,6 +145,8 @@ pub fn link_object_with_args(
     cmd.args(["-lm", "-lpthread", "-ldl"]);
     #[cfg(target_os = "macos")]
     cmd.args(["-lm", "-lpthread"]);
+    #[cfg(target_os = "windows")]
+    cmd.args(["-lws2_32", "-lbcrypt", "-luserenv", "-lntdll"]);
 
     let status = cmd.output();
     let _ = std::fs::remove_file(&obj_path);
@@ -198,7 +211,7 @@ impl CodeGenerator for CraneliftCodegen {
             cranelift_module::default_libcall_names(),
         )?;
         let mut module = ObjectModule::new(builder);
-        lower::compile_program(&mut module, program)?;
+        lower::compile_program(&mut module, program, opts.test_harness)?;
         let product = module.finish();
         product.emit().map_err(|e| CodegenError(e.to_string()))
     }

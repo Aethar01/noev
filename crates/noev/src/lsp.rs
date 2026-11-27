@@ -294,6 +294,7 @@ impl Document {
             sources,
             ast,
             diagnostics: mut found,
+            ..
         } = loaded.unwrap_or_else(|| {
             let sources = SourceMap::single("document.nv", text.clone());
             let parsed = noev_syntax::parse(&text);
@@ -301,6 +302,7 @@ impl Document {
                 sources,
                 ast: parsed.ast,
                 diagnostics: parsed.diagnostics,
+                default_backend: None,
             }
         });
         let name = path.map(|p| p.display().to_string());

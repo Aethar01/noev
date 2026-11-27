@@ -49,19 +49,19 @@ fn controlled<T: Oracle<N>, const N: Int>(o: ref T, c: mut Qubit, r: mut [Qubit;
 
 fn width_of<T: Oracle<N>, const N: Int>(o: ref T, r: ref [Qubit; N]) -> Int { o.width() }
 
-fn main() {
+test fn generic_traits() {
     let f = Flip {}
     let r2: [Qubit; 2] = [|0>; 2]
     run_twice(ref f, mut r2)
-    print(mv r2.measure())
+    assert mv r2.measure() == [0, 1]
     let c = |1>
     let r3: [Qubit; 3] = [|0>; 3]
     controlled(ref f, mut c, mut r3)
-    print(width_of(ref f, ref r3))
-    print(mv r3.measure())
-    print(mv c.measure())
+    assert width_of(ref f, ref r3) == 3
+    assert mv r3.measure() == [0, 0, 1]
+    assert mv c.measure() == 1
     let t = Twice {}
-    print(t.scale(21))
-    print(t.scale(1.5))
-    print(scaled(ref t, 5) + 1)
+    assert t.scale(21) == 42
+    assert t.scale(1.5) == "twice 1.5 is 3.0"
+    assert scaled(ref t, 5) + 1 == 11
 }

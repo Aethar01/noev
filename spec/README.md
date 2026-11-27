@@ -14,7 +14,8 @@ compiler is wrong, or the spec is changed on purpose.
 | [execution.md](execution.md)   | Runs, shots, sampling, and when a run is a circuit         |
 | [runtime.md](runtime.md)       | Code generators, the runtime and quantum backends (Design) |
 | [modules.md](modules.md)       | Modules, imports, visibility and packages (Reserved)      |
-| [interop.md](interop.md)       | Calling Noev from other languages, and foreign functions (Reserved) |
+| [interop.md](interop.md)       | Calling Noev from other languages, and foreign functions  |
+| [testing.md](testing.md)       | `test fn`, expected failures, `assert` messages, `noev test` |
 
 The conformance suite in `tests/` is part of the spec. Each rule in
 [ownership.md](ownership.md) has an error code, and each code has at least one compile-fail

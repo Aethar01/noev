@@ -9,6 +9,7 @@
 enum TokenType {
     LINE_START_ANGLE,
     LINE_START_MINUS,
+    LINE_START_LBRACKET,
 };
 
 void *tree_sitter_noev_external_scanner_create(void) { return NULL; }
@@ -24,7 +25,8 @@ static bool is_ket_char(int32_t c) { return c == '0' || c == '1' || c == '+' || 
 
 bool tree_sitter_noev_external_scanner_scan(void *payload, TSLexer *lexer,
                                             const bool *valid_symbols) {
-    if (!valid_symbols[LINE_START_ANGLE] && !valid_symbols[LINE_START_MINUS]) {
+    if (!valid_symbols[LINE_START_ANGLE] && !valid_symbols[LINE_START_MINUS] &&
+        !valid_symbols[LINE_START_LBRACKET]) {
         return false;
     }
     bool line_break = false;
@@ -37,6 +39,12 @@ bool tree_sitter_noev_external_scanner_scan(void *payload, TSLexer *lexer,
     }
     if (!line_break) {
         return false;
+    }
+    if (lexer->lookahead == '[' && valid_symbols[LINE_START_LBRACKET]) {
+        lexer->advance(lexer, false);
+        lexer->mark_end(lexer);
+        lexer->result_symbol = LINE_START_LBRACKET;
+        return true;
     }
     if (lexer->lookahead == '-' && valid_symbols[LINE_START_MINUS]) {
         lexer->advance(lexer, false);

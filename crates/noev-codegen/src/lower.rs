@@ -47,7 +47,11 @@ const MIN_INLINE_INT: i64 = -(1i64 << 62);
 const MAX_INLINE_INT: i64 = (1i64 << 62) - 1;
 
 /// Compiles every function in `program`, any needed thunks, and the C `main` entry point.
-pub fn compile_program(module: &mut ObjectModule, program: &Program) -> Result<(), CodegenError> {
+pub fn compile_program(
+    module: &mut ObjectModule,
+    program: &Program,
+    test_harness: bool,
+) -> Result<(), CodegenError> {
     let ptr_ty = module.target_config().pointer_type();
     let ptr_bytes = u32::from(module.target_config().pointer_bytes());
     let mut layouts = LayoutCache::new(program, ptr_bytes);
@@ -178,7 +182,18 @@ pub fn compile_program(module: &mut ObjectModule, program: &Program) -> Result<(
     }
 
     // 5. Compile C `main(argc: i32, argv: *const *const c_char) -> i32`.
-    if let Some(main_id) = program.main {
+    if test_harness {
+        compile_test_main(
+            module,
+            &mut ctx,
+            &mut fb_ctx,
+            &mut rodata,
+            &mut rt_imports,
+            program,
+            &func_ids,
+            ptr_ty,
+        )?;
+    } else if let Some(main_id) = program.main {
         compile_main(
             module,
             &mut ctx,
@@ -562,6 +577,118 @@ fn compile_main(
     let ok = b.inst_results(run_call)[0];
     let exit_call = b.ins().call(exit_ref, &[rt, ok]);
     let code = b.inst_results(exit_call)[0];
+    b.ins().return_(&[code]);
+    b.finalize(target_config);
+
+    module.define_function(main_id, ctx)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_test_main(
+    module: &mut ObjectModule,
+    ctx: &mut Context,
+    fb_ctx: &mut FunctionBuilderContext,
+    rodata: &mut Rodata,
+    rt_imports: &mut RuntimeImports,
+    program: &Program,
+    func_ids: &[ClifFuncId],
+    ptr_ty: ClifType,
+) -> Result<(), CodegenError> {
+    let new_id = rt_imports.get(
+        module,
+        "noev_rt_test_harness_new",
+        &[types::I32, ptr_ty],
+        Some(ptr_ty),
+    )?;
+    let reg_id = rt_imports.get(
+        module,
+        "noev_rt_test_register",
+        &[ptr_ty, ptr_ty, ptr_ty, types::I8, ptr_ty, ptr_ty, ptr_ty],
+        None,
+    )?;
+    let run_id = rt_imports.get(module, "noev_rt_test_run_all", &[ptr_ty], Some(types::I32))?;
+
+    let mut main_sig = Signature::new(module.isa().default_call_conv());
+    main_sig.params.push(AbiParam::new(types::I32));
+    main_sig.params.push(AbiParam::new(ptr_ty));
+    main_sig.returns.push(AbiParam::new(types::I32));
+    let main_id = module.declare_function("main", Linkage::Export, &main_sig)?;
+
+    // Intern all test name / expected-failure strings before creating the FunctionBuilder.
+    let mut entries = Vec::with_capacity(program.tests.len());
+    for t in &program.tests {
+        let name_data = rodata.intern_bytes(module, t.name.as_bytes())?;
+        let (fail_mode, fail_data, fail_len) = match &t.expect_fail {
+            None => (0i64, None, 0usize),
+            Some(None) => (1i64, None, 0usize),
+            Some(Some(s)) => {
+                let d = rodata.intern_bytes(module, s.as_bytes())?;
+                (2i64, Some(d), s.len())
+            }
+        };
+        entries.push((
+            name_data,
+            t.name.len(),
+            fail_mode,
+            fail_data,
+            fail_len,
+            func_ids[t.func.index()],
+        ));
+    }
+
+    ctx.clear();
+    ctx.func.signature = main_sig;
+    let target_config = module.target_config();
+    let new_ref = module.declare_func_in_func(new_id, &mut ctx.func);
+    let reg_ref = module.declare_func_in_func(reg_id, &mut ctx.func);
+    let run_ref = module.declare_func_in_func(run_id, &mut ctx.func);
+
+    let mut declared = Vec::with_capacity(entries.len());
+    for &(name_data, name_len, fail_mode, fail_data, fail_len, fid) in &entries {
+        let name_gv = module.declare_data_in_func(name_data, &mut ctx.func);
+        let fail_gv = fail_data.map(|d| module.declare_data_in_func(d, &mut ctx.func));
+        let fn_ref = module.declare_func_in_func(fid, &mut ctx.func);
+        declared.push((name_gv, name_len, fail_mode, fail_gv, fail_len, fn_ref));
+    }
+
+    let mut b = FunctionBuilder::new(&mut ctx.func, fb_ctx);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    b.seal_block(entry);
+
+    let argc = b.block_params(entry)[0];
+    let argv = b.block_params(entry)[1];
+    let h_call = b.ins().call(new_ref, &[argc, argv]);
+    let harness = b.inst_results(h_call)[0];
+
+    for (name_gv, name_len, fail_mode, fail_gv, fail_len, fn_ref) in declared {
+        let name_ptr = b.ins().symbol_value(ptr_ty, name_gv);
+        let name_len_v = b.ins().iconst(ptr_ty, name_len as i64);
+        let fail_mode_v = b.ins().iconst(types::I8, fail_mode);
+        let fail_ptr = match fail_gv {
+            Some(gv) => b.ins().symbol_value(ptr_ty, gv),
+            None => b.ins().iconst(ptr_ty, 0),
+        };
+        let fail_len_v = b.ins().iconst(ptr_ty, fail_len as i64);
+        let fn_ptr = b.ins().func_addr(ptr_ty, fn_ref);
+        b.ins().call(
+            reg_ref,
+            &[
+                harness,
+                name_ptr,
+                name_len_v,
+                fail_mode_v,
+                fail_ptr,
+                fail_len_v,
+                fn_ptr,
+            ],
+        );
+    }
+
+    let run_call = b.ins().call(run_ref, &[harness]);
+    let code = b.inst_results(run_call)[0];
     b.ins().return_(&[code]);
     b.finalize(target_config);
 
@@ -3815,20 +3942,34 @@ impl<'a, 'b, 'p> FnLowerer<'a, 'b, 'p> {
                 self.check_ok(ok);
                 self.builder.ins().jump(self.blocks[next.index()], &[]);
             }
-            Terminator::Assert { cond, next, .. } => {
+            Terminator::Assert {
+                cond, msg, next, ..
+            } => {
                 let ok_cond = self.eval_scalar(cond)?;
-                let msg = b"assertion failed";
-                let mid = self.rodata.intern_bytes(self.module, msg)?;
-                let mptr = self.data_addr(mid);
-                let mlen = self.builder.ins().iconst(self.ptr_ty, msg.len() as i64);
-                let id = self.rt_imports.get(
-                    self.module,
-                    "noev_rt_assert",
-                    &[self.ptr_ty, types::I8, self.ptr_ty, self.ptr_ty],
-                    Some(types::I8),
-                )?;
-                let call = self.call_clif(id, &[self.rt_val, ok_cond, mptr, mlen]);
-                let ok = self.builder.inst_results(call)[0];
+                let ok = if let Some(msg_op) = msg {
+                    let msg_handle = self.eval_scalar(msg_op)?;
+                    let id = self.rt_imports.get(
+                        self.module,
+                        "noev_rt_assert_str",
+                        &[self.ptr_ty, types::I8, types::I64],
+                        Some(types::I8),
+                    )?;
+                    let call = self.call_clif(id, &[self.rt_val, ok_cond, msg_handle]);
+                    self.builder.inst_results(call)[0]
+                } else {
+                    let text = b"assertion failed";
+                    let mid = self.rodata.intern_bytes(self.module, text)?;
+                    let mptr = self.data_addr(mid);
+                    let mlen = self.builder.ins().iconst(self.ptr_ty, text.len() as i64);
+                    let id = self.rt_imports.get(
+                        self.module,
+                        "noev_rt_assert",
+                        &[self.ptr_ty, types::I8, self.ptr_ty, self.ptr_ty],
+                        Some(types::I8),
+                    )?;
+                    let call = self.call_clif(id, &[self.rt_val, ok_cond, mptr, mlen]);
+                    self.builder.inst_results(call)[0]
+                };
                 self.check_ok(ok);
                 self.builder.ins().jump(self.blocks[next.index()], &[]);
             }

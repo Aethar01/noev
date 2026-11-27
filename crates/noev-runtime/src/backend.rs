@@ -8,6 +8,7 @@
 pub mod ketrs;
 
 use noev_sema::prelude::Gate;
+use noev_sema::{BackendLevel, TargetCapabilities, TargetSpec};
 
 /// A failure reported by a backend.
 #[derive(Clone, Debug, PartialEq)]
@@ -187,6 +188,26 @@ pub trait Backend {
     fn exact_expectations(&self) -> bool {
         false
     }
+
+    /// Target description for this backend (`spec/runtime.md` §5).
+    fn target(&self) -> TargetSpec {
+        TargetSpec {
+            name: self.name().into(),
+            device: None,
+            level: BackendLevel::Both,
+            qubits: None,
+            gates: None,
+            coupling: None,
+            capabilities: TargetCapabilities {
+                read_state: false,
+                check_release: false,
+                exact_expectations: self.exact_expectations(),
+                sample_state: false,
+                foreign_while_live: true,
+            },
+            plugin: None,
+        }
+    }
 }
 
 /// One run on a gate-level backend. Operations arrive as the program reaches them. Nothing is
@@ -300,6 +321,10 @@ impl Backend for Recorder<'_> {
     fn exact_expectations(&self) -> bool {
         self.inner.exact_expectations()
     }
+
+    fn target(&self) -> TargetSpec {
+        self.inner.target()
+    }
 }
 
 /// A backend that runs nothing: it keeps every circuit job it is given, with its shots, so
@@ -332,5 +357,9 @@ impl Backend for Exporter {
 
     fn executes(&self) -> bool {
         false
+    }
+
+    fn target(&self) -> TargetSpec {
+        TargetSpec::export()
     }
 }

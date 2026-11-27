@@ -29,16 +29,16 @@ impl Flip for Qubit {
 
 fn undo<T: Flip>(q: mut T) { adj q.flip() }
 
-fn main() {
+test fn traits_and_defaults() {
     let s = Square { side: 2.0 }
     let p = Pair { a: Square { side: 1.0 }, b: Square { side: 3.0 } }
-    print(s.area())
-    print(s.describe())
-    print(p.describe())
-    print(total(ref s, ref s))
+    assert s.area() == 4.0
+    assert s.describe() == "a shape of area 4.0"
+    assert p.describe() == "a shape of area 10.0"
+    assert total(ref s, ref s) == 8.0
     let q = |0>
     q.flip()
     undo(mut q)
     q.flip()
-    print(mv q.measure())
+    assert mv q.measure() == 1
 }

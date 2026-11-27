@@ -96,6 +96,9 @@ pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
             });
         }
     }
+    checker
+        .diagnostics
+        .extend(crate::target::check_backend_impls(ast, typed));
     checker.diagnostics
 }
 
@@ -638,7 +641,13 @@ fn walk_block(
                 walk_expr(ast, place, in_with, with_pats, visit);
                 walk_expr(ast, value, in_with, with_pats, visit);
             }
-            StmtKind::Return(Some(e)) | StmtKind::Assert(e) | StmtKind::Expr { expr: e, .. } => {
+            StmtKind::Assert { cond, msg } => {
+                walk_expr(ast, cond, in_with, with_pats, visit);
+                if let Some(m) = msg {
+                    walk_expr(ast, m, in_with, with_pats, visit);
+                }
+            }
+            StmtKind::Return(Some(e)) | StmtKind::Expr { expr: e, .. } => {
                 walk_expr(ast, e, in_with, with_pats, visit)
             }
             StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
@@ -874,9 +883,13 @@ impl SelfFieldCollector<'_> {
                     self.expr(value, false);
                     self.expr(place, true);
                 }
-                StmtKind::Return(Some(e))
-                | StmtKind::Assert(e)
-                | StmtKind::Expr { expr: e, .. } => self.expr(e, false),
+                StmtKind::Assert { cond, msg } => {
+                    self.expr(cond, false);
+                    if let Some(m) = msg {
+                        self.expr(m, false);
+                    }
+                }
+                StmtKind::Return(Some(e)) | StmtKind::Expr { expr: e, .. } => self.expr(e, false),
                 StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
             }
         }
@@ -1297,7 +1310,13 @@ impl BorrowInfer<'_> {
                     let s = self.expr(e);
                     merge_sources(&mut self.returned, &s);
                 }
-                StmtKind::Assert(e) | StmtKind::Expr { expr: e, .. } => {
+                StmtKind::Assert { cond, msg } => {
+                    self.expr(cond);
+                    if let Some(m) = msg {
+                        self.expr(m);
+                    }
+                }
+                StmtKind::Expr { expr: e, .. } => {
                     self.expr(e);
                 }
                 StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
@@ -1627,9 +1646,13 @@ fn compute_liveness(ast: &Ast, typed: &Typed, f: FnId, body: BlockId) -> Option<
                         exprs.push(place);
                         exprs.push(value);
                     }
-                    StmtKind::Return(Some(e))
-                    | StmtKind::Assert(e)
-                    | StmtKind::Expr { expr: e, .. } => exprs.push(e),
+                    StmtKind::Assert { cond, msg } => {
+                        exprs.push(cond);
+                        if let Some(m) = msg {
+                            exprs.push(m);
+                        }
+                    }
+                    StmtKind::Return(Some(e)) | StmtKind::Expr { expr: e, .. } => exprs.push(e),
                     StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
                 }
             }
@@ -1858,7 +1881,13 @@ impl LivenessPass<'_> {
                         self.expr(value, live);
                     }
                 }
-                StmtKind::Assert(e) | StmtKind::Expr { expr: e, .. } => {
+                StmtKind::Assert { cond, msg } => {
+                    if let Some(m) = msg {
+                        self.expr(m, live);
+                    }
+                    self.expr(cond, live);
+                }
+                StmtKind::Expr { expr: e, .. } => {
                     self.expr(e, live);
                 }
             }
@@ -2493,8 +2522,11 @@ impl Owner<'_> {
                 self.check_consumed(mark, stmt.span);
                 self.diverged = true;
             }
-            StmtKind::Assert(cond) => {
+            StmtKind::Assert { cond, msg } => {
                 self.expr(cond, Use::Read);
+                if let Some(m) = msg {
+                    self.expr(m, Use::Read);
+                }
                 let mut new = Vec::new();
                 facts::facts_from(ast, self.typed, cond, true, &mut new);
                 self.facts.extend(new);

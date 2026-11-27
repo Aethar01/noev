@@ -1,26 +1,24 @@
-# Run tests
+# Conformance tests
 
-End-to-end programs for the conformance suite: each must run with `noev run` and print
-exactly what its `.out` file holds. Like `tests/ui`, they depend only on the command line.
-
-## Layout
-
-- `NAME.nv`: a program with a `fn main()`.
-- `NAME.out`: its expected standard output, byte for byte.
-- A first line `// fails: TEXT` instead means the run must fail (non-zero exit status) with
-  `TEXT` somewhere in standard error; standard output must still match `NAME.out`.
+End-to-end runtime conformance tests written with Noev's built-in test system
+(`test fn`, `test(fail = "…")`, `assert`, `spec/testing.md`).
 
 ## Determinism
 
-Every program's output is fixed by the language, whatever the backend or random seed: its
-measurements have certain outcomes, its distributions have a single outcome, and its
-expectation values are of eigenstates, which are exact even when estimated. Anything
-statistical belongs in an implementation's own tests.
+Every test's assertions are fixed by the language, whatever the backend or random seed: its
+measurements have certain outcomes, its distributions have certain outcomes, and its
+expectation values are of eigenstates. Anything statistical belongs in an implementation's
+own tests.
 
 ## Running
 
-`cargo test -p noev --test run` runs every file through:
+Run the entire suite directly with `noev test`:
 
 ```
-noev run FILE
+noev test tests/run
+noev test --codegen=cranelift tests/run
+noev test --codegen=llvm tests/run
 ```
+
+Cargo's test harnesses (`cargo test -p noev --test run --test codegen --test llvm`) drive
+these exact commands.

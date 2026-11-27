@@ -618,9 +618,13 @@ fn children(ast: &Ast, node: Node, out: &mut Vec<Node>) {
             StmtKind::Assign { place, value, .. } => {
                 out.extend([Node::Expr(place), Node::Expr(value)])
             }
-            StmtKind::Return(Some(e)) | StmtKind::Assert(e) | StmtKind::Expr { expr: e, .. } => {
-                out.push(Node::Expr(e))
+            StmtKind::Assert { cond, msg } => {
+                out.push(Node::Expr(cond));
+                if let Some(m) = msg {
+                    out.push(Node::Expr(m));
+                }
             }
+            StmtKind::Return(Some(e)) | StmtKind::Expr { expr: e, .. } => out.push(Node::Expr(e)),
             _ => {}
         },
         Node::Expr(e) => {
@@ -1069,9 +1073,16 @@ impl<'a> Walker<'a> {
             StmtKind::Return(Some(e)) | StmtKind::Expr { expr: e, .. } => {
                 self.expr(e, before);
             }
-            StmtKind::Assert(e) => {
-                if self.expr(e, before) && before {
-                    let span = self.cx.ast.expr(e).span;
+            StmtKind::Assert { cond, msg } => {
+                if self.expr(cond, before) && before {
+                    let span = self.cx.ast.expr(cond).span;
+                    self.violate(span, "used in `assert`");
+                }
+                if let Some(m) = msg
+                    && self.expr(m, before)
+                    && before
+                {
+                    let span = self.cx.ast.expr(m).span;
                     self.violate(span, "used in `assert`");
                 }
             }

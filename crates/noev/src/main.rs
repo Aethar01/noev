@@ -34,11 +34,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Check a program for type and ownership errors without building it
+    /// Check a program for type, ownership, and target-capability errors without building it
     Check {
         /// The `.nv` file or package directory to check
         #[arg(default_value = ".")]
         file: PathBuf,
+
+        /// Backend target (`ketrs`, `export`, a `.toml`/plug-in path, or cached `NAME[:DEVICE]`)
+        #[arg(long, value_name = "NAME[:DEVICE]")]
+        backend: Option<String>,
 
         #[command(flatten)]
         messages: MessageOptions,
@@ -67,6 +71,10 @@ enum Command {
         #[arg(short = 'l', long = "link", value_name = "LIB")]
         link: Vec<String>,
 
+        /// Backend target to check capabilities against (`ketrs`, `export`, `.toml`/plug-in, or cached `NAME[:DEVICE]`)
+        #[arg(long, value_name = "NAME[:DEVICE]")]
+        backend: Option<String>,
+
         /// Where to write the output (default: file stem for binary/object, stdout for ir/plan/qir/llvm-ir)
         #[arg(short, long, value_name = "PATH")]
         output: Option<PathBuf>,
@@ -85,9 +93,9 @@ enum Command {
         #[arg(long, value_name = "N")]
         seed: Option<u64>,
 
-        /// What runs the quantum parts [default: ketrs, when noev is built with it]
-        #[arg(long, value_enum)]
-        backend: Option<BackendChoice>,
+        /// Backend to run on (`ketrs`, `export`, a plug-in `.so`/`.dylib` path, or cached `NAME[:DEVICE]`)
+        #[arg(long, value_name = "NAME[:DEVICE]")]
+        backend: Option<String>,
 
         /// Save every circuit the run sends to the backend as OpenQASM 3, one file per job,
         /// in this directory
@@ -96,6 +104,49 @@ enum Command {
 
         #[command(flatten)]
         messages: MessageOptions,
+    },
+
+    /// Run `test fn` tests in a file, package, or directory (`spec/testing.md`)
+    Test {
+        /// The `.nv` file, package directory, or directory of `.nv` files to test
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Only run tests whose name contains this substring
+        filter: Option<String>,
+
+        /// List matching tests without running them
+        #[arg(long)]
+        list: bool,
+
+        /// Seed for the simulator's random numbers, to reproduce a run
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
+
+        /// Backend to run tests on (`ketrs`, a plug-in path, or cached `NAME[:DEVICE]`)
+        #[arg(long, value_name = "NAME[:DEVICE]")]
+        backend: Option<String>,
+
+        /// Compile tests to a native binary instead of running in the interpreter
+        #[arg(long)]
+        compile: bool,
+
+        /// Native code generator to use (`cranelift` or `llvm`; implies `--compile`)
+        #[arg(long, value_enum)]
+        codegen: Option<CodegenChoice>,
+
+        /// Print test standard output as it runs instead of hiding output for passing tests
+        #[arg(long)]
+        nocapture: bool,
+
+        #[command(flatten)]
+        messages: MessageOptions,
+    },
+
+    /// Manage cached backend target descriptions (`spec/runtime.md` §4)
+    Target {
+        #[command(subcommand)]
+        command: TargetCommand,
     },
 
     /// Start the language server, for editors (speaks LSP on standard input and output)
@@ -121,13 +172,26 @@ enum Command {
     },
 }
 
-#[derive(Clone, Copy, PartialEq, ValueEnum)]
-enum BackendChoice {
-    /// The ketrs statevector simulator (the `ketrs` feature, on by default)
-    Ketrs,
-    /// Record each circuit instead of running it, and save it; nothing quantum runs, and
-    /// what the program prints is dropped, since its results are not known
-    Export,
+#[derive(Subcommand)]
+enum TargetCommand {
+    /// Fetch and cache a backend target description (from a built-in, `.toml`, or plug-in library)
+    Fetch {
+        /// Target name (`NAME` or `NAME:DEVICE`), or path to a `.toml`/plug-in
+        target: String,
+
+        /// Path to a target `.toml` or plug-in library (`.so`/`.dylib`) to fetch from
+        #[arg(long, value_name = "PATH")]
+        from: Option<PathBuf>,
+    },
+
+    /// List built-in and locally cached backend targets
+    List,
+
+    /// Show a target's TOML description
+    Show {
+        /// Target name (`NAME` or `NAME:DEVICE`), built-in, or path
+        target: String,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -181,7 +245,16 @@ enum Emit {
 
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Command::Check { file, messages } => match front_end(&file, messages.message_format) {
+        Command::Check {
+            file,
+            backend,
+            messages,
+        } => match front_end(
+            &file,
+            backend.as_deref(),
+            TargetCheck::Check,
+            messages.message_format,
+        ) {
             Ok(_) => {
                 if matches!(messages.message_format, MessageFormat::Human) {
                     anstream::eprintln!(
@@ -198,6 +271,7 @@ fn main() -> ExitCode {
             codegen,
             qir_runtime,
             link,
+            backend,
             output,
             messages,
         } => build(
@@ -206,6 +280,7 @@ fn main() -> ExitCode {
             codegen,
             qir_runtime,
             &link,
+            backend.as_deref(),
             output.as_deref(),
             messages.message_format,
         ),
@@ -218,10 +293,32 @@ fn main() -> ExitCode {
         } => run(
             &file,
             seed,
-            backend,
+            backend.as_deref(),
             circuits.as_deref(),
             messages.message_format,
         ),
+        Command::Test {
+            path,
+            filter,
+            list,
+            seed,
+            backend,
+            compile,
+            codegen,
+            nocapture,
+            messages,
+        } => run_tests(
+            &path,
+            filter.as_deref(),
+            list,
+            seed,
+            backend.as_deref(),
+            compile || codegen.is_some(),
+            codegen,
+            nocapture,
+            messages.message_format,
+        ),
+        Command::Target { command } => target_cmd(command),
         Command::Lsp => match lsp::serve() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -234,7 +331,7 @@ fn main() -> ExitCode {
             output,
             format: export_format,
             messages,
-        } => match front_end(&file, messages.message_format) {
+        } => match front_end(&file, None, TargetCheck::None, messages.message_format) {
             Ok(checked) => export(
                 &file,
                 &checked,
@@ -247,17 +344,35 @@ fn main() -> ExitCode {
     }
 }
 
+/// How `front_end` applies target-capability checking.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TargetCheck {
+    /// Check capabilities against the chosen backend (or `ketrs` by default).
+    Check,
+    /// Check capabilities unless the backend is `export` (where `run --backend=export`
+    /// behaves as `noev export` and stops gracefully at unknown results).
+    Run,
+    /// Skip target-capability checking (used by `noev export`).
+    None,
+}
+
 /// A program that passed every check.
 struct Checked {
     sources: noev_syntax::SourceMap,
     ast: noev_syntax::Ast,
     typed: noev_sema::Typed,
     circuits: noev_sema::Circuits,
+    backend: Option<String>,
 }
 
 /// Reads and checks the `.nv` file or package at `file`, printing its diagnostics. Fails with
 /// exit status 1 when there are errors, and 2 when nothing could be checked.
-fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
+fn front_end(
+    file: &Path,
+    backend_arg: Option<&str>,
+    target_check: TargetCheck,
+    format: MessageFormat,
+) -> Result<Checked, ExitCode> {
     let loaded = match package::load(file) {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -265,11 +380,36 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
             return Err(ExitCode::from(2));
         }
     };
+    front_end_loaded(loaded, backend_arg, target_check, format)
+}
+
+fn front_end_loaded(
+    loaded: package::Loaded,
+    backend_arg: Option<&str>,
+    target_check: TargetCheck,
+    format: MessageFormat,
+) -> Result<Checked, ExitCode> {
     let package::Loaded {
         sources,
         ast,
         mut diagnostics,
+        default_backend,
     } = loaded;
+    let effective_backend = backend_arg.map(str::to_string).or(default_backend);
+    let target_spec = match target_check {
+        TargetCheck::None => None,
+        TargetCheck::Run if effective_backend.as_deref() == Some("export") => None,
+        TargetCheck::Check | TargetCheck::Run => {
+            let spec = effective_backend.as_deref().unwrap_or("ketrs");
+            match noev_runtime::plugin::resolve_target_spec(spec) {
+                Ok(target) => Some(target),
+                Err(error) => {
+                    anstream::eprintln!("{ERROR}error:{ERROR:#} {error}");
+                    return Err(ExitCode::from(2));
+                }
+            }
+        }
+    };
     let (typed, type_errors) = noev_sema::check(&ast);
     // Ownership is only meaningful for a well-typed program, and circuits for one that
     // passes ownership checking.
@@ -283,6 +423,9 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
             let (found, warnings) = noev_sema::check_circuits(&ast, &typed);
             circuits = found;
             diagnostics.extend(warnings);
+            if let Some(target) = &target_spec {
+                diagnostics.extend(noev_sema::check_target(&ast, &typed, &circuits, target));
+            }
         }
     }
     diagnostics.extend(type_errors);
@@ -299,21 +442,106 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
         ast,
         typed,
         circuits,
+        backend: effective_backend,
     })
+}
+
+/// Handles `noev target fetch | list | show` (`spec/runtime.md` §4).
+fn target_cmd(command: TargetCommand) -> ExitCode {
+    match command {
+        TargetCommand::Fetch { target, from } => {
+            let (base, device) = noev_runtime::plugin::split_backend_spec(&target);
+            let spec_res = match from {
+                Some(path) => if path.extension().is_some_and(|e| e == "toml") {
+                    std::fs::read_to_string(&path)
+                        .map_err(|e| format!("cannot read `{}`: {e}", path.display()))
+                        .and_then(|t| noev_sema::TargetSpec::from_toml(&t))
+                } else {
+                    noev_runtime::plugin::PluginBackend::probe_target(&path, device)
+                        .map_err(|e| e.0)
+                }
+                .map(|mut spec| {
+                    spec.name = base.to_string();
+                    if let Some(dev) = device {
+                        spec.device = Some(dev.to_string());
+                    }
+                    spec
+                }),
+                None => noev_runtime::plugin::resolve_target_spec(&target),
+            };
+            let spec = match spec_res {
+                Ok(s) => s,
+                Err(error) => {
+                    anstream::eprintln!("{ERROR}error:{ERROR:#} {error}");
+                    return ExitCode::from(1);
+                }
+            };
+            let key = match &spec.device {
+                Some(dev) => format!("{}:{dev}", spec.name),
+                None => spec.name.clone(),
+            };
+            match noev_runtime::plugin::write_cached_target(&key, &spec) {
+                Ok(path) => {
+                    anstream::eprintln!(
+                        "{NOTE}note:{NOTE:#} cached target `{key}` at {}",
+                        path.display()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    anstream::eprintln!("{ERROR}error:{ERROR:#} {error}");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        TargetCommand::List => {
+            println!("ketrs   (built-in, level=both)");
+            println!("export  (built-in, level=circuit)");
+            match noev_runtime::plugin::list_cached_targets() {
+                Ok(entries) => {
+                    for (key, target) in entries {
+                        let qubits = target
+                            .qubits
+                            .map_or_else(|| "unbounded".to_string(), |q| format!("{q} qubits"));
+                        println!("{key}  (cached, level={}, {qubits})", target.level.as_str());
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    anstream::eprintln!("{ERROR}error:{ERROR:#} {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        TargetCommand::Show { target } => {
+            match noev_runtime::plugin::resolve_target_spec(&target) {
+                Ok(spec) => {
+                    print!("{}", spec.to_toml());
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    anstream::eprintln!("{ERROR}error:{ERROR:#} {error}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+    }
 }
 
 /// Compiles `file` and writes the requested output to `output`, or to stdout (or a default file
 /// name for `--emit=object` and `--emit=binary`).
+#[allow(clippy::too_many_arguments)]
 fn build(
     file: &Path,
     emit: Emit,
     codegen: Option<CodegenChoice>,
     qir_runtime: bool,
     link: &[String],
+    backend: Option<&str>,
     output: Option<&Path>,
     format: MessageFormat,
 ) -> ExitCode {
-    let checked = match front_end(file, format) {
+    let checked = match front_end(file, backend, TargetCheck::Check, format) {
         Ok(checked) => checked,
         Err(code) => return code,
     };
@@ -503,6 +731,7 @@ fn codegen_options(qir_runtime: bool) -> noev_codegen::CodegenOptions {
         } else {
             noev_codegen::RuntimeAbi::Noev
         },
+        test_harness: false,
     }
 }
 
@@ -752,16 +981,17 @@ fn report_runtime_error(
 fn run(
     file: &Path,
     seed: Option<u64>,
-    backend: Option<BackendChoice>,
+    backend: Option<&str>,
     circuits: Option<&Path>,
     format: MessageFormat,
 ) -> ExitCode {
     use std::io::{IsTerminal, Write};
-    let checked = match front_end(file, format) {
+    let checked = match front_end(file, backend, TargetCheck::Run, format) {
         Ok(checked) => checked,
         Err(code) => return code,
     };
-    if backend == Some(BackendChoice::Export) {
+    let chosen = checked.backend.as_deref().unwrap_or("ketrs");
+    if chosen == "export" {
         return export(file, &checked, circuits, ExportFormat::Qasm3, format);
     }
     let program = noev_ir::lower(
@@ -788,20 +1018,35 @@ fn run(
         stdout,
         stderr: Box::new(std::io::stderr()),
     };
-    let Some(simulator) = simulator() else {
-        anstream::eprintln!(
-            "{ERROR}error:{ERROR:#} this noev was built without a simulator (its `ketrs` feature); \
-             `--backend=export` saves the program's circuits instead"
-        );
-        return ExitCode::from(2);
+    let plugin_holder: Option<noev_runtime::plugin::PluginBackend>;
+    let chosen_backend: &dyn noev_runtime::Backend = if chosen == "ketrs" {
+        let Some(simulator) = simulator() else {
+            anstream::eprintln!(
+                "{ERROR}error:{ERROR:#} this noev was built without a simulator (its `ketrs` feature); \
+                 `--backend=export` saves the program's circuits instead"
+            );
+            return ExitCode::from(2);
+        };
+        simulator
+    } else {
+        match noev_runtime::plugin::load_plugin_spec(chosen) {
+            Ok(plugin) => {
+                plugin_holder = Some(plugin);
+                plugin_holder.as_ref().expect("set")
+            }
+            Err(error) => {
+                anstream::eprintln!("{ERROR}error:{ERROR:#} {}", error.0);
+                return ExitCode::from(2);
+            }
+        }
     };
-    let backend = noev_runtime::backend::Recorder::new(simulator);
-    let result = noev_runtime::run_main(&program, &backend, seed, output);
+    let recorder = noev_runtime::backend::Recorder::new(chosen_backend);
+    let result = noev_runtime::run_main(&program, &recorder, seed, output);
     if let Some(dir) = circuits
         && let Err(code) = save_circuits(
             file,
             dir,
-            &backend.jobs.borrow(),
+            &recorder.jobs.borrow(),
             ExportFormat::Qasm3,
             format,
         )
@@ -925,4 +1170,580 @@ fn save_circuits(
         anstream::eprintln!("{NOTE}note:{NOTE:#} {verb} {what}");
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------
+// `noev test` runner (`spec/testing.md`)
+// ---------------------------------------------------------------------------------------
+
+/// Shared byte buffer writer for capturing stdout/stderr per test.
+struct CaptureWriter(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// One checked compilation unit discovered by `noev test`.
+struct TestUnit {
+    /// Optional prefix (`file_stem` for integration tests or directory mode).
+    prefix: Option<String>,
+    checked: Checked,
+    program: noev_ir::Program,
+}
+
+fn qualify_test_name(prefix: Option<&str>, name: &str) -> String {
+    match prefix {
+        Some(p) if !p.is_empty() => format!("{p}::{name}"),
+        _ => name.to_string(),
+    }
+}
+
+/// Discovers and checks all test units under `path` (`spec/testing.md` §2).
+fn discover_test_units(
+    path: &Path,
+    backend_arg: Option<&str>,
+    format: MessageFormat,
+) -> Result<Vec<TestUnit>, ExitCode> {
+    let mut units = Vec::new();
+    let push_unit = |units: &mut Vec<TestUnit>, prefix: Option<String>, checked: Checked| {
+        let program = noev_ir::lower(
+            &checked.ast,
+            &checked.typed,
+            &checked.circuits,
+            &checked.sources,
+        );
+        units.push(TestUnit {
+            prefix,
+            checked,
+            program,
+        });
+    };
+
+    if path.is_file() {
+        let checked = front_end(path, backend_arg, TargetCheck::Check, format)?;
+        push_unit(&mut units, None, checked);
+        return Ok(units);
+    }
+
+    if !path.is_dir() {
+        anstream::eprintln!("noev: `{}` does not exist", path.display());
+        return Err(ExitCode::from(2));
+    }
+
+    if path.join("noev.toml").is_file() {
+        // Package mode: unit tests in `src/`, plus integration tests in `tests/*.nv`.
+        let checked = front_end(path, backend_arg, TargetCheck::Check, format)?;
+        push_unit(&mut units, None, checked);
+
+        let tests_dir = path.join("tests");
+        if tests_dir.is_dir() {
+            let mut files: Vec<PathBuf> = match std::fs::read_dir(&tests_dir) {
+                Ok(rd) => rd
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "nv"))
+                    .collect(),
+                Err(error) => {
+                    anstream::eprintln!("noev: cannot read {}: {error}", tests_dir.display());
+                    return Err(ExitCode::from(2));
+                }
+            };
+            files.sort();
+            for file in files {
+                let loaded = match package::load_integration_test(path, &file) {
+                    Ok(l) => l,
+                    Err(error) => {
+                        anstream::eprintln!("noev: {error}");
+                        return Err(ExitCode::from(2));
+                    }
+                };
+                let checked = front_end_loaded(loaded, backend_arg, TargetCheck::Check, format)?;
+                let stem = file
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string);
+                push_unit(&mut units, stem, checked);
+            }
+        }
+    } else {
+        // Directory of `.nv` files without `noev.toml`.
+        let mut files: Vec<PathBuf> = match std::fs::read_dir(path) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "nv"))
+                .collect(),
+            Err(error) => {
+                anstream::eprintln!("noev: cannot read {}: {error}", path.display());
+                return Err(ExitCode::from(2));
+            }
+        };
+        files.sort();
+        for file in files {
+            let checked = front_end(&file, backend_arg, TargetCheck::Check, format)?;
+            let stem = file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string);
+            push_unit(&mut units, stem, checked);
+        }
+    }
+
+    Ok(units)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_tests(
+    path: &Path,
+    filter: Option<&str>,
+    list: bool,
+    seed: Option<u64>,
+    backend_arg: Option<&str>,
+    compile: bool,
+    codegen: Option<CodegenChoice>,
+    nocapture: bool,
+    format: MessageFormat,
+) -> ExitCode {
+    let units = match discover_test_units(path, backend_arg, format) {
+        Ok(u) => u,
+        Err(code) => return code,
+    };
+
+    // Collect matching tests across all units.
+    let mut matching_names = Vec::new();
+    for unit in &units {
+        for t in &unit.program.tests {
+            let full = qualify_test_name(unit.prefix.as_deref(), &t.name);
+            if filter.is_none_or(|f| full.contains(f)) {
+                matching_names.push(full);
+            }
+        }
+    }
+
+    if list {
+        for name in &matching_names {
+            println!("{name}");
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let seed = seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64)
+    });
+
+    // Resolve the effective backend spec from CLI or the first unit's manifest.
+    let effective_backend = backend_arg
+        .map(str::to_string)
+        .or_else(|| units.first().and_then(|u| u.checked.backend.clone()));
+
+    if compile {
+        return run_tests_compiled(
+            &units,
+            filter,
+            seed,
+            effective_backend.as_deref(),
+            codegen,
+            nocapture,
+        );
+    }
+
+    run_tests_interpreted(
+        &units,
+        filter,
+        seed,
+        effective_backend.as_deref(),
+        nocapture,
+        format,
+    )
+}
+
+fn check_test_outcome(
+    expect_fail: Option<&Option<String>>,
+    result: Result<(), noev_runtime::RuntimeError>,
+) -> Option<(String, Option<noev_syntax::Span>)> {
+    match (expect_fail, result) {
+        (None, Ok(())) => None,
+        (None, Err(err)) => Some((err.message, err.span)),
+        (Some(None), Err(_)) => None,
+        (Some(None), Ok(())) => Some(("test was expected to fail, but passed".into(), None)),
+        (Some(Some(expected)), Err(err)) => {
+            if err.message.contains(expected.as_str()) {
+                None
+            } else {
+                Some((
+                    format!(
+                        "expected failure containing `{expected}`, but got `{}`",
+                        err.message
+                    ),
+                    err.span,
+                ))
+            }
+        }
+        (Some(Some(expected)), Ok(())) => Some((
+            format!("test was expected to fail with `{expected}`, but passed"),
+            None,
+        )),
+    }
+}
+
+fn run_tests_interpreted(
+    units: &[TestUnit],
+    filter: Option<&str>,
+    seed: u64,
+    backend_spec: Option<&str>,
+    nocapture: bool,
+    format: MessageFormat,
+) -> ExitCode {
+    let chosen = backend_spec.unwrap_or("ketrs");
+    let exporter_holder;
+    let plugin_holder;
+    let backend: &dyn noev_runtime::Backend = if chosen == "export" {
+        exporter_holder = noev_runtime::backend::Exporter::default();
+        &exporter_holder
+    } else if chosen == "ketrs" {
+        let Some(sim) = simulator() else {
+            anstream::eprintln!(
+                "{ERROR}error:{ERROR:#} this noev was built without a simulator (its `ketrs` feature)"
+            );
+            return ExitCode::from(2);
+        };
+        sim
+    } else {
+        match noev_runtime::plugin::load_plugin_spec(chosen) {
+            Ok(p) => {
+                plugin_holder = p;
+                &plugin_holder
+            }
+            Err(err) => {
+                anstream::eprintln!("{ERROR}error:{ERROR:#} {}", err.0);
+                return ExitCode::from(2);
+            }
+        }
+    };
+
+    let mut total = 0usize;
+    for unit in units {
+        for t in &unit.program.tests {
+            let full = qualify_test_name(unit.prefix.as_deref(), &t.name);
+            if filter.is_none_or(|f| full.contains(f)) {
+                total += 1;
+            }
+        }
+    }
+
+    let start = std::time::Instant::now();
+    println!(
+        "running {total} {}",
+        if total == 1 { "test" } else { "tests" }
+    );
+
+    let mut passed = 0usize;
+    let mut index = 0u64;
+    struct Failure<'a> {
+        name: String,
+        seed: u64,
+        message: String,
+        span: Option<noev_syntax::Span>,
+        unit: &'a TestUnit,
+        captured: String,
+    }
+    let mut failures: Vec<Failure<'_>> = Vec::new();
+
+    for unit in units {
+        for t in &unit.program.tests {
+            let full = qualify_test_name(unit.prefix.as_deref(), &t.name);
+            if !filter.is_none_or(|f| full.contains(f)) {
+                continue;
+            }
+            let test_seed = seed.wrapping_add(index);
+            index += 1;
+            let captured = std::rc::Rc::new(std::cell::RefCell::new(Vec::<u8>::new()));
+            let output = if nocapture {
+                noev_runtime::Output {
+                    stdout: Box::new(std::io::stdout()),
+                    stderr: Box::new(std::io::stderr()),
+                }
+            } else {
+                noev_runtime::Output {
+                    stdout: Box::new(CaptureWriter(captured.clone())),
+                    stderr: Box::new(CaptureWriter(captured.clone())),
+                }
+            };
+            let result = noev_runtime::run_func(&unit.program, t.func, backend, test_seed, output);
+            if let Some((message, span)) = check_test_outcome(t.expect_fail.as_ref(), result) {
+                println!("test {full} ... FAILED");
+                let out_text = String::from_utf8_lossy(&captured.borrow()).into_owned();
+                failures.push(Failure {
+                    name: full,
+                    seed: test_seed,
+                    message,
+                    span,
+                    unit,
+                    captured: out_text,
+                });
+            } else {
+                println!("test {full} ... ok");
+                passed += 1;
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        println!("\nfailures:");
+        for fail in &failures {
+            println!("\n---- {} ----", fail.name);
+            if !fail.captured.is_empty() {
+                print!("{}", fail.captured);
+                if !fail.captured.ends_with('\n') {
+                    println!();
+                }
+            }
+            if let Some(span) = fail.span {
+                let diag = noev_syntax::Diagnostic::error(span, fail.message.clone());
+                report::print(&fail.unit.checked.sources, &[diag], format);
+            } else {
+                anstream::eprintln!("{ERROR}error:{ERROR:#} {}", fail.message);
+            }
+            println!("note: reproduce with --seed {}", fail.seed);
+        }
+    }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    let status = if failures.is_empty() { "ok" } else { "FAILED" };
+    println!(
+        "\ntest result: {status}. {passed} passed; {} failed; finished in {elapsed:.2}s",
+        failures.len()
+    );
+    if failures.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+#[cfg(any(feature = "cranelift", feature = "llvm"))]
+fn run_tests_compiled(
+    units: &[TestUnit],
+    filter: Option<&str>,
+    seed: u64,
+    backend_spec: Option<&str>,
+    codegen: Option<CodegenChoice>,
+    nocapture: bool,
+) -> ExitCode {
+    let generator = match select_codegen(codegen, false) {
+        Ok(g) => g,
+        Err(code) => return code,
+    };
+    let Some(runtime_lib) = find_runtime_lib() else {
+        anstream::eprintln!(
+            "{ERROR}error:{ERROR:#} cannot find `libnoev_runtime.a` (set `NOEV_RUNTIME_LIB` or build `noev-runtime`)"
+        );
+        return ExitCode::from(2);
+    };
+
+    // Only compile units that actually contain at least one matching test.
+    let active: Vec<(usize, &TestUnit)> = units
+        .iter()
+        .enumerate()
+        .filter(|(_, u)| {
+            u.program.tests.iter().any(|t| {
+                let full = qualify_test_name(u.prefix.as_deref(), &t.name);
+                filter.is_none_or(|f| full.contains(f))
+            })
+        })
+        .collect();
+
+    if active.is_empty() {
+        println!("running 0 tests\n\ntest result: ok. 0 passed; 0 failed; finished in 0.00s");
+        return ExitCode::SUCCESS;
+    }
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "noev-test-bin-{}-{}",
+        std::process::id(),
+        seed & 0xffff
+    ));
+    if let Err(error) = std::fs::create_dir_all(&tmp_dir) {
+        anstream::eprintln!("noev: cannot create {}: {error}", tmp_dir.display());
+        return ExitCode::from(2);
+    }
+
+    let opts = noev_codegen::CodegenOptions {
+        opt: noev_codegen::OptLevel::Speed,
+        runtime_abi: noev_codegen::RuntimeAbi::Noev,
+        test_harness: true,
+    };
+
+    // Compile units in parallel across available cores.
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get().min(8).min(active.len()))
+        .unwrap_or(1);
+    let next = std::sync::Mutex::new(0usize);
+    let compiled: std::sync::Mutex<Vec<(usize, Result<PathBuf, String>)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| {
+                loop {
+                    let pos = {
+                        let mut g = next.lock().unwrap();
+                        if *g >= active.len() {
+                            break;
+                        }
+                        let i = *g;
+                        *g += 1;
+                        i
+                    };
+                    let (unit_idx, unit) = active[pos];
+                    let bin_path = tmp_dir.join(format!("test_unit_{unit_idx}"));
+                    let res = generator
+                        .emit_binary(&unit.program, &bin_path, &runtime_lib, opts)
+                        .map(|()| bin_path)
+                        .map_err(|e| e.0);
+                    compiled.lock().unwrap().push((pos, res));
+                }
+            });
+        }
+    });
+
+    let mut bins = compiled.into_inner().unwrap();
+    bins.sort_by_key(|(pos, _)| *pos);
+
+    let mut ready_bins: Vec<(usize, PathBuf)> = Vec::with_capacity(bins.len());
+    for (pos, res) in bins {
+        match res {
+            Ok(p) => ready_bins.push((pos, p)),
+            Err(err) => {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                anstream::eprintln!("{ERROR}error:{ERROR:#} {err}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+
+    let single = ready_bins.len() == 1;
+    let total: usize = active
+        .iter()
+        .map(|(_, u)| {
+            u.program
+                .tests
+                .iter()
+                .filter(|t| {
+                    let full = qualify_test_name(u.prefix.as_deref(), &t.name);
+                    filter.is_none_or(|f| full.contains(f))
+                })
+                .count()
+        })
+        .sum();
+
+    let start = std::time::Instant::now();
+    if !single {
+        println!(
+            "running {total} {}",
+            if total == 1 { "test" } else { "tests" }
+        );
+    }
+
+    let mut total_passed = 0usize;
+    let mut total_failed = 0usize;
+    let mut any_failed = false;
+
+    for (pos, bin) in &ready_bins {
+        let (_, unit) = active[*pos];
+        let mut cmd = std::process::Command::new(bin);
+        cmd.arg("--seed").arg(seed.to_string());
+        if let Some(spec) = backend_spec {
+            cmd.arg("--backend").arg(spec);
+        }
+        if let Some(f) = filter {
+            cmd.arg("--filter").arg(f);
+        }
+        if let Some(prefix) = &unit.prefix {
+            cmd.arg("--prefix").arg(prefix);
+        }
+        if nocapture {
+            cmd.arg("--nocapture");
+        }
+        if !single {
+            cmd.arg("--quiet-summary");
+        }
+        if single {
+            let status = match cmd.status() {
+                Ok(s) => s,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    anstream::eprintln!("noev: cannot run test binary: {error}");
+                    return ExitCode::from(1);
+                }
+            };
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return if status.success() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            };
+        }
+        match cmd.output() {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                print!("{text}");
+                if !out.stderr.is_empty() {
+                    eprint!("{}", String::from_utf8_lossy(&out.stderr));
+                }
+                for line in text.lines() {
+                    if line.starts_with("test ") && line.ends_with(" ... ok") {
+                        total_passed += 1;
+                    } else if line.starts_with("test ") && line.ends_with(" ... FAILED") {
+                        total_failed += 1;
+                    }
+                }
+                if !out.status.success() {
+                    any_failed = true;
+                }
+            }
+            Err(error) => {
+                anstream::eprintln!("noev: cannot run test binary: {error}");
+                any_failed = true;
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let elapsed = start.elapsed().as_secs_f64();
+    let status = if !any_failed && total_failed == 0 {
+        "ok"
+    } else {
+        "FAILED"
+    };
+    println!(
+        "\ntest result: {status}. {total_passed} passed; {total_failed} failed; finished in {elapsed:.2}s"
+    );
+    if !any_failed && total_failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+#[cfg(not(any(feature = "cranelift", feature = "llvm")))]
+fn run_tests_compiled(
+    _units: &[TestUnit],
+    _filter: Option<&str>,
+    _seed: u64,
+    _backend_spec: Option<&str>,
+    _codegen: Option<CodegenChoice>,
+    _nocapture: bool,
+) -> ExitCode {
+    anstream::eprintln!(
+        "{ERROR}error:{ERROR:#} `noev` was built without a native code generator (`cranelift` or `llvm`)"
+    );
+    ExitCode::from(2)
 }

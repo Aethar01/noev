@@ -26,13 +26,13 @@ fn read_all<T>(x: T) -> Int {
     1
 }
 
-fn main() {
+test fn inferred_bounds() {
     let (a, b) = twice(20)
-    print(a + b + 2)
-    print(pair_up("hi"))
+    assert a + b + 2 == 42
+    assert pair_up("hi") == ("hi", "hi")
     let s = Square { side: 3.0 }
-    print(doubled(ref s))
+    assert doubled(ref s) == 18.0
     let q = read(|1>)
-    print(mv q.measure())
-    print(read_all((|1>, |0>)))
+    assert mv q.measure() == 1
+    assert read_all((|1>, |0>)) == 1
 }

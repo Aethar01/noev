@@ -20,17 +20,16 @@ impl Measure for Experiment {
 
 fn read<T: Measure>(x: T) -> T::Result { mv x.measure() }
 
-fn main() {
+test fn measure_trait() {
     let e = Experiment { angle: 0.5, state: |1> }
     let r = read(mv e)
-    print("{r.angle} {r.outcome}")
-    let b = read(|1>)
-    let bs = read(|10>)
-    print("{b} {bs}")
+    assert r.angle == 0.5 and r.outcome == 1
+    assert read(|1>) == 1
+    assert read(|10>) == [1, 0]
     let f = Experiment { angle: 1.5, state: |0> }
     let s = measure(mv f)
-    print("{s.angle} {s.outcome}")
+    assert s.angle == 1.5 and s.outcome == 0
     let g = Experiment { angle: 2.5, state: |1> }
     let t = mv g.measure()
-    print(t.outcome)
+    assert t.outcome == 1
 }

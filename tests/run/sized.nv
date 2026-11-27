@@ -9,22 +9,33 @@ fn checksum(data: [u8; 4]) -> u8 {
     sum
 }
 
-fn main() {
+test fn sized_integers_and_floats() {
     let x: u8 = 200
     let y: i8 = -128
     let z: u64 = 18446744073709551615
-    print(x, y, z, x + 55, y + 1, ~x, x >> 2, x << 1)
-    print(checksum([1, 2, 4, 8]), u8(5).bits(), u8(|00000101>.measure()))
-    print(Int(z) + 1, i64(y), u16(x) * 300, u8::try_from(300), u8::try_from(-1 + 2))
+    assert "{x} {y} {z} {x + 55} {y + 1} {~x} {x >> 2} {x << 1}" == "200 -128 18446744073709551615 255 -127 55 50 144"
+    assert checksum([1, 2, 4, 8]) == 15
+    assert u8(5).bits() == [0, 0, 0, 0, 0, 1, 0, 1]
+    assert u8(|00000101>.measure()) == 5
+    assert "{Int(z) + 1}" == "18446744073709551616"
+    assert i64(y) == -128
+    assert u16(x) * 300 == 60000
+    assert "{u8::try_from(300)}" == "Err(300 does not fit in `u8`, which holds 0 to 255)"
+    assert "{u8::try_from(-1 + 2)}" == "Ok(1)"
     let f: f32 = 0.1
     // `f64` is another name for `Float`.
     let g: f64 = 0.1
     let h: Float = g
-    print(f, h, Float(f), f32(g), Float(x) / 4.0)
-    print("{x:08b} {z:x} {y:+} {f:.3}")
-    print(i32(-7) / 2, i32(-7) % 2, (y + 1).abs(), x.min(10), x.max(250))
-    match x {
-        200 => print("two hundred"),
-        _ => print("other"),
+    assert "{f} {h} {Float(f)} {f32(g)} {Float(x) / 4.0}" == "0.1 0.1 0.10000000149011612 0.1 50.0"
+    assert "{x:08b} {z:x} {y:+} {f:.3}" == "11001000 ffffffffffffffff -128 0.100"
+    assert i32(-7) / 2 == -3
+    assert i32(-7) % 2 == -1
+    assert (y + 1).abs() == 127
+    assert x.min(10) == 10
+    assert x.max(250) == 250
+    let label = match x {
+        200 => "two hundred",
+        _ => "other",
     }
+    assert label == "two hundred"
 }

@@ -21,6 +21,8 @@ pub struct Loaded {
     pub ast: Ast,
     /// Errors in manifests, module names and syntax.
     pub diagnostics: Vec<Diagnostic>,
+    /// Default target backend configured in the root package's `[target] backend = "…"`.
+    pub default_backend: Option<String>,
 }
 
 /// Why nothing could be checked at all.
@@ -61,6 +63,7 @@ pub fn load_with(path: &Path, open: &HashMap<PathBuf, String>) -> Result<Loaded,
             sources: SourceMap::default(),
             ast: Ast::new(),
             diagnostics: Vec::new(),
+            default_backend: None,
         },
         packages: HashMap::new(),
         stack: Vec::new(),
@@ -74,6 +77,73 @@ pub fn load_with(path: &Path, open: &HashMap<PathBuf, String>) -> Result<Loaded,
         let root = loader.loaded.ast.package(package).root;
         loader.module(root, path, text)?;
     }
+    loader.loaded.ast.collect_root();
+    Ok(loader.loaded)
+}
+
+/// Loads a package integration test file (`<pkg_dir>/tests/<name>.nv`) as the root package,
+/// with the package at `pkg_dir` (if it is a library) available as a dependency under its name
+/// (`spec/testing.md` §2).
+pub fn load_integration_test(pkg_dir: &Path, test_file: &Path) -> Result<Loaded, LoadError> {
+    let open = HashMap::new();
+    let mut loader = Loader {
+        open: &open,
+        loaded: Loaded {
+            sources: SourceMap::default(),
+            ast: Ast::new(),
+            diagnostics: Vec::new(),
+            default_backend: None,
+        },
+        packages: HashMap::new(),
+        stack: Vec::new(),
+        manifest: 0,
+    };
+    let stem = test_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| valid_name(s))
+        .unwrap_or("integration_test");
+    let test_pkg = loader.loaded.ast.add_package(stem);
+    let root = loader.loaded.ast.package(test_pkg).root;
+    let text = loader.read(test_file)?;
+    loader.module(root, test_file, text)?;
+
+    // Read the host package's manifest to pick up `[package] name` and `[target] backend`,
+    // and wire the library package as a dependency when `src/lib.nv` exists.
+    let manifest_path = pkg_dir.join("noev.toml");
+    if manifest_path.is_file() {
+        let mtext = loader.read(&manifest_path)?;
+        if let Ok(table) = DeTable::parse(&mtext) {
+            let manifest = table.into_inner();
+            if let Some((_, target_table)) = manifest.iter().find(|(k, _)| k.get_ref() == "target")
+                && let DeValue::Table(t) = target_table.get_ref()
+                && let Some((_, backend)) = t.iter().find(|(k, _)| k.get_ref() == "backend")
+                && let DeValue::String(s) = backend.get_ref()
+                && !s.is_empty()
+            {
+                loader.loaded.default_backend = Some(s.to_string());
+            }
+            if pkg_dir.join("src/lib.nv").is_file()
+                && let Some((_, pkg_table)) =
+                    manifest.iter().find(|(k, _)| k.get_ref() == "package")
+                && let DeValue::Table(t) = pkg_table.get_ref()
+                && let Some((_, name_val)) = t.iter().find(|(k, _)| k.get_ref() == "name")
+                && let DeValue::String(pkg_name) = name_val.get_ref()
+            {
+                let requested = Requested {
+                    name: pkg_name.to_string(),
+                    span: Span::default(),
+                };
+                if let Some(dep) = loader.package(pkg_dir, Some(&requested))? {
+                    loader
+                        .loaded
+                        .ast
+                        .add_dependency(test_pkg, &requested.name, dep);
+                }
+            }
+        }
+    }
+
     loader.loaded.ast.collect_root();
     Ok(loader.loaded)
 }
@@ -161,6 +231,7 @@ impl Loader<'_> {
             sources,
             ast,
             diagnostics,
+            ..
         } = &mut self.loaded;
         let file = sources.file(id);
         diagnostics.extend(noev_syntax::parse_module(
@@ -300,6 +371,29 @@ impl Loader<'_> {
         self.module(root, &root_file, text)?;
         self.manifest = base;
         self.modules(&src, root, true)?;
+
+        // `[target] backend = "…"` (only on the root package).
+        if requested.is_none()
+            && let Some((_, target_table)) = manifest.iter().find(|(k, _)| k.get_ref() == "target")
+        {
+            match target_table.get_ref() {
+                DeValue::Table(table) => {
+                    if let Some((_, backend)) = table.iter().find(|(k, _)| k.get_ref() == "backend")
+                    {
+                        match backend.get_ref() {
+                            DeValue::String(s) if !s.is_empty() => {
+                                self.loaded.default_backend = Some(s.to_string());
+                            }
+                            _ => self.error(
+                                at(backend.span()),
+                                "`[target] backend` must be a non-empty string",
+                            ),
+                        }
+                    }
+                }
+                _ => self.error(at(target_table.span()), "`target` is a table: `[target]`"),
+            }
+        }
 
         // `[dependencies] name = { path = "…" }`.
         if let Some((_, deps)) = manifest.iter().find(|(k, _)| k.get_ref() == "dependencies") {

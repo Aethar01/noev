@@ -60,7 +60,7 @@ fn make_cccx() -> [[Complex; 16]; 16] {
     m
 }
 
-fn main() {
+test fn three_and_four_qubit_unitaries() {
     let ccx = make_ccx()
     let cswap = make_cswap()
     let qft3 = make_qft3()
@@ -70,37 +70,37 @@ fn main() {
     // 1. 3-qubit Toffoli: |110> -> |111>, |100> -> |100>.
     let a = |110>
     a.unitary(ccx)
-    print(mv a.measure())
+    assert mv a.measure() == [1, 1, 1]
     let b = |100>
     b.unitary(ccx)
-    print(mv b.measure())
+    assert mv b.measure() == [1, 0, 0]
 
     // 2. 3-qubit Fredkin (CSWAP): |101> -> |110>.
     let c = |101>
     c.unitary(cswap)
-    print(mv c.measure())
+    assert mv c.measure() == [1, 1, 0]
 
     // 3. 3-qubit QFT followed by its adjoint restores |101>.
     let d = |101>
     d.unitary(qft3)
     adj d.unitary(qft3)
-    print(mv d.measure())
+    assert mv d.measure() == [1, 0, 1]
 
     // 4. Controlled 3-qubit matrix with global phase i inside `sample`:
-    //    control |+> picks up relative phase i -> |+i>, while |110> -> |111> on the |1> branch.
-    print(sample 50 {
+    let dist = sample 50 {
         let ctrl_q = |+>
         let reg = |110>
         ctrl ctrl_q { reg.unitary(i_ccx) }
         ctrl ctrl_q { reg.unitary(ccx) }
         (<(+i)| mv ctrl_q, mv reg.measure())
-    })
+    }
+    assert dist.count((true, [1, 1, 0])) == 50
 
     // 5. 4-qubit CCCX: |1110> -> |1111>, |1100> -> |1100>.
     let e = |1110>
     e.unitary(cccx)
-    print(mv e.measure())
+    assert mv e.measure() == [1, 1, 1, 1]
     let f = |1100>
     f.unitary(cccx)
-    print(mv f.measure())
+    assert mv f.measure() == [1, 1, 0, 0]
 }

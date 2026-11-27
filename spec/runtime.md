@@ -5,11 +5,13 @@ program is native code linked to the **Noev runtime**. The runtime sends quantum
 to a **quantum backend**: a simulator such as ketrs, or a quantum computer's control stack.
 The program does not depend on which backend it runs on.
 
-Status: the backend interface (§3), the runtime C ABI (§4), the interpreter (`noev run`, §6),
-the Cranelift and LLVM code generators (`noev build --codegen=cranelift|llvm`, §2, §7, behind
-optional `cranelift` and `llvm` features, with `--qir-runtime` for linking to QIR runtimes),
-and QIR 1.0 export (`noev build --emit=qir` and `noev export --format=qir`, §4, §7) are
-implemented, with ketrs and export as backends. Target descriptions (§5) are still design.
+Status: **Implemented** — the backend interface (`std::backend` and `noev-runtime::backend`, §3),
+the runtime C ABI and plug-in backend C ABI (`include/noev_backend.h`, §4), target descriptions,
+compile-time capability checks, `[target]` in `noev.toml`, `--backend=NAME[:DEVICE]`, and
+`noev target fetch|list|show` (§5), the interpreter (`noev run`, §6), the Cranelift and LLVM
+code generators (`noev build --codegen=cranelift|llvm`, §2, §7, behind optional `cranelift` and
+`llvm` features, with `--qir-runtime` for linking to QIR runtimes), and QIR 1.0 export
+(`noev build --emit=qir` and `noev export --format=qir`, §4, §7).
 
 ```
 program.nv ─▶ front end ─▶ Noev IR ─┬─▶ code generator ─▶ native object ─┐

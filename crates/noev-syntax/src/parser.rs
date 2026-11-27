@@ -274,7 +274,7 @@ impl Parser<'_> {
             match self.kind() {
                 Eof => return,
                 Fn | Struct | Trait | Impl | Unsafe | Extern | Pub | Use if depth == 0 => return,
-                Ident if depth == 0 && self.at_fn_start() => return,
+                Ident if depth == 0 && (self.at_fn_start() || self.at_test_fn_start()) => return,
                 LParen | LBracket | LBrace => depth += 1,
                 RParen | RBracket | RBrace => depth = depth.saturating_sub(1),
                 _ => {}
@@ -312,17 +312,94 @@ impl Parser<'_> {
     }
 
     fn at_fn_start(&self) -> bool {
+        self.at_fn_start_at(0)
+    }
+
+    fn at_fn_start_at(&self, offset: usize) -> bool {
         use TokenKind::*;
-        match self.kind() {
+        match self.nth(offset).kind {
             Fn | Unsafe => true,
             Ident => {
-                (self.nth_is_word(0, "rev")
-                    && (self.nth(1).kind == Fn
-                        || (self.nth_is_word(1, "circuit") && self.nth(2).kind == Fn)))
-                    || (self.nth_is_word(0, "circuit") && self.nth(1).kind == Fn)
+                (self.nth_is_word(offset, "rev")
+                    && (self.nth(offset + 1).kind == Fn
+                        || (self.nth_is_word(offset + 1, "circuit")
+                            && self.nth(offset + 2).kind == Fn)))
+                    || (self.nth_is_word(offset, "circuit") && self.nth(offset + 1).kind == Fn)
             }
             _ => false,
         }
+    }
+
+    /// Whether the current position starts a `test [ (fail [= "..."]) ] fn …` item
+    /// (`spec/testing.md`).
+    fn at_test_fn_start(&self) -> bool {
+        if !self.nth_is_word(0, "test") {
+            return false;
+        }
+        if self.at_fn_start_at(1) {
+            return true;
+        }
+        if self.nth(1).kind != TokenKind::LParen {
+            return false;
+        }
+        // Scan past `(…)` to see if a function signature follows.
+        let mut i = 2;
+        loop {
+            match self.nth(i).kind {
+                TokenKind::RParen => return self.at_fn_start_at(i + 1),
+                TokenKind::Eof | TokenKind::LBrace | TokenKind::Newline => return false,
+                _ => i += 1,
+            }
+        }
+    }
+
+    /// Parses `test` or `test(fail)` or `test(fail = "…")` before a function declaration.
+    fn parse_test_prefix(&mut self) -> TestKind {
+        self.bump(); // `test`
+        if !self.eat(TokenKind::LParen) {
+            return TestKind::Pass;
+        }
+        if !self.nth_is_word(0, "fail") {
+            self.expected("`fail`");
+            while !matches!(self.kind(), TokenKind::RParen | TokenKind::Eof) {
+                self.bump();
+            }
+            self.eat(TokenKind::RParen);
+            return TestKind::Pass;
+        }
+        self.bump(); // `fail`
+        let expected = if self.eat(TokenKind::Eq) {
+            if self.at(TokenKind::Str) {
+                let start = self.span();
+                self.bump();
+                let parts = self.string_parts(start);
+                let text: String = self
+                    .ast
+                    .list(parts)
+                    .iter()
+                    .map(|part| match part {
+                        StrPart::Text(t) => self.ast.name(*t).to_string(),
+                        StrPart::Value { .. } => String::new(),
+                    })
+                    .collect();
+                if self
+                    .ast
+                    .list(parts)
+                    .iter()
+                    .any(|p| matches!(p, StrPart::Value { .. }))
+                {
+                    self.error(start, "expected failure message cannot interpolate values");
+                }
+                Some(self.ast.symbols.intern(&text))
+            } else {
+                self.expected("a string literal");
+                None
+            }
+        } else {
+            None
+        };
+        self.expect(TokenKind::RParen, "`)`");
+        TestKind::Fail(expected)
     }
 
     /// `pub`, `pub(pkg)`, `pub(super)`, `pub(self)` or `pub(in path)`, if there is one
@@ -388,6 +465,12 @@ impl Parser<'_> {
             }));
         }
         let kind = match self.kind() {
+            _ if self.at_test_fn_start() => {
+                let test = self.parse_test_prefix();
+                let f = self.fn_decl(true, vis);
+                self.ast.function_mut(f).test = test;
+                ItemKind::Fn(f)
+            }
             _ if self.at_fn_start() => ItemKind::Fn(self.fn_decl(true, vis)),
             TokenKind::Struct => self.struct_def(false),
             TokenKind::Enum => self.enum_def(),
@@ -649,6 +732,7 @@ impl Parser<'_> {
             is_unsafe,
             is_rev,
             is_circuit,
+            test: TestKind::None,
             extern_kind: ExternKind::None,
             receiver,
             params,
@@ -1580,7 +1664,9 @@ impl Parser<'_> {
             }
             Assert => {
                 self.bump();
-                StmtKind::Assert(self.expr())
+                let cond = self.expr();
+                let msg = self.eat(Comma).then(|| self.expr());
+                StmtKind::Assert { cond, msg }
             }
             _ => {
                 let expr = self.expr();

@@ -326,10 +326,24 @@ impl<'p> Machine<'p> {
                     self.undo(*func, args, target)?;
                     next.index()
                 }
-                Terminator::Assert { cond, next, span } => {
+                Terminator::Assert {
+                    cond,
+                    msg,
+                    next,
+                    span,
+                } => {
                     let ok = self.truth(cond)?;
-                    let msg = b"assertion failed";
-                    if !unsafe { cabi::noev_rt_assert(&mut self.rt, ok, msg.as_ptr(), msg.len()) } {
+                    if !ok {
+                        let text = match msg {
+                            Some(op) => match self.operand(op)? {
+                                Value::Str(s) => s.to_string(),
+                                _ => "assertion failed".to_string(),
+                            },
+                            None => "assertion failed".to_string(),
+                        };
+                        let _ = unsafe {
+                            cabi::noev_rt_assert(&mut self.rt, false, text.as_ptr(), text.len())
+                        };
                         return Err(self.rt.take_error().at(*span));
                     }
                     next.index()

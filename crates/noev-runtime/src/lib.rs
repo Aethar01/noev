@@ -9,6 +9,7 @@ pub mod host;
 pub mod int;
 pub mod kak;
 pub mod machine;
+pub mod plugin;
 pub mod qasm;
 pub mod qir;
 pub mod sampling;
@@ -39,14 +40,26 @@ pub fn run_main(
     let main = program
         .main
         .ok_or_else(|| RuntimeError::new("the program has no `fn main()`"))?;
+    run_func(program, main, backend, seed, output)
+}
+
+/// Runs a zero-argument entry function (such as `main` or a `test fn`) once on `backend`,
+/// writing its output to `output`. The same `seed` gives the same run.
+pub fn run_func(
+    program: &Program,
+    entry: FuncId,
+    backend: &dyn Backend,
+    seed: u64,
+    output: Output,
+) -> Result<(), RuntimeError> {
     let output = Rc::new(RefCell::new(output));
-    // `main` is a run with one shot like any other: on a backend that only takes circuits, it
-    // goes as a circuit when it is one (spec/runtime.md §3).
-    let result = if backend.session(seed).is_none() && program.functions[main.index()].sampled {
-        main_as_circuit(program, backend, main, seed, output.clone())
+    // A zero-arg entry is a run with one shot like any other: on a backend that only takes
+    // circuits, it goes as a circuit when it is one (spec/runtime.md §3).
+    let result = if backend.session(seed).is_none() && program.functions[entry.index()].sampled {
+        main_as_circuit(program, backend, entry, seed, output.clone())
     } else {
         let mut machine = Machine::new(program, backend, seed).with_output(output.clone());
-        machine.call(main, Vec::new()).map(|_| ())
+        machine.call(entry, Vec::new()).map(|_| ())
     };
     let mut output = output.borrow_mut();
     let flushed = output.stdout.flush().and_then(|()| output.stderr.flush());

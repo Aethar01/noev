@@ -20,19 +20,20 @@ impl<const N: Int> Measure for Reg<N> {
     fn measure(mv self) -> [Bit; N] { mv self.qs.measure() }
 }
 
-fn main() {
+test fn const_size_parameters() {
     let a = [1, 2, 3]
-    print(count(ref a))
+    assert count(ref a) == 3
     let s: [Qubit; 2] = fresh()
-    print(mv s.measure())
+    assert mv s.measure() == [0, 0]
     let r = fresh::<4>()
     r[0].x()
     ladder(mut r)
-    print("{r.width()} {mv r.measure()}")
+    assert r.width() == 4
+    assert mv r.measure() == [1, 1, 1, 1]
     let t = |100>
     ladder(mut t)
     adj ladder(mut t)
-    print(mv t.measure())
+    assert mv t.measure() == [1, 0, 0]
     let g = Reg { qs: |0110> }
-    print(measure(mv g))
+    assert measure(mv g) == [0, 1, 1, 0]
 }

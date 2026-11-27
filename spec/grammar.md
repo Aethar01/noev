@@ -48,6 +48,7 @@ ordinary identifiers, so `let adj = build_graph(edges)` is valid.
 | `mv`    | it is followed by a place expression (`mv q`, `mv e.state`) or by `self` in a parameter list |
 | `rev`   | it is directly followed by `fn` or `circuit`                |
 | `circuit` | it is directly followed by `fn` (see [execution.md](execution.md) §4) |
+| `test`  | it starts an item and is directly followed by `fn` or `(fail…)` before `fn` ([testing.md](testing.md)) |
 | `adj`   | it is followed by a call (`adj s(q)`, `adj q.s()`)          |
 | `ctrl`  | it starts a statement and is followed by a place and, eventually, `{` |
 | `with`  | it starts a statement and is directly followed by `{`       |
@@ -207,7 +208,8 @@ param       = IDENT ":" type ;
 
 trait_def   = "trait" IDENT [ generics ] "{" { trait_item sep } "}" ;
 trait_item  = fn_sig | fn_def | "type" IDENT [ ":" bounds ] ;
-fn_sig      = [ "unsafe" ] [ "rev" ] [ "circuit" ] "fn" IDENT [ generics ]
+fn_sig      = [ "test" [ "(" "fail" [ "=" STRING ] ")" ] ]
+              [ "unsafe" ] [ "rev" ] [ "circuit" ] "fn" IDENT [ generics ]
               "(" [ params ] ")" [ "->" type ] [ where_clause ] ;
 impl_def    = "impl" [ generics ] bound "for" type [ where_clause ] "{" { impl_item sep } "}" ;
 impl_item   = fn_def | "type" IDENT "=" type ;
@@ -261,7 +263,7 @@ stmt        = "let" [ "mut" ] pattern [ ":" type ] "=" expr
             | place assign_op expr
             | "return" [ expr ]
             | "break" | "continue"
-            | "assert" expr
+            | "assert" expr [ "," expr ]
             | expr ;
 
 pattern     = IDENT | "_"

@@ -795,8 +795,8 @@ fn format_desc(val: &Value, desc: &NoevTypeDesc, spec: Option<&FormatSpec>) -> S
 // Standalone binary `main` entry/exit
 // ---------------------------------------------------------------------------------------
 
-/// Parses `--seed N` from `argv` and initializes a [`NoevRuntime`] with stdout/stderr for a
-/// compiled standalone binary.
+/// Parses `--seed N` and `--backend SPEC` (or `NOEV_BACKEND`) from `argv` and initializes a
+/// [`NoevRuntime`] with stdout/stderr for a compiled standalone binary.
 ///
 /// # Safety
 /// `argv` must be null or point to `argc` C strings.
@@ -806,6 +806,7 @@ pub unsafe extern "C" fn noev_rt_main_enter(
     argv: *const *const c_char,
 ) -> *mut NoevRuntime {
     let mut seed = 0u64;
+    let mut backend_spec: Option<String> = None;
     if !argv.is_null() && argc > 1 {
         let args = unsafe { std::slice::from_raw_parts(argv, argc as usize) };
         let mut i = 1;
@@ -822,9 +823,51 @@ pub unsafe extern "C" fn noev_rt_main_enter(
                 {
                     seed = n;
                     i += 1;
+                } else if let Some(rest) = s.strip_prefix("--backend=") {
+                    backend_spec = Some(rest.to_string());
+                } else if s == "--backend"
+                    && i + 1 < args.len()
+                    && let Ok(next) = unsafe { CStr::from_ptr(args[i + 1]) }.to_str()
+                {
+                    backend_spec = Some(next.to_string());
+                    i += 1;
                 }
             }
             i += 1;
+        }
+    }
+    if backend_spec.is_none()
+        && let Ok(env_spec) = std::env::var("NOEV_BACKEND")
+        && !env_spec.is_empty()
+    {
+        backend_spec = Some(env_spec);
+    }
+    if let Some(spec) = backend_spec.as_deref() {
+        if spec == "export" {
+            let rt = cabi::noev_rt_new_export(seed);
+            if !rt.is_null() {
+                unsafe { &mut *rt }.set_output(Rc::new(std::cell::RefCell::new(crate::Output {
+                    stdout: Box::new(std::io::stdout()),
+                    stderr: Box::new(std::io::stderr()),
+                })));
+            }
+            return rt;
+        }
+        if spec != "ketrs" {
+            match crate::plugin::load_plugin_spec(spec) {
+                Ok(plugin) => {
+                    let mut rt = NoevRuntime::new_owned(Box::new(plugin), seed);
+                    rt.set_output(Rc::new(std::cell::RefCell::new(crate::Output {
+                        stdout: Box::new(std::io::stdout()),
+                        stderr: Box::new(std::io::stderr()),
+                    })));
+                    return Box::into_raw(Box::new(rt));
+                }
+                Err(err) => {
+                    eprintln!("error: {}", err.0);
+                    std::process::exit(1);
+                }
+            }
         }
     }
     #[cfg(feature = "ketrs")]
@@ -2517,4 +2560,343 @@ pub unsafe extern "C" fn noev_rt_callback_exit(rt: *mut NoevRuntime, ok: bool) {
         std::process::exit(1);
     }
     unsafe { cabi::noev_rt_free(rt) };
+}
+
+/// Checks an assertion whose custom failure message is a compiled Noev `String` handle.
+///
+/// # Safety
+/// `rt` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noev_rt_assert_str(
+    rt: *mut NoevRuntime,
+    cond: bool,
+    msg_handle: i64,
+) -> bool {
+    if cond {
+        return true;
+    }
+    let rt_ref = unsafe { &mut *rt };
+    let msg = read_str(rt_ref, msg_handle as u64).to_string();
+    rt_ref.fail_err(RuntimeError::new(msg))
+}
+
+// ---------------------------------------------------------------------------------------
+// Native test runner harness (`noev test --compile` / `--codegen`, `spec/testing.md`)
+// ---------------------------------------------------------------------------------------
+
+/// Shared growable byte buffer used to capture stdout/stderr for a single test run.
+struct CaptureWriter(Rc<std::cell::RefCell<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// One registered test inside a compiled native test runner binary.
+struct RegisteredTest {
+    name: String,
+    expect_fail: Option<Option<String>>,
+    func: extern "C" fn(*mut NoevRuntime) -> bool,
+}
+
+/// Opaque native test runner harness created by a compiled test binary's `main`.
+pub struct NoevTestHarness {
+    seed: u64,
+    backend_spec: Option<String>,
+    filter: Option<String>,
+    prefix: Option<String>,
+    list: bool,
+    nocapture: bool,
+    quiet_summary: bool,
+    tests: Vec<RegisteredTest>,
+}
+
+/// Parses test runner CLI flags and initializes a [`NoevTestHarness`].
+///
+/// # Safety
+/// `argv` must be null or point to `argc` valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noev_rt_test_harness_new(
+    argc: i32,
+    argv: *const *const c_char,
+) -> *mut NoevTestHarness {
+    let mut seed: Option<u64> = None;
+    let mut backend_spec: Option<String> = None;
+    let mut filter: Option<String> = None;
+    let mut prefix: Option<String> = None;
+    let mut list = false;
+    let mut nocapture = false;
+    let mut quiet_summary = false;
+
+    if !argv.is_null() && argc > 1 {
+        let args = unsafe { std::slice::from_raw_parts(argv, argc as usize) };
+        let mut i = 1;
+        while i < args.len() {
+            if let Ok(s) = unsafe { CStr::from_ptr(args[i]) }.to_str() {
+                if let Some(rest) = s.strip_prefix("--seed=") {
+                    if let Ok(n) = rest.parse() {
+                        seed = Some(n);
+                    }
+                } else if s == "--seed"
+                    && i + 1 < args.len()
+                    && let Ok(next) = unsafe { CStr::from_ptr(args[i + 1]) }.to_str()
+                    && let Ok(n) = next.parse()
+                {
+                    seed = Some(n);
+                    i += 1;
+                } else if let Some(rest) = s.strip_prefix("--backend=") {
+                    backend_spec = Some(rest.to_string());
+                } else if s == "--backend"
+                    && i + 1 < args.len()
+                    && let Ok(next) = unsafe { CStr::from_ptr(args[i + 1]) }.to_str()
+                {
+                    backend_spec = Some(next.to_string());
+                    i += 1;
+                } else if let Some(rest) = s.strip_prefix("--filter=") {
+                    filter = Some(rest.to_string());
+                } else if s == "--filter"
+                    && i + 1 < args.len()
+                    && let Ok(next) = unsafe { CStr::from_ptr(args[i + 1]) }.to_str()
+                {
+                    filter = Some(next.to_string());
+                    i += 1;
+                } else if let Some(rest) = s.strip_prefix("--prefix=") {
+                    prefix = Some(rest.to_string());
+                } else if s == "--prefix"
+                    && i + 1 < args.len()
+                    && let Ok(next) = unsafe { CStr::from_ptr(args[i + 1]) }.to_str()
+                {
+                    prefix = Some(next.to_string());
+                    i += 1;
+                } else if s == "--list" {
+                    list = true;
+                } else if s == "--nocapture" {
+                    nocapture = true;
+                } else if s == "--quiet-summary" {
+                    quiet_summary = true;
+                } else if !s.starts_with('-') && filter.is_none() {
+                    filter = Some(s.to_string());
+                }
+            }
+            i += 1;
+        }
+    }
+    if backend_spec.is_none()
+        && let Ok(env_spec) = std::env::var("NOEV_BACKEND")
+        && !env_spec.is_empty()
+    {
+        backend_spec = Some(env_spec);
+    }
+    let seed = seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64)
+    });
+
+    Box::into_raw(Box::new(NoevTestHarness {
+        seed,
+        backend_spec,
+        filter,
+        prefix,
+        list,
+        nocapture,
+        quiet_summary,
+        tests: Vec::new(),
+    }))
+}
+
+/// Registers one compiled `test fn` with `harness`.
+///
+/// `fail_mode`: `0` = must pass, `1` = `test(fail)`, `2` = `test(fail = "…")`.
+///
+/// # Safety
+/// `harness`, `name_ptr` (`name_len` bytes), and when `fail_mode == 2`, `fail_ptr` (`fail_len`
+/// bytes) must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noev_rt_test_register(
+    harness: *mut NoevTestHarness,
+    name_ptr: *const u8,
+    name_len: usize,
+    fail_mode: u8,
+    fail_ptr: *const u8,
+    fail_len: usize,
+    func: extern "C" fn(*mut NoevRuntime) -> bool,
+) {
+    let h = unsafe { &mut *harness };
+    let name = if name_ptr.is_null() || name_len == 0 {
+        String::new()
+    } else {
+        String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(name_ptr, name_len) })
+            .into_owned()
+    };
+    let expect_fail = match fail_mode {
+        0 => None,
+        1 => Some(None),
+        _ => {
+            let sub = if fail_ptr.is_null() || fail_len == 0 {
+                String::new()
+            } else {
+                String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(fail_ptr, fail_len) })
+                    .into_owned()
+            };
+            Some(Some(sub))
+        }
+    };
+    h.tests.push(RegisteredTest {
+        name,
+        expect_fail,
+        func,
+    });
+}
+
+/// Runs all matching registered tests, frees `harness`, and returns exit code `0` or `1`.
+///
+/// # Safety
+/// `harness` must have been returned by [`noev_rt_test_harness_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noev_rt_test_run_all(harness: *mut NoevTestHarness) -> i32 {
+    let h = unsafe { Box::from_raw(harness) };
+    let display_name = |name: &str| match &h.prefix {
+        Some(p) if !p.is_empty() => format!("{p}::{name}"),
+        _ => name.to_string(),
+    };
+    let matching: Vec<(usize, &RegisteredTest, String)> = h
+        .tests
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| {
+            let full = display_name(&t.name);
+            if h.filter.as_deref().is_none_or(|f| full.contains(f)) {
+                Some((i, t, full))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if h.list {
+        for (_, _, full) in &matching {
+            println!("{full}");
+        }
+        return 0;
+    }
+
+    // Resolve the backend once for the entire test binary.
+    let spec = h.backend_spec.as_deref().unwrap_or("ketrs");
+    let backend: Box<dyn crate::Backend> = if spec == "export" {
+        Box::new(crate::backend::Exporter::default())
+    } else if spec == "ketrs" {
+        #[cfg(feature = "ketrs")]
+        {
+            Box::new(crate::backend::ketrs::Ketrs)
+        }
+        #[cfg(not(feature = "ketrs"))]
+        {
+            eprintln!("error: runtime built without `ketrs` simulator");
+            return 2;
+        }
+    } else {
+        match crate::plugin::load_plugin_spec(spec) {
+            Ok(p) => Box::new(p),
+            Err(err) => {
+                eprintln!("error: {}", err.0);
+                return 2;
+            }
+        }
+    };
+
+    let start = std::time::Instant::now();
+    if !h.quiet_summary {
+        println!(
+            "running {} {}",
+            matching.len(),
+            if matching.len() == 1 { "test" } else { "tests" }
+        );
+    }
+
+    let mut passed = 0usize;
+    let mut failures: Vec<(String, u64, String, String)> = Vec::new();
+    for (idx, test, full) in &matching {
+        let test_seed = h.seed.wrapping_add(*idx as u64);
+        let captured = Rc::new(std::cell::RefCell::new(Vec::<u8>::new()));
+        let mut rt = unsafe { NoevRuntime::new_borrowed(backend.as_ref(), test_seed) };
+        if h.nocapture {
+            rt.set_output(Rc::new(std::cell::RefCell::new(crate::Output {
+                stdout: Box::new(std::io::stdout()),
+                stderr: Box::new(std::io::stderr()),
+            })));
+        } else {
+            rt.set_output(Rc::new(std::cell::RefCell::new(crate::Output {
+                stdout: Box::new(CaptureWriter(captured.clone())),
+                stderr: Box::new(CaptureWriter(captured.clone())),
+            })));
+        }
+        let ok = (test.func)(&mut rt);
+        let err_msg = if ok {
+            None
+        } else {
+            Some(rt.take_error().message)
+        };
+        drop(rt);
+
+        let failure_reason: Option<String> = match (&test.expect_fail, err_msg) {
+            (None, None) => None,
+            (None, Some(msg)) => Some(msg),
+            (Some(None), Some(_)) => None,
+            (Some(None), None) => Some("test was expected to fail, but passed".into()),
+            (Some(Some(expected)), Some(actual)) => {
+                if actual.contains(expected.as_str()) {
+                    None
+                } else {
+                    Some(format!(
+                        "expected failure containing `{expected}`, but got `{actual}`"
+                    ))
+                }
+            }
+            (Some(Some(expected)), None) => Some(format!(
+                "test was expected to fail with `{expected}`, but passed"
+            )),
+        };
+
+        if let Some(reason) = failure_reason {
+            println!("test {full} ... FAILED");
+            let out_str = String::from_utf8_lossy(&captured.borrow()).into_owned();
+            failures.push((full.clone(), test_seed, reason, out_str));
+        } else {
+            println!("test {full} ... ok");
+            passed += 1;
+        }
+    }
+
+    if !failures.is_empty() {
+        println!("\nfailures:");
+        for (name, test_seed, reason, out) in &failures {
+            println!("\n---- {name} ----");
+            if !out.is_empty() {
+                print!("{out}");
+                if !out.ends_with('\n') {
+                    println!();
+                }
+            }
+            println!("error: {reason}");
+            println!("note: reproduce with --seed {test_seed}");
+        }
+    }
+
+    if !h.quiet_summary {
+        let elapsed = start.elapsed().as_secs_f64();
+        let status = if failures.is_empty() { "ok" } else { "FAILED" };
+        println!(
+            "\ntest result: {status}. {passed} passed; {} failed; finished in {elapsed:.2}s",
+            failures.len()
+        );
+    }
+
+    i32::from(!failures.is_empty())
 }

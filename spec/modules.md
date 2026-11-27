@@ -2,7 +2,7 @@
 
 Status: **Implemented**, except where a section says otherwise: naming the prelude itself
 as `std::prelude` (§6).
-`noev check`, `build`, `run` and `export` take a `.nv` file or a package directory.
+`noev check`, `build`, `run`, `test` and `export` take a `.nv` file or a package directory.
 
 ## 1. Files are modules
 
@@ -163,6 +163,7 @@ The other standard-library items live in modules of their own:
 | `var`, `args`, `current_dir` | `std::env` |
 | `read_to_string`, `read`, `write`, `write_bytes`, `exists`, `create_dir_all`, `remove_file` | `std::fs` |
 | `TcpStream`, `TcpListener` | `std::net` |
+| `Backend`, `Target`, `Level`, `Capabilities`, `Circuit`, `Instruction`, `Op`, `GateKind`, `Shots`, `ShotCount`, `BackendError` | `std::backend` |
 | `Add`, `Sub`, `Mul`, `Div`, `Rem`, `BitAnd`, `BitOr`, `BitXor`, `Shl`, `Shr`, `Neg`, `BitNot`, and the `…Assign` traits | `std::ops` |
 | `Eq`, `Ord`           | `std::cmp`          |
 

@@ -5,9 +5,9 @@ fn ones() -> [Qubit; 2] {
     mv r
 }
 
-fn main() {
-    print("{<0| Z(0) |0>:.6}")
-    print("{<1| Z(0) |1>:.6}")
-    print("{<+| X(0) |+>:.6}")
-    print("{<ones()| 0.5 * Z(0) * Z(1) - 2.0 * Z(1) + 0.25 * I() |ones()> within 0.1:.6}")
+test fn expectation_values() {
+    assert "{<0| Z(0) |0>:.6}" == "1.000000"
+    assert "{<1| Z(0) |1>:.6}" == "-1.000000"
+    assert "{<+| X(0) |+>:.6}" == "1.000000"
+    assert "{<ones()| 0.5 * Z(0) * Z(1) - 2.0 * Z(1) + 0.25 * I() |ones()> within 0.1:.6}" == "2.750000"
 }

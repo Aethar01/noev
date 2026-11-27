@@ -72,6 +72,24 @@ before 1.0.
   calls for linking against external QIR runtimes), verified all 39 `tests/run/*.nv` programs
   compiled with LLVM `-O2` against the interpreter plus end-to-end C QIR shim linking, and
   added LLVM IR and `-O2` object benchmarks alongside Cranelift.
+- Built-in test system (`spec/testing.md`, `spec/grammar.md`): added contextual
+  `test fn name()`, `test(fail) fn name()`, and `test(fail = "…") fn name()` syntax;
+  added lazy optional failure messages on `assert cond, "message"`; added `noev test`
+  with single-file, package (`src/` unit tests + `tests/*.nv` integration tests), and
+  directory discovery, `--list`, positional `FILTER`, `--seed`, `--backend`, `--nocapture`,
+  and native `--compile` / `--codegen=cranelift|llvm` test runner binaries; migrated the
+  `tests/run/` conformance suite to `test fn` suites.
+- Targets and backends (`spec/runtime.md` §3–§5, `spec/modules.md` §6): added the
+  `std::backend` module (`Backend` trait, `Target`, `Level`, `Capabilities`, `Circuit`,
+  `Instruction`, `Op`, `GateKind`, `Shots`, `ShotCount`, `BackendError`) and enforced that
+  `impl Backend` types and methods cannot hold or act on qubits; added `TargetSpec`
+  descriptions for `ketrs`, `export`, `.toml` files, and plug-ins with compile-time
+  capability checking (`read_state`, circuit-only level, qubit limit, non-universal gate
+  sets, and `foreign_while_live`); added `--backend` on `check`, `build`, and `run`,
+  `[target] backend` in `noev.toml`, and `noev target fetch | list | show` with local TOML
+  caching; added the backend plug-in C ABI (`include/noev_backend.h` and dynamic loading
+  in both `noev run` and compiled standalone binaries via `--backend` / `NOEV_BACKEND`),
+  plus end-to-end C plug-in tests and a target benchmark.
 - Standard library for backends (`spec/std.md` §5–§6, `spec/modules.md` §6): added
   affine `Vec<T>` in the prelude (`new`, `with_capacity`, `len`, `is_empty`, `push`, `pop`,
   `get`, `set`, `v[i]`/`v[i] = x`, `clear`, `extend`, `clone`, `==`, formatting, and

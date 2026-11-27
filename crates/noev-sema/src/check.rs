@@ -1962,6 +1962,20 @@ impl<'a> Checker<'a> {
         for index in 0..count {
             let f = FnId::from_index(index);
             let decl = *self.ast.function(f);
+            if decl.test != noev_syntax::ast::TestKind::None {
+                if decl.is_rev {
+                    self.error(decl.name_span, "a `test fn` cannot be `rev`");
+                }
+                if !self.t.fns[index].generics.is_empty() {
+                    self.error(decl.name_span, "a `test fn` cannot have generic parameters");
+                }
+                if !self.t.fns[index].sig.params.is_empty() {
+                    self.error(decl.name_span, "a `test fn` cannot take parameters");
+                }
+                if self.t.fns[index].sig.ret != Ty::UNIT && self.t.fns[index].sig.ret != Ty::ERROR {
+                    self.error(decl.name_span, "a `test fn` must return `()`");
+                }
+            }
             match decl.extern_kind {
                 ExternKind::None => continue,
                 ExternKind::Host => {
@@ -2935,8 +2949,11 @@ impl<'a> Checker<'a> {
                 }
                 true
             }
-            StmtKind::Assert(cond) => {
+            StmtKind::Assert { cond, msg } => {
                 self.expr(cond, Expect::Ty(Ty::BOOL));
+                if let Some(m) = msg {
+                    self.expr(m, Expect::Ty(Ty::STRING));
+                }
                 false
             }
             StmtKind::Expr { expr, .. } => self.expr(expr, Expect::Discard) == Ty::NEVER,
@@ -4525,9 +4542,14 @@ impl<'a> Checker<'a> {
     fn method_visible(&mut self, f: FnId, span: Span) {
         let decl = self.ast.function(f);
         let module = self.t.fn_modules[f.index()];
+        // Trait methods inherit the visibility of their trait (`spec/modules.md`).
+        let vis = match self.t.fn_traits.get(&f) {
+            Some(&trait_id) => self.ast.item(self.t.traits[trait_id.index()].item).vis,
+            None => decl.vis,
+        };
         let visible = self
             .scopes
-            .visibility(self.words, module, decl.vis)
+            .visibility(self.words, module, vis)
             .unwrap_or(Visible::Within(module));
         if !self.scopes.can_see(self.module, visible) {
             let message = format!("`{}` is private", self.name(decl.name));

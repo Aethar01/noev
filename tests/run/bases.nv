@@ -18,10 +18,13 @@ fn eigenstates(basis: Basis) -> (Bit, Bit) {
     (mv plus.measure_in(basis), mv minus.measure_in(basis))
 }
 
-fn main() {
-    print(eigenstates(Basis::X), eigenstates(Basis::Y), eigenstates(Basis::Z))
+test fn measure_in_bases() {
+    assert eigenstates(Basis::X) == (0, 1)
+    assert eigenstates(Basis::Y) == (0, 1)
+    assert eigenstates(Basis::Z) == (0, 1)
     let r = |+->
-    let bits = mv r.measure_in(Basis::X)
-    print(bits)
-    print(sample 200 { let q = |->; mv q.measure_in(Basis::X) })
+    assert mv r.measure_in(Basis::X) == [0, 1]
+    let d = sample 200 { let q = |->; mv q.measure_in(Basis::X) }
+    assert d.shots() == 200
+    assert d.count(1) == 200
 }

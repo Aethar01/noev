@@ -18,8 +18,8 @@ struct Experiment {
     }
 }
 
-fn main() {
+test fn hybrid_struct_chaining() {
     let mut e = Experiment::new(Float::PI / 2.0)
     e.rotate().rotate()
-    print(mv e.finish())
+    assert mv e.finish() == 1
 }

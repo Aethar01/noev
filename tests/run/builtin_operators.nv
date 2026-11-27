@@ -17,17 +17,20 @@ fn ordered<T: Ord>(a: ref T, b: ref T) -> (Bool, Bool, Bool, Bool) {
     (a < b, a <= b, a > b, a >= b)
 }
 
-fn main() {
-    print(sum3(1, 2, 3))
-    print(sum3(1.5, 2.0, 0.25))
-    print(scale(2.0, 1.5))
-    print(negate(5))
+test fn builtin_operator_traits() {
+    assert sum3(1, 2, 3) == 6
+    assert sum3(1.5, 2.0, 0.25) == 3.75
+    assert scale(2.0, 1.5) == 3.0
+    assert negate(5) == -5
     let mut n = 40
     bump(mut n, 2)
-    print(n)
-    print(Add::add(1, 2) * Mul::mul(2, 3))
-    print("{mask(5, 3)} {shift(3, 4)}")
-    print("{same(7, 7)} {same("ok", "ok")} {same([0, 1], [0, 1])}")
-    print(ordered(2, 5))
-    print(ordered(3.0, 3.0))
+    assert n == 42
+    assert Add::add(1, 2) * Mul::mul(2, 3) == 18
+    assert mask(5, 3) == -1
+    assert shift(3, 4) == 48
+    assert same(7, 7)
+    assert same("ok", "ok")
+    assert same([0, 1], [0, 1])
+    assert ordered(2, 5) == (true, true, false, false)
+    assert ordered(3.0, 3.0) == (false, true, false, true)
 }

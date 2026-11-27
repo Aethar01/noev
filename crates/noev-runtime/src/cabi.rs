@@ -237,8 +237,11 @@ impl BackendRef {
 /// Owns the gate-level backend session (or circuit recording state), free qubit pool, `ctrl`
 /// stack, `adj` and `with`/`do` recording frames, PRNG, output streams, and last error.
 pub struct NoevRuntime {
-    backend: BackendRef,
+    // `session` MUST be declared before `backend` so it is dropped first: a plug-in's
+    // `PluginSession::drop` invokes `session_free` in the shared library that `PluginBackend::drop`
+    // unloads with `dlclose`.
     session: Option<Box<dyn Session>>,
+    backend: BackendRef,
     free: Vec<usize>,
     controls: Vec<usize>,
     control_marks: Vec<usize>,
@@ -847,6 +850,49 @@ pub extern "C" fn noev_rt_new_export(seed: u64) -> *mut NoevRuntime {
     let mut rt = NoevRuntime::new_owned(Box::new(Exporter::default()), seed);
     rt.set_mode(Mode::Build(Recording::default()));
     Box::into_raw(Box::new(rt))
+}
+
+/// Creates a runtime backed by a dynamically loaded plug-in backend (`include/noev_backend.h`),
+/// seeded with `seed`. Returns null on failure (writing the reason to stderr).
+/// Free with [`noev_rt_free`].
+///
+/// # Safety
+/// `path` must point to `path_len` UTF-8 bytes; `device` may be null or point to `device_len`
+/// UTF-8 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noev_rt_new_plugin(
+    path: *const u8,
+    path_len: usize,
+    device: *const u8,
+    device_len: usize,
+    seed: u64,
+) -> *mut NoevRuntime {
+    if path.is_null() || path_len == 0 {
+        return ptr::null_mut();
+    }
+    let Ok(path_str) = std::str::from_utf8(unsafe { std::slice::from_raw_parts(path, path_len) })
+    else {
+        return ptr::null_mut();
+    };
+    let device_str = if device.is_null() || device_len == 0 {
+        None
+    } else {
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(device, device_len) }).ok()
+    };
+    match crate::plugin::PluginBackend::load(std::path::Path::new(path_str), device_str) {
+        Ok(plugin) => {
+            let mut rt = NoevRuntime::new_owned(Box::new(plugin), seed);
+            rt.set_output(Rc::new(RefCell::new(Output {
+                stdout: Box::new(std::io::stdout()),
+                stderr: Box::new(std::io::stderr()),
+            })));
+            Box::into_raw(Box::new(rt))
+        }
+        Err(err) => {
+            eprintln!("error: {}", err.0);
+            ptr::null_mut()
+        }
+    }
 }
 
 /// Flushes output and frees a [`NoevRuntime`] created by `noev_rt_new_*`.

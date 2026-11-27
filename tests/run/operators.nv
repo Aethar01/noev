@@ -149,33 +149,33 @@ impl Neg for Reg {
     }
 }
 
-fn main() {
+test fn operator_traits() {
     let a = V { x: 1, y: 2 }
     let b = V { x: 10, y: 20 }
     let c = -(a + b * 2)
-    print("{c.x} {c.y}")
-    print(a * b)
+    assert (c.x, c.y) == (-21, -42)
+    assert a * b == 50
     let d = sum3(a, b, c)
-    print("{d.x} {d.y}")
-    print(1 + 2 * 3)
+    assert (d.x, d.y) == (-10, -20)
+    assert 1 + 2 * 3 == 7
     let e = b / 3 % 4
-    print("{e.x} {e.y}")
+    assert (e.x, e.y) == (3, 2)
     let mut m = V { x: 3, y: 4 }
     m += a
     m -= V { x: 1, y: 1 }
     m *= 10
     m %= 7
-    print("{m.x} {m.y}")
+    assert (m.x, m.y) == (2, 1)
     let r = Reg { qs: |10> }
     let s = Reg { qs: |11> }
     let t = -(mv r + mv s)
-    print(mv t.qs.measure())
+    assert mv t.qs.measure() == [1, 0]
     let p = Reg { qs: |10> }
     let q = Reg { qs: |11> }
     p += q
     xor_in(mut p, ref q)
     adj xor_in(mut p, ref q)
-    print(mv p.qs.measure())
+    assert mv p.qs.measure() == [0, 1]
     mv q.qs.measure()
     let x = Bits { v: 0b1100 }
     let y = Bits { v: 0b1010 }
@@ -184,7 +184,7 @@ fn main() {
     w &= Bits { v: 0b0111 }
     w <<= 2
     let inv = ~Bits { v: 0 }
-    print("{w.v} {inv.v}")
-    print(clamp_order(ref x, ref y))
-    print(x == x and x != y and x > y and x >= x)
+    assert (w.v, inv.v) == (24, -1)
+    assert clamp_order(ref x, ref y) == (false, true, false, false, true, true)
+    assert x == x and x != y and x > y and x >= x
 }

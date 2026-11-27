@@ -122,7 +122,9 @@ pub fn emit_module(program: &Program, opts: CodegenOptions) -> Result<String, Co
     }
 
     // 3. Emit C `main(i32 %argc, ptr %argv) -> i32`.
-    if let Some(main_id) = program.main {
+    if opts.test_harness {
+        emit_test_main(&mut bodies, &mut globals, &mut decls, program);
+    } else if let Some(main_id) = program.main {
         emit_main(
             &mut bodies,
             &mut layouts,
@@ -282,6 +284,44 @@ fn emit_main(
         args.join(", ")
     );
     out.push_str("  %code = call i32 @noev_rt_main_exit(ptr %rt, i8 %ok)\n");
+    out.push_str("  ret i32 %code\n}\n");
+}
+
+fn emit_test_main(
+    out: &mut String,
+    globals: &mut GlobalPool,
+    decls: &mut BTreeMap<String, String>,
+    program: &Program,
+) {
+    decls
+        .entry("noev_rt_test_harness_new".into())
+        .or_insert_with(|| "declare ptr @noev_rt_test_harness_new(i32, ptr)".into());
+    decls
+        .entry("noev_rt_test_register".into())
+        .or_insert_with(|| {
+            "declare void @noev_rt_test_register(ptr, ptr, i64, i8, ptr, i64, ptr)".into()
+        });
+    decls
+        .entry("noev_rt_test_run_all".into())
+        .or_insert_with(|| "declare i32 @noev_rt_test_run_all(ptr)".into());
+
+    out.push_str("\ndefine i32 @main(i32 %argc, ptr %argv) {\nentry:\n");
+    out.push_str("  %h = call ptr @noev_rt_test_harness_new(i32 %argc, ptr %argv)\n");
+    for t in &program.tests {
+        let name_sym = globals.intern_bytes(t.name.as_bytes());
+        let (fail_mode, fail_ptr, fail_len) = match &t.expect_fail {
+            None => (0u8, "null".to_string(), 0usize),
+            Some(None) => (1u8, "null".to_string(), 0usize),
+            Some(Some(s)) => (2u8, globals.intern_bytes(s.as_bytes()), s.len()),
+        };
+        let fn_idx = t.func.index();
+        let _ = writeln!(
+            out,
+            "  call void @noev_rt_test_register(ptr %h, ptr {name_sym}, i64 {}, i8 {fail_mode}, ptr {fail_ptr}, i64 {fail_len}, ptr @__noev_fn_{fn_idx})",
+            t.name.len()
+        );
+    }
+    out.push_str("  %code = call i32 @noev_rt_test_run_all(ptr %h)\n");
     out.push_str("  ret i32 %code\n}\n");
 }
 
@@ -3921,13 +3961,27 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 self.check_ok(&ok);
                 let _ = writeln!(self.body, "  br label %bb{}", next.index());
             }
-            Terminator::Assert { cond, next, .. } => {
+            Terminator::Assert {
+                cond, msg, next, ..
+            } => {
                 let ok_cond = self.eval_scalar(cond)?;
                 if self.opts.runtime_abi == RuntimeAbi::Qir {
                     self.check_ok(&ok_cond);
+                } else if let Some(msg_op) = msg {
+                    let msg_val = self.eval_scalar(msg_op)?;
+                    self.declare(
+                        "noev_rt_assert_str",
+                        "declare i8 @noev_rt_assert_str(ptr, i8, i64)",
+                    );
+                    let ok = self.fresh();
+                    let _ = writeln!(
+                        self.body,
+                        "  {ok} = call i8 @noev_rt_assert_str(ptr %rt, i8 {ok_cond}, i64 {msg_val})"
+                    );
+                    self.check_ok(&ok);
                 } else {
-                    let msg = b"assertion failed";
-                    let sym = self.globals.intern_bytes(msg);
+                    let text = b"assertion failed";
+                    let sym = self.globals.intern_bytes(text);
                     self.declare(
                         "noev_rt_assert",
                         "declare i8 @noev_rt_assert(ptr, i8, ptr, i64)",
@@ -3936,7 +3990,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                     let _ = writeln!(
                         self.body,
                         "  {ok} = call i8 @noev_rt_assert(ptr %rt, i8 {ok_cond}, ptr {sym}, i64 {})",
-                        msg.len()
+                        text.len()
                     );
                     self.check_ok(&ok);
                 }

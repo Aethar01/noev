@@ -13,11 +13,20 @@ fn phased() -> Qubit {
     mv q
 }
 
-fn main() {
-    print(<+|->, <0|1>, (<bell()|bell()> - 1.0).abs() < 1e-12, <bell()|11> == <bell()|00>)
-    print((<phased()|(+i)> - 1.0).abs() < 1e-12, <+|phased()>.arg() == Float::PI / 4.0)
+test fn overlaps_and_phases() {
+    assert <+|-> == 0.0 + 0.0i
+    assert <0|1> == 0.0 + 0.0i
+    assert (<bell()|bell()> - 1.0).abs() < 1e-12
+    assert <bell()|11> == <bell()|00>
+    assert (<phased()|(+i)> - 1.0).abs() < 1e-12
+    assert <+|phased()>.arg() == Float::PI / 4.0
+}
+
+test fn transition_values() {
     // ⟨0|X|1⟩ = 1, ⟨0|Z|1⟩ = 0, ⟨0|Y|1⟩ = −i.
-    print(<0| X(0) |1>, <0| Z(0) |1>, <0| Y(0) |1>)
+    assert "{<0| X(0) |1>}" == "1.0+0.0i"
+    assert "{<0| Z(0) |1>}" == "0.0+0.0i"
+    assert "{<0| Y(0) |1>}" == "0.0-1.0i"
     // With the same preparation on both sides, an expectation value.
-    print(<bell()| Z(0) * Z(1) |bell()>.round())
+    assert <bell()| Z(0) * Z(1) |bell()>.round() == 1
 }

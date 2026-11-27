@@ -16,15 +16,18 @@ impl Measure for E {
     fn measure(mv self) -> R { R { bit: mv self.state.measure(), tag: self.tag } }
 }
 
-fn main() {
+test fn trait_dispatch() {
     let s = S { x: 0 }
-    print("{A::name(ref s)} {B::name(ref s)}")
+    assert A::name(ref s) == 1
+    assert B::name(ref s) == 2
     let q = |0>
     adj concrete(mut q)
     let pair = (E { state: |1>, tag: 7 }, |1>)
     let (r, b) = mv pair.measure()
-    print("{r.bit} {r.tag} {b}")
+    assert r.bit == 1 and r.tag == 7 and b == 1
     let es = [E { state: |1>, tag: 1 }, E { state: |0>, tag: 2 }]
     let rs = measure(mv es)
-    print("{rs[0].bit}{rs[1].bit} {rs[0].tag}{rs[1].tag} {mv q.measure()}")
+    assert rs[0].bit == 1 and rs[1].bit == 0
+    assert rs[0].tag == 1 and rs[1].tag == 2
+    assert mv q.measure() == 1
 }

@@ -1,9 +1,6 @@
-// fails: assertion failed
-// A failed `assert` stops the program; what it printed before stays.
+// A failed `assert` stops execution with `assertion failed`.
 
-fn main() {
-    print("before")
+test(fail = "assertion failed") fn failed_assert() {
     let n = 3
     assert n < 2
-    print("after")
 }

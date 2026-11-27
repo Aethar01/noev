@@ -1,7 +1,5 @@
-//! Runs the conformance suite in `tests/run` against the `noev` binary.
-//!
-//! The suite's format is described in `tests/run/README.md`: each `NAME.nv` must print exactly
-//! `NAME.out`, and one starting with `// fails: TEXT` must fail with `TEXT` in its errors.
+//! Runs the conformance suite in `tests/run` via `noev test` (interpreter), plus smoke checks
+//! for `noev run` stdout/stderr and inferred `Copy` bound rejection.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,64 +9,81 @@ fn run_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/run")
 }
 
-/// What is wrong with one program's run, if anything.
-fn check(path: &Path) -> Option<String> {
-    let source = fs::read_to_string(path).expect("the program is readable");
-    let expected = fs::read_to_string(path.with_extension("out"))
-        .unwrap_or_else(|_| panic!("{} has no .out file", path.display()));
-    let fails = source
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("// fails:"))
-        .map(str::trim);
+#[test]
+fn run() {
     let output = Command::new(env!("CARGO_BIN_EXE_noev"))
-        .arg("run")
-        .arg(path)
+        .args(["test", "--seed", "1"])
+        .arg(run_dir())
         .output()
-        .expect("noev runs");
+        .expect("noev test runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let mut problems = Vec::new();
-    if stdout != expected {
-        problems.push(format!(
-            "expected output:\n{expected}\nactual output:\n{stdout}"
-        ));
-    }
-    match fails {
-        Some(text) if output.status.success() => {
-            problems.push(format!("should have failed with `{text}`"))
-        }
-        Some(text) if !stderr.contains(text) => {
-            problems.push(format!("errors should contain `{text}`:\n{stderr}"))
-        }
-        None if !output.status.success() => problems.push(format!("failed:\n{stderr}")),
-        _ => {}
-    }
-    (!problems.is_empty()).then(|| problems.join("\n"))
+    assert!(
+        output.status.success(),
+        "noev test tests/run failed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("test result: ok.") && stdout.contains("0 failed"),
+        "unexpected test summary:\n{stdout}"
+    );
 }
 
 #[test]
-fn run() {
-    let mut files: Vec<PathBuf> = fs::read_dir(run_dir())
-        .expect("tests/run is readable")
-        .map(|e| e.expect("directory entry is readable").path())
-        .filter(|p| p.extension().is_some_and(|e| e == "nv"))
-        .collect();
-    files.sort();
-    let failures: Vec<String> = files
-        .iter()
-        .filter_map(|path| {
-            check(path).map(|problem| {
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                format!("{name}: {problem}")
-            })
-        })
-        .collect();
+fn noev_run_stdout_and_stderr() {
+    let dir = std::env::temp_dir().join(format!("noev_run_smoke_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let nv = dir.join("hello.nv");
+    fs::write(
+        &nv,
+        r#"
+fn main() {
+    print("hello", 42)
+    eprint("err-line")
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_noev"))
+        .args(["run"])
+        .arg(&nv)
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello 42\n");
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "err-line\n");
+}
+
+#[test]
+fn inferred_copy_bound_rejects_qubit() {
+    let dir = std::env::temp_dir().join(format!("noev_inferred_copy_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let nv = dir.join("copy_fail.nv");
+    fs::write(
+        &nv,
+        r#"
+fn twice<T>(x: T) -> (T, T) { (x, x) }
+
+fn main() {
+    let (a, b) = twice(|0>)
+    mv a.discard()
+    mv b.discard()
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_noev"))
+        .args(["check"])
+        .arg(&nv)
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        failures.is_empty(),
-        "{} of {} run tests failed:\n\n{}",
-        failures.len(),
-        files.len(),
-        failures.join("\n\n")
+        stderr.contains("`twice` needs `T: Copy`, but here `T` is `Qubit`"),
+        "stderr:\n{stderr}"
     );
 }

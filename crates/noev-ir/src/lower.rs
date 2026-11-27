@@ -37,9 +37,24 @@ pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &SourceMa
     let mut instances = Instances::default();
     let first_run = syntax.all_fns().len() as u32;
     let main = typed.main.map(|f| FuncId(f.index() as u32));
+    let mut tests = Vec::new();
     for (index, decl) in syntax.all_fns().iter().enumerate() {
         let f = ast::FnId::from_index(index);
         let name = fn_name(syntax, typed, f);
+        if decl.test != ast::TestKind::None
+            && syntax.module(typed.fn_modules[index]).package.index() == 0
+        {
+            let expect_fail = match decl.test {
+                ast::TestKind::None => unreachable!(),
+                ast::TestKind::Pass => None,
+                ast::TestKind::Fail(s) => Some(s.map(|sym| syntax.name(sym).to_string())),
+            };
+            tests.push(TestFn {
+                name: name.clone(),
+                func: FuncId(index as u32),
+                expect_fail,
+            });
+        }
         // A generic function is lowered once for each list of type arguments it is called
         // with; its own slot holds nothing that runs.
         if !typed.fns[index].generics.is_empty() {
@@ -126,6 +141,7 @@ pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &SourceMa
     Program {
         functions,
         main,
+        tests,
         types,
         struct_names,
         struct_fields,
@@ -1131,17 +1147,45 @@ impl Builder<'_> {
                 self.terminate(Terminator::Goto(target));
                 self.diverged = true;
             }
-            StmtKind::Assert(cond) => {
-                let cond = self.operand(cond);
+            StmtKind::Assert { cond, msg } => {
+                let cond_op = self.operand(cond);
                 let next = self.new_block();
-                self.terminate_into(
-                    Terminator::Assert {
-                        cond,
-                        next,
-                        span: stmt.span,
-                    },
-                    next,
-                );
+                match msg {
+                    None => {
+                        self.terminate_into(
+                            Terminator::Assert {
+                                cond: cond_op,
+                                msg: None,
+                                next,
+                                span: stmt.span,
+                            },
+                            next,
+                        );
+                    }
+                    Some(msg_expr) => {
+                        // Evaluate the failure message lazily, only when `cond` is false.
+                        let fail_block = self.new_block();
+                        self.terminate_into(
+                            Terminator::Branch {
+                                cond: cond_op,
+                                then: next,
+                                otherwise: fail_block,
+                                control: None,
+                            },
+                            fail_block,
+                        );
+                        let msg_op = self.operand(msg_expr);
+                        self.terminate_into(
+                            Terminator::Assert {
+                                cond: Operand::Const(Const::Bool(false)),
+                                msg: Some(msg_op),
+                                next,
+                                span: stmt.span,
+                            },
+                            next,
+                        );
+                    }
+                }
             }
             StmtKind::Expr { expr, .. } => self.expr_into_or_release(expr, None),
         }

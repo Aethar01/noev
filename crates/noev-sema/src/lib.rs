@@ -8,9 +8,11 @@ pub mod facts;
 pub mod ownership;
 pub mod prelude;
 pub mod resolve;
+pub mod target;
 pub mod ty;
 
 pub use check::{Typed, check};
 pub use circuit::{CircuitInfo, Circuits, check_circuits};
 pub use ownership::{check_ownership, reversibility};
+pub use target::{BackendLevel, TargetCapabilities, TargetSpec, check_backend_impls, check_target};
 pub use ty::{Ty, TyKind, Types};

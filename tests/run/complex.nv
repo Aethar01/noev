@@ -1,18 +1,32 @@
 // Complex numbers (spec/types.md §1): imaginary literals, arithmetic, methods, conversions
 // and printing; `c32` for two `f32`s.
 
-fn main() {
+test fn complex_numbers() {
     let z = 1.0 + 2.0i
     let w: Complex = 3.0 - 1i
-    print(z, w, z + w, z * w, z / w, -z, z == 1.0 + 2.0i)
-    print(z.re(), z.im(), z.conj(), (1i).arg() == Float::PI / 2.0)
-    print((-4.0 + 0i).sqrt(), (3.0 + 4.0i).abs())
+    assert "{z}" == "1.0+2.0i"
+    assert "{w}" == "3.0-1.0i"
+    assert z + w == 4.0 + 1.0i
+    assert z * w == 5.0 + 5.0i
+    assert (z / w - (0.1 + 0.7i)).abs() < 1e-12
+    assert -z == -1.0 - 2.0i
+    assert z == 1.0 + 2.0i
+    assert z.re() == 1.0
+    assert z.im() == 2.0
+    assert z.conj() == 1.0 - 2.0i
+    assert (1i).arg() == Float::PI / 2.0
+    assert ((-4.0 + 0i).sqrt() - 2.0i).abs() < 1e-12
+    assert (3.0 + 4.0i).abs() == 5.0
     // Literals take the type expected; other values are converted.
     let x = 2.5
-    print(z * 2.0, z * Complex(x), Complex(3), Complex(c32(z)))
+    assert z * 2.0 == 2.0 + 4.0i
+    assert z * Complex(x) == 2.5 + 5.0i
+    assert Complex(3) == 3.0 + 0.0i
+    assert Complex(c32(z)) == 1.0 + 2.0i
     let small: c32 = 0.5 + 0.25i
-    print(small * small, small.abs())
-    print("{z:.3} [{w:>12}]")
+    assert "{small * small}" == "0.1875+0.25i"
+    assert "{small.abs():.6}" == "0.559017"
+    assert "{z:.3} [{w:>12}]" == "1.000+2.000i [    3.0-1.0i]"
     let also: c64 = z
-    print(also == z)
+    assert also == z
 }

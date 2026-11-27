@@ -34,12 +34,17 @@ fn flip(s: mut Spare) {
     }
 }
 
-fn main() {
+test fn enum_variants_with_data() {
     let all = (Outcome::Success(1), Outcome::Success(0), Outcome::Retry { attempts: 3, last: 0 }, Outcome::Failed)
-    print(all)
-    print(describe(all.0), describe(all.1), describe(all.2), describe(all.3))
-    print(all.0 == Outcome::Success(1), all.0 == all.1)
+    assert "{all}" == "(Outcome::Success(1), Outcome::Success(0), Outcome::Retry {{ attempts: 3, last: 0 }, Outcome::Failed)"
+    assert describe(all.0) == "success with 1"
+    assert describe(all.1) == "success with 0"
+    assert describe(all.2) == "retry 3, last 0"
+    assert describe(all.3) == "failed"
+    assert all.0 == Outcome::Success(1)
+    assert not (all.0 == all.1)
     let mut s = Spare::One(|0>)
     flip(mut s)
-    print(read(mv s), read(Spare::Empty))
+    assert read(mv s) == 1
+    assert read(Spare::Empty) == 0
 }

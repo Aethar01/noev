@@ -25,6 +25,10 @@ impl Backend for Ketrs {
         true
     }
 
+    fn target(&self) -> noev_sema::TargetSpec {
+        noev_sema::TargetSpec::ketrs()
+    }
+
     fn session(&self, seed: u64) -> Option<Box<dyn Session>> {
         Some(Box::new(KetrsSession {
             state: Statevector::zero(0),

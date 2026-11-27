@@ -15,6 +15,7 @@ workspace = true
 default = ["cranelift", "llvm"]
 # Pure-Rust Cranelift native code generator.
 cranelift = [
+    "dep:noev-runtime",
     "dep:cranelift-codegen",
     "dep:cranelift-frontend",
     "dep:cranelift-module",
@@ -22,11 +23,11 @@ cranelift = [
     "dep:cranelift-object",
 ]
 # LLVM native code generator (pure-Rust IR emitter + dynamic libLLVM / llc driver).
-llvm = []
+llvm = ["dep:noev-runtime"]
 
 [dependencies]
 noev-ir = { path = "../noev-ir" }
-noev-runtime = { path = "../noev-runtime", default-features = false }
+noev-runtime = { path = "../noev-runtime", default-features = false, optional = true }
 noev-sema = { path = "../noev-sema" }
 cranelift-codegen = { version = "0.138", optional = true }
 cranelift-frontend = { version = "0.138", optional = true }
@@ -41,3 +42,4 @@ noev-syntax = { path = "../noev-syntax" }
 [[bench]]
 name = "compile"
 harness = false
+required-features = ["cranelift"]

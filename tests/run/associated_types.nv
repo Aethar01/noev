@@ -22,11 +22,11 @@ fn read_all<T: Readout>(x: T) -> T::Result { mv x.read() }
 
 fn one_bit<T: Readout<Result = Bit>>(x: T) -> Bit { mv x.read() }
 
-fn main() {
+test fn associated_types() {
     let t = Two { a: |1>, b: |0> }
     let r = read_all(mv t)
-    print("{r.0} {r.1}")
-    print(one_bit(|1>))
+    assert r == (1, 0)
+    assert one_bit(|1>) == 1
     let b: Bit = read_all(|0>)
-    print(b)
+    assert b == 0
 }
