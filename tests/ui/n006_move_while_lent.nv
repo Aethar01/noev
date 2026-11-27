@@ -3,7 +3,9 @@
 fn move_while_lent() -> Bit {
     let q = |0>
     let r = ref q
-    mv q.measure()                  //~ N006
+    let b = mv q.measure()          //~ N006
+    ctrl r {}
+    b
 }
 
 enum Held {

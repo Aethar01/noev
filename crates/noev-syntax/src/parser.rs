@@ -1074,8 +1074,17 @@ impl Parser<'_> {
         let kind = match self.kind() {
             Ref | Mut => {
                 let mutable = self.bump().kind == Mut;
+                let borrows = if self.starts_borrow_list() {
+                    self.borrow_list()
+                } else {
+                    List::default()
+                };
                 let inner = self.ty();
-                TypeKind::Ref { mutable, inner }
+                TypeKind::Ref {
+                    mutable,
+                    borrows,
+                    inner,
+                }
             }
             LParen => {
                 self.bump();
@@ -1119,7 +1128,7 @@ impl Parser<'_> {
             }
             Ident | SelfType => {
                 let path = self.path_segments();
-                if self.at(Lt) {
+                let base = if self.at(Lt) {
                     self.bump();
                     let mark = self.ast.mark::<TypeId>();
                     while !matches!(self.kind(), Gt | Shr | Eof) {
@@ -1136,6 +1145,17 @@ impl Parser<'_> {
                     }
                 } else {
                     TypeKind::Path(path)
+                };
+                if self.at(LBracket) {
+                    let inner_span = start.to(self.prev_span());
+                    let inner = self.ast.push_type(TypeExpr {
+                        kind: base,
+                        span: inner_span,
+                    });
+                    let borrows = self.borrow_list();
+                    TypeKind::Borrowed { inner, borrows }
+                } else {
+                    base
                 }
             }
             _ => {
@@ -1145,6 +1165,61 @@ impl Parser<'_> {
         };
         let span = start.to(self.prev_span());
         self.ast.push_type(TypeExpr { kind, span })
+    }
+
+    /// Whether `[` after `ref` or `mut` begins a borrow list (`ref[a, b] T`) rather than an
+    /// array type (`ref [T; N]`): a borrow list has no `;` at depth 0 before its `]`.
+    fn starts_borrow_list(&self) -> bool {
+        use TokenKind::*;
+        if !self.at(LBracket) {
+            return false;
+        }
+        let mut i = self.pos + 1;
+        let mut depth = 0u32;
+        while let Some(tok) = self.tokens.get(i) {
+            match tok.kind {
+                LBracket | LParen | LBrace => depth += 1,
+                RBracket if depth == 0 => return true,
+                RBracket | RParen | RBrace => depth = depth.saturating_sub(1),
+                Semi if depth == 0 => return false,
+                Eof => return false,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// `[a, b]` or `[self.state]`: places a returned reference may borrow from.
+    fn borrow_list(&mut self) -> List<BorrowPlace> {
+        use TokenKind::*;
+        self.expect(LBracket, "`[`");
+        let mark = self.ast.mark::<BorrowPlace>();
+        while !matches!(self.kind(), RBracket | Eof) {
+            let start = self.span();
+            let root = if self.eat(SelfValue) {
+                self.ast.symbols.intern("self")
+            } else {
+                self.name("a parameter name or `self`").0
+            };
+            let fields_mark = self.ast.mark::<Symbol>();
+            while self.eat(Dot) {
+                let (field, _) = self.name("a field name");
+                self.ast.push_to(field);
+            }
+            let fields = self.ast.finish(fields_mark);
+            let span = start.to(self.prev_span());
+            self.ast.push_to(BorrowPlace { root, fields, span });
+            if !self.eat(Comma) {
+                break;
+            }
+        }
+        let list = self.ast.finish(mark);
+        if list.is_empty() {
+            self.expected("a parameter name or `self`");
+        }
+        self.expect(RBracket, "`]`");
+        list
     }
 
     /// Consumes a `>` closing type arguments. In `A<B<C>>` the lexer sees `>>`, so it is

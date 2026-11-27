@@ -1,0 +1,137 @@
+// Lifetime and borrow errors (`spec/ownership.md` §5): NLL, structs with references,
+// place-based borrow annotations, two-phase receiver lends, and field-level method lends.
+
+struct Pair {
+    a: Qubit
+    b: Qubit
+
+    fn flip_b(mut self) {
+        self.b.x()
+    }
+
+    fn a_mut(mut self) -> mut[self.a] Qubit {
+        mut self.a
+    }
+
+    fn wrong_field(ref self) -> ref[self.a] Qubit {
+        ref self.b                      //~ N008
+    }
+}
+
+struct Window {
+    q: ref Qubit
+}
+
+struct MutWindow {
+    q: mut Qubit
+}
+
+struct Counter {
+    n: Int
+
+    fn take_ref(mut self, other: ref Counter) {
+        self.n += other.n
+    }
+}
+
+// NLL still catches conflicts when a reference IS used later.
+fn nll_still_live() {
+    let q = |0>
+    let r = ref q
+    q.x()                               //~ N005
+    ctrl r {}
+    mv q.discard()
+}
+
+// Loop back-edge keeps an outer reference live across iterations.
+fn nll_loop_backedge() {
+    let q = |0>
+    let r = ref q
+    for i in 0..3 {
+        ctrl r {}
+        q.x()                           //~ N005
+    }
+    mv q.discard()
+}
+
+// Conditional use after `if` still conflicts inside `if`.
+fn polonius_used_after_if(a: mut Qubit, flag: Bool) -> mut Qubit {
+    let r = mut a
+    if flag {
+        a.h()                           //~ N005
+    }
+    r
+}
+
+// Struct holding `ref Qubit` keeps its target lent while the struct is live.
+fn window_conflict() {
+    let q = |0>
+    let w = Window { q: ref q }
+    q.x()                               //~ N005
+    ctrl w.q {}
+    mv q.discard()
+}
+
+// Moving a qubit while a `Window` borrowing it is still live is N006.
+fn window_move_while_lent() -> Bit {
+    let q = |0>
+    let w = Window { q: ref q }
+    let b = mv q.measure()              //~ N006
+    ctrl w.q {}
+    b
+}
+
+// Returning a `Window` that borrows a local qubit is N008.
+fn window_dangles() -> Window {
+    let q = |0>
+    let w = Window { q: ref q }         //~ N008
+    mv q.discard()                      //~ N006
+    w
+}
+
+// `MutWindow` holds `mut Qubit`, so it is affine and cannot be copied.
+fn mut_window_no_copy(q: mut Qubit) {
+    let w = MutWindow { q }
+    let w2 = w                          //~ N001
+    w2.q.x()
+}
+
+// Returning a parameter not listed in `ref[a]` is N008.
+fn unlisted_param(a: ref Qubit, b: ref Qubit) -> ref[a] Qubit {
+    b                                   //~ N008
+}
+
+// Returning a borrow from `ref[a, b]` keeps BOTH `a` and `b` lent.
+fn pick(a: ref Qubit, b: ref Qubit, flag: Bool) -> ref[a, b] Qubit {
+    if flag { a } else { b }
+}
+
+fn pick_conflicts(flag: Bool) {
+    let a = |0>
+    let b = |0>
+    let r = pick(a, b, flag)
+    a.x()                               //~ N005
+    b.x()                               //~ N005
+    ctrl r {}
+    mv a.discard()
+    mv b.discard()
+}
+
+// Two-phase receiver lend still rejects an argument that keeps lending the receiver.
+fn two_phase_conflict() {
+    let mut c = Counter { n: 1 }
+    c.take_ref(ref c)                   //~ N005
+}
+
+// Field-level method lend still catches a conflict on the same field.
+fn field_method_conflict() {
+    let p = Pair { a: |0>, b: |0> }
+    ctrl p.b { p.flip_b() }             //~ N005
+    let a1 = p.a_mut()
+    let _a2 = p.a_mut()                 //~ N005
+    a1.x()
+    mv p.a.discard()
+    mv p.b.discard()
+}
+
+fn main() {}

@@ -38,6 +38,14 @@ before 1.0.
   be in `|0>` (untouched `|0>` literals/aggregates, or a `Qubit` after `reset`) release
   automatically on scope exit without N003. `tests/run/qint.nv` adds a reversible in-place
   `QInt += QInt` using `with`/`do`.
+- Lifetimes (`spec/ownership.md` §5, `spec/grammar.md` §3): Polonius-style non-lexical,
+  path-sensitive lifetimes (lends live only along paths that use them again, accepting
+  conditional early borrow returns); two-phase receiver lends (`c.add(c.get())`,
+  `e.rotate_by(e.angle)`); field-level method lends inferred within a package (`ctrl p.a {
+  p.flip_b() }`, disjoint `p.a_mut()` / `p.b_mut()`); references stored in structs and enums
+  (`Window`, `MutWindow`, `Option<ref Qubit>`); and place-based borrow annotations
+  (`ref[a, b] String`, `mut[self.state] Qubit`, `Window[r]`), inferred within a package and
+  required on a library's `pub` functions and trait signatures where elision does not decide.
 - Arithmetic in sizes: `[Qubit; N + 1]`, `[Bit; 2 * N]` and `Reg<{N + 1}>`, compared after
   normalising and solved by calls (`[Qubit; 5]` for `[Qubit; N + 1]` makes `N` 4), so a
   quantum integer can be a library type (`tests/run/qint.nv`). A call also infers a parameter

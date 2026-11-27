@@ -263,6 +263,25 @@ pub fn normalize(impls: &[ImplInfo], types: &mut Types, ty: Ty) -> Ty {
     }
 }
 
+/// Which parameter a returned reference borrows from (`spec/ownership.md` §5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BorrowRoot {
+    /// `self`.
+    Receiver,
+    /// The `n`th parameter after `self`.
+    Param(usize),
+}
+
+/// A parameter (or field path within it) that a returned reference may borrow from
+/// (`spec/ownership.md` §5).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BorrowSource {
+    /// Which parameter (`self` or a numbered parameter).
+    pub root: BorrowRoot,
+    /// Field indices within that parameter, in order; empty for the whole parameter.
+    pub fields: Vec<u32>,
+}
+
 /// A function's resolved signature and where it lives.
 #[derive(Clone, Debug)]
 pub struct FnInfo {
@@ -282,6 +301,10 @@ pub struct FnInfo {
     pub generics: Vec<Ty>,
     /// `Self` in a trait's or an `impl`'s function.
     pub self_ty: Option<Ty>,
+    /// Where a returned reference (or struct holding one) may borrow from, when fixed by
+    /// explicit `[…]` annotations or by library/trait elision; `None` when inferred from the
+    /// function's body by the ownership checker.
+    pub return_borrows: Option<Vec<BorrowSource>>,
 }
 
 /// Everything the type checker learned about a program.
@@ -562,6 +585,8 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         operator: None,
         param_assoc: FxHashMap::default(),
         impl_assoc: Vec::new(),
+        return_borrows: None,
+        pending_borrows: Vec::new(),
     };
     checker.collect();
     checker.check_bodies();
@@ -635,7 +660,15 @@ struct Checker<'a> {
     /// While an `impl` is collected, what it says its associated types are, so its
     /// signatures can name them through `Self`.
     impl_assoc: Vec<ImplAssoc>,
+    /// While resolving a function's return type, borrow annotations collected from it.
+    return_borrows: Option<Vec<RawBorrow>>,
+    /// Raw return-type borrow annotations collected per function, resolved once every struct's
+    /// fields and generic instances are filled.
+    pending_borrows: Vec<(FnId, Vec<RawBorrow>)>,
 }
+
+/// A raw borrow annotation collected while resolving a function's return type.
+type RawBorrow = (Ty, List<BorrowPlace>, Span);
 
 /// An `impl`'s type, trait, trait arguments and associated types, while `impl`s are
 /// collected.
@@ -913,6 +946,7 @@ impl<'a> Checker<'a> {
                 receiver_ty: None,
                 generics: Vec::new(),
                 self_ty: None,
+                return_borrows: None,
             })
             .collect();
 
@@ -1099,6 +1133,7 @@ impl<'a> Checker<'a> {
         // Instances made while fields were being resolved may have missed some.
         self.t.types.refill_instances();
         self.impl_assoc.clear();
+        self.resolve_all_fn_borrows();
         for index in 0..self.t.impls.len() {
             self.check_impl(index);
         }
@@ -1377,6 +1412,25 @@ impl<'a> Checker<'a> {
         }
         if trait_sig.reversible == Reversible::Yes {
             self.t.fns[g.index()].sig.reversible = Reversible::Yes;
+        }
+        // An `impl` function cannot borrow from sources the trait's signature does not allow.
+        if let Some(allowed) = self.t.fns[f.index()].return_borrows.clone() {
+            match &self.t.fns[g.index()].return_borrows {
+                None => self.t.fns[g.index()].return_borrows = Some(allowed),
+                Some(actual) => {
+                    let ok = actual.iter().all(|s| {
+                        allowed
+                            .iter()
+                            .any(|a| a.root == s.root && s.fields.starts_with(&a.fields))
+                    });
+                    if !ok {
+                        let message = format!(
+                            "`{name}` borrows from a parameter that `{trait_name}` does not allow"
+                        );
+                        self.error(span, message);
+                    }
+                }
+            }
         }
     }
 
@@ -1848,7 +1902,10 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|p| self.resolve_type(p.ty))
             .collect();
+        self.return_borrows = Some(Vec::new());
         let ret = decl.ret.map_or(Ty::UNIT, |ty| self.resolve_type(ty));
+        let raw_borrows = self.return_borrows.take().unwrap_or_default();
+        self.pending_borrows.push((f, raw_borrows));
         if decl.receiver.is_some() && owner.is_none() && self_ty.is_none() {
             let span = decl.receiver.map_or(decl.name_span, |r| r.span);
             self.error(
@@ -1879,6 +1936,171 @@ impl<'a> Checker<'a> {
                 Reversible::Infer
             },
         };
+    }
+
+    /// Resolves return-type borrow annotations (`ref[a, b] T`, `Window[r]`, `mut[self.s] T`)
+    /// and applies elision for library `pub` and trait functions (`spec/ownership.md` §5).
+    /// Runs after all struct fields and generic instances are filled so `has_ref` is exact.
+    fn resolve_all_fn_borrows(&mut self) {
+        let pending = std::mem::take(&mut self.pending_borrows);
+        for (f, raw) in pending {
+            let decl = self.ast.function(f);
+            let fn_name = self.name(decl.name).to_string();
+            let info = &self.t.fns[f.index()];
+            let ret = info.sig.ret;
+            let params = info.sig.params.clone();
+            let self_base = info
+                .self_ty
+                .or_else(|| info.owner.map(|s| self.t.types.struct_ty(s)));
+            let receiver_can_borrow = decl.receiver.is_some_and(|r| {
+                r.kind != OwnKind::Mv || self_base.is_some_and(|t| self.t.types.has_ref(t))
+            });
+
+            if !raw.is_empty() {
+                let mut resolved = Vec::new();
+                for (ty, list, span) in raw {
+                    if !self.t.types.is_wildcard(ty) && !self.t.types.has_ref(ty) {
+                        let message = format!(
+                            "{} does not hold a reference, so it cannot have a borrow annotation",
+                            self.show(ty)
+                        );
+                        self.error(span, message);
+                        continue;
+                    }
+                    for &place in self.ast.list(list) {
+                        let root_name = self.name(place.root);
+                        let (root, mut cur_ty) = if root_name == "self" {
+                            if decl.receiver.is_none() {
+                                self.error(
+                                    place.span,
+                                    format!("`self` is not a parameter of `{fn_name}`"),
+                                );
+                                continue;
+                            }
+                            if !receiver_can_borrow {
+                                self.error(
+                                    place.span,
+                                    "`self` is taken by value and holds no reference, so the return value cannot borrow from it",
+                                );
+                                continue;
+                            }
+                            (BorrowRoot::Receiver, self_base.unwrap_or(Ty::ERROR))
+                        } else if let Some(idx) = self
+                            .ast
+                            .list(decl.params)
+                            .iter()
+                            .position(|p| p.name == place.root)
+                        {
+                            let param_ty = params[idx];
+                            if !self.t.types.is_wildcard(param_ty)
+                                && !self.t.types.has_ref(param_ty)
+                            {
+                                let message = format!(
+                                    "`{root_name}` holds no reference, so the return value cannot borrow from it"
+                                );
+                                self.error(place.span, message);
+                                continue;
+                            }
+                            (BorrowRoot::Param(idx), param_ty)
+                        } else {
+                            let message =
+                                format!("`{root_name}` is not a parameter of `{fn_name}`");
+                            self.error(place.span, message);
+                            continue;
+                        };
+
+                        let mut fields = Vec::new();
+                        let mut ok = true;
+                        for &field_sym in self.ast.list(place.fields) {
+                            cur_ty = self.t.types.deref(cur_ty);
+                            if let TyKind::Struct(s) = *self.t.types.kind(cur_ty)
+                                && self.t.types.structs[s.index()].variants.is_none()
+                                && let Some((idx, &(_, fty))) = self.t.types.structs[s.index()]
+                                    .fields
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(_, (n, _))| *n == field_sym)
+                            {
+                                fields.push(idx as u32);
+                                cur_ty = fty;
+                            } else if !self.t.types.is_wildcard(cur_ty) {
+                                let message = format!(
+                                    "{} has no field `{}`",
+                                    self.show(cur_ty),
+                                    self.name(field_sym)
+                                );
+                                self.error(place.span, message);
+                                ok = false;
+                                break;
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok {
+                            let src = BorrowSource { root, fields };
+                            if !resolved.contains(&src) {
+                                resolved.push(src);
+                            }
+                        }
+                    }
+                }
+                self.t.fns[f.index()].return_borrows = Some(resolved);
+            } else if self.t.types.has_ref(ret) {
+                let package = self.ast.module(self.t.fn_modules[f.index()]).package;
+                let in_trait = self.t.fn_traits.contains_key(&f);
+                let exported = decl.vis == Vis::Pub && (package.index() != 0 || self.library);
+                if exported || in_trait || decl.body.is_none() {
+                    let sources = if receiver_can_borrow {
+                        vec![BorrowSource {
+                            root: BorrowRoot::Receiver,
+                            fields: Vec::new(),
+                        }]
+                    } else {
+                        let candidates: Vec<usize> = params
+                            .iter()
+                            .enumerate()
+                            .filter(|&(_, &t)| self.t.types.has_ref(t))
+                            .map(|(i, _)| i)
+                            .collect();
+                        if candidates.len() == 1 {
+                            vec![BorrowSource {
+                                root: BorrowRoot::Param(candidates[0]),
+                                fields: Vec::new(),
+                            }]
+                        } else if candidates.is_empty() {
+                            if decl.body.is_none() {
+                                let span = decl.ret.map_or(decl.name_span, |t| self.ast.ty(t).span);
+                                self.error(
+                                    span,
+                                    format!(
+                                        "`{fn_name}` returns a reference, but no parameter holds one"
+                                    ),
+                                );
+                            }
+                            Vec::new()
+                        } else {
+                            let span = decl.ret.map_or(decl.name_span, |t| self.ast.ty(t).span);
+                            let message = format!(
+                                "`{fn_name}` returns a reference, and more than one parameter could be its source"
+                            );
+                            self.error(span, message).help = Some(
+                                "name which parameters it may borrow from, e.g. `ref[a, b] T`"
+                                    .into(),
+                            );
+                            candidates
+                                .into_iter()
+                                .map(|i| BorrowSource {
+                                    root: BorrowRoot::Param(i),
+                                    fields: Vec::new(),
+                                })
+                                .collect()
+                        }
+                    };
+                    self.t.fns[f.index()].return_borrows = Some(sources);
+                }
+            }
+        }
     }
 
     /// A type argument: a type, or a size (`4`, or a size parameter `N`).
@@ -2019,9 +2241,38 @@ impl<'a> Checker<'a> {
         match node.kind {
             TypeKind::Error => Ty::ERROR,
             TypeKind::Unit => Ty::UNIT,
-            TypeKind::Ref { mutable, inner } => {
+            TypeKind::Ref {
+                mutable,
+                borrows,
+                inner,
+            } => {
                 let inner = self.resolve_type(inner);
-                self.t.types.reference(mutable, inner)
+                let ty = self.t.types.reference(mutable, inner);
+                if !borrows.is_empty() {
+                    if let Some(collected) = &mut self.return_borrows {
+                        collected.push((ty, borrows, node.span));
+                    } else {
+                        self.error(
+                            node.span,
+                            "borrow annotations are only allowed in function return types",
+                        );
+                    }
+                }
+                ty
+            }
+            TypeKind::Borrowed { inner, borrows } => {
+                let ty = self.resolve_type(inner);
+                if !borrows.is_empty() {
+                    if let Some(collected) = &mut self.return_borrows {
+                        collected.push((ty, borrows, node.span));
+                    } else {
+                        self.error(
+                            node.span,
+                            "borrow annotations are only allowed in function return types",
+                        );
+                    }
+                }
+                ty
             }
             TypeKind::Tuple(elems) => {
                 let elems: Box<[Ty]> = ast

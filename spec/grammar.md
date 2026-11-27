@@ -239,12 +239,15 @@ and not implemented yet.
 ### Types
 
 ```ebnf
-type        = path [ "<" type_arg { "," type_arg } [ "," ] ">" ]   (* Int, Float, Bool, Bit, Qubit, String, Self, struct name, Distribution<T>, Pair<T, U> *)
-            | "ref" type                          (* shared reference *)
-            | "mut" type                          (* exclusive reference *)
+type        = path [ "<" type_arg { "," type_arg } [ "," ] ">" ] [ borrow_list ]
+                                                  (* Int, Qubit, Distribution<T>, Window[r] *)
+            | "ref" [ borrow_list ] type          (* shared reference, e.g. `ref[a, b] String` *)
+            | "mut" [ borrow_list ] type          (* exclusive reference, e.g. `mut[self.state] Qubit` *)
             | "(" ")"                             (* unit *)
             | "(" type "," [ type { "," type } [ "," ] ] ")"   (* tuple *)
             | "[" type ";" size "]" ;             (* array of fixed length *)
+borrow_list = "[" borrow_place { "," borrow_place } [ "," ] "]" ;
+borrow_place = ( IDENT | "self" ) { "." IDENT } ;
 size        = expr ;                              (* a length, a size parameter, or a sum: `N + 1` (types.md §6) *)
 type_arg    = type | INT | "{" expr "}" ;         (* `Register<8>` and `Register<{N + 1}>` give sizes *)
 ```

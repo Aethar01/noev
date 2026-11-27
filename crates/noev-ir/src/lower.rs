@@ -1765,7 +1765,7 @@ impl Builder<'_> {
             }
             ExprKind::Adj(call) => self.call(call, dest, true),
             ExprKind::Unary { op, operand } => {
-                let x = self.operand(operand);
+                let x = self.deref_operand(operand);
                 let op = match op {
                     ast::UnaryOp::Neg => UnOp::Neg,
                     ast::UnaryOp::BitNot => UnOp::BitNot,
@@ -1781,8 +1781,8 @@ impl Builder<'_> {
                 self.short_circuit(op, lhs, rhs, dest);
             }
             ExprKind::Binary { op, lhs, rhs } => {
-                let a = self.operand(lhs);
-                let b = self.operand(rhs);
+                let a = self.deref_operand(lhs);
+                let b = self.deref_operand(rhs);
                 self.set(&dest, Rvalue::Binary(op, a, b));
             }
             ExprKind::PrepTest { prep, operand } => {

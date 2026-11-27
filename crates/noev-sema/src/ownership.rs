@@ -5,15 +5,16 @@
 //! effects compared, and loop bodies are checked knowing they may run again. It tracks:
 //!
 //! - which places have been moved, to catch use after move and values left unconsumed;
-//! - which places are lent, and to whom (a call, a variable, a `ctrl` block), with lexical
-//!   lifetimes: a lend held by a variable lasts to the end of its block;
+//! - which places are lent, and to whom (a call, a variable, a `ctrl` block), with
+//!   non-lexical, path-sensitive lifetimes: a variable's lend lives only along paths that
+//!   still use it;
 //! - facts about integers, to prove array indices differ and are in range;
 //! - whether the code is in a reversible context.
 
 use noev_syntax::ast::*;
 use noev_syntax::{Diagnostic, FxHashMap, Severity, Span, Symbol};
 
-use crate::check::{Adjust, Callee, LocalId, Res, Typed};
+use crate::check::{Adjust, BorrowRoot, BorrowSource, Callee, LocalId, Res, Typed};
 use crate::facts::{self, Fact, Linear, Var};
 use crate::prelude::{Builtin, Reversible};
 use crate::ty::{Kind, Ty, TyKind};
@@ -22,6 +23,8 @@ use crate::ty::{Kind, Ty, TyKind};
 pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
     let irreversible = infer_reversibility(ast, typed);
     let prints = infer_printing(ast, typed);
+    let method_fields = infer_method_fields(ast, typed);
+    let return_borrows = infer_return_borrows(ast, typed);
     let mut checker = Owner {
         ast,
         module: ModuleId::from_index(0),
@@ -29,6 +32,8 @@ pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
         irreversible,
         preparable: None,
         prints,
+        method_fields,
+        return_borrows,
         diagnostics: Vec::new(),
         locals: vec![LocalInfo::default(); typed.locals.len()],
         order: 0,
@@ -43,8 +48,11 @@ pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
         unsafe_depth: 0,
         diverged: false,
         returns_ref: false,
+        current_fn: None,
         lent_match: false,
         assume_copy: Vec::new(),
+        liveness: None,
+        current_live: LiveSet::default(),
     };
     let mut copy_needs = FxHashMap::default();
     for (index, decl) in ast.all_fns().iter().enumerate() {
@@ -171,6 +179,18 @@ struct Lend {
     holder: Holder,
     span: Span,
     alive: bool,
+    /// True when this lend only locks an intermediate local reference variable while a
+    /// derived reference is live; the underlying storage is tracked by cloned origin lends.
+    reborrow: bool,
+}
+
+/// Which fields of `self` a same-package struct method (`ref self` or `mut self`) uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MethodFields {
+    /// Uses `self` as a whole (or is not a struct method taking `ref`/`mut self`).
+    Whole,
+    /// Uses only these `(field_index, mutable)` accesses on `self`.
+    Fields(Vec<(u32, bool)>),
 }
 
 /// How the surrounding code uses a value.
@@ -216,6 +236,10 @@ struct Owner<'a> {
     preparable: Option<Vec<Option<Irreversible>>>,
     /// For each function, where it prints (directly or through a call), if it does.
     prints: Vec<Option<Span>>,
+    /// For each struct method, which fields of `self` it touches.
+    method_fields: Vec<MethodFields>,
+    /// For each function returning references, which parameters (and fields) it may borrow from.
+    return_borrows: Vec<Vec<BorrowSource>>,
     diagnostics: Vec<Diagnostic>,
     locals: Vec<LocalInfo>,
     order: u32,
@@ -236,13 +260,20 @@ struct Owner<'a> {
     unsafe_depth: u32,
     /// Control never reaches the current point (after `return`, `break` or `continue`).
     diverged: bool,
-    /// Whether the current function returns a reference.
+    /// Whether the current function returns a reference (directly or in a struct/enum/tuple).
     returns_ref: bool,
+    /// The function currently being checked.
+    current_fn: Option<FnId>,
     /// While binding the pattern of a `match` on a lent value, where nothing is taken.
     lent_match: bool,
     /// The inferable type parameters taken to be `Copy` while checking this body
     /// (`spec/types.md` §6).
     assume_copy: Vec<Ty>,
+    /// Backward liveness of reference-holding locals in the current function; `None` when the
+    /// function declares none.
+    liveness: Option<Liveness>,
+    /// Reference-holding locals live immediately after the current operation.
+    current_live: LiveSet,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -716,6 +747,1350 @@ fn walk_expr(
 }
 
 // ---------------------------------------------------------------------------------------
+// Field-level method lends (`spec/ownership.md` §5)
+// ---------------------------------------------------------------------------------------
+
+/// For each function, which fields of `self` it touches when it is a same-package struct
+/// method taking `ref self` or `mut self`.
+fn infer_method_fields(ast: &Ast, typed: &Typed) -> Vec<MethodFields> {
+    let n = ast.all_fns().len();
+    let mut direct: Vec<MethodFields> = vec![MethodFields::Whole; n];
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+    for (index, decl) in ast.all_fns().iter().enumerate() {
+        let Some(body) = decl.body else { continue };
+        let info = &typed.fns[index];
+        let Some(owner) = info.owner else { continue };
+        if typed.types.structs[owner.index()].variants.is_some() {
+            continue;
+        }
+        let Some(self_local) = info.self_local else {
+            continue;
+        };
+        if !matches!(info.sig.receiver, Some(OwnKind::Ref | OwnKind::Mut)) {
+            continue;
+        }
+        let mut collector = SelfFieldCollector {
+            ast,
+            typed,
+            owner,
+            self_local,
+            module: typed.fn_modules[index],
+            whole: false,
+            fields: Vec::new(),
+            calls: Vec::new(),
+        };
+        collector.block(body);
+        if !collector.whole {
+            direct[index] = MethodFields::Fields(collector.fields);
+            edges[index] = collector.calls;
+        }
+    }
+
+    // Propagate accessed fields across same-struct `self.other_method()` calls until fixpoint.
+    let mut result = direct;
+    loop {
+        let mut changed = false;
+        for f in 0..n {
+            if matches!(result[f], MethodFields::Whole) || edges[f].is_empty() {
+                continue;
+            }
+            let mut next = match &result[f] {
+                MethodFields::Fields(list) => list.clone(),
+                MethodFields::Whole => continue,
+            };
+            let mut promote_whole = false;
+            for &g in &edges[f] {
+                match &result[g] {
+                    MethodFields::Whole => {
+                        promote_whole = true;
+                        break;
+                    }
+                    MethodFields::Fields(g_fields) => {
+                        for &(idx, m) in g_fields {
+                            record_field_access(&mut next, idx, m);
+                        }
+                    }
+                }
+            }
+            let updated = if promote_whole {
+                MethodFields::Whole
+            } else {
+                MethodFields::Fields(next)
+            };
+            if updated != result[f] {
+                result[f] = updated;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    result
+}
+
+fn record_field_access(list: &mut Vec<(u32, bool)>, idx: u32, mutable: bool) {
+    if let Some(entry) = list.iter_mut().find(|(i, _)| *i == idx) {
+        entry.1 |= mutable;
+    } else {
+        list.push((idx, mutable));
+    }
+}
+
+struct SelfFieldCollector<'a> {
+    ast: &'a Ast,
+    typed: &'a Typed,
+    owner: crate::ty::StructId,
+    self_local: LocalId,
+    module: ModuleId,
+    whole: bool,
+    fields: Vec<(u32, bool)>,
+    calls: Vec<usize>,
+}
+
+impl SelfFieldCollector<'_> {
+    fn is_self(&self, id: ExprId) -> bool {
+        matches!(self.ast.expr(id).kind, ExprKind::Name(_))
+            && self.typed.res[id.index()] == Res::Local(self.self_local)
+    }
+
+    fn field_index(&self, name: Symbol) -> Option<u32> {
+        self.typed.types.structs[self.owner.index()]
+            .fields
+            .iter()
+            .position(|(n, _)| *n == name)
+            .map(|i| i as u32)
+    }
+
+    fn block(&mut self, block: BlockId) {
+        for &stmt in self.ast.list(self.ast.block(block).stmts) {
+            if self.whole {
+                return;
+            }
+            match self.ast.stmt(stmt).kind {
+                StmtKind::Let { init, .. } => self.expr(init, false),
+                StmtKind::Assign { place, value, .. } => {
+                    self.expr(value, false);
+                    self.expr(place, true);
+                }
+                StmtKind::Return(Some(e))
+                | StmtKind::Assert(e)
+                | StmtKind::Expr { expr: e, .. } => self.expr(e, false),
+                StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
+            }
+        }
+    }
+
+    fn expr(&mut self, id: ExprId, mut mutable: bool) {
+        if self.whole {
+            return;
+        }
+        if matches!(
+            self.typed.adjust[id.index()],
+            Adjust::Lend { mutable: true }
+        ) {
+            mutable = true;
+        }
+        let ast = self.ast;
+        match ast.expr(id).kind {
+            ExprKind::Name(_) => {
+                if self.typed.res[id.index()] == Res::Local(self.self_local) {
+                    self.whole = true;
+                }
+            }
+            ExprKind::Field { base, name } => {
+                if self.is_self(base) {
+                    if let Some(idx) = self.field_index(name) {
+                        record_field_access(&mut self.fields, idx, mutable);
+                    } else {
+                        self.whole = true;
+                    }
+                } else {
+                    self.expr(base, mutable);
+                }
+            }
+            ExprKind::TupleIndex { base, .. } => self.expr(base, mutable),
+            ExprKind::Index { base, index } => {
+                self.expr(base, mutable);
+                self.expr(index, false);
+            }
+            ExprKind::Own { kind, place } => {
+                self.expr(place, mutable || kind == OwnKind::Mut);
+            }
+            ExprKind::MethodCall { receiver, args, .. } => {
+                for &arg in ast.list(args) {
+                    self.expr(arg, false);
+                }
+                if self.is_self(receiver) {
+                    let same_struct_method = match self.typed.callees[id.index()] {
+                        Some(Callee::Fn(g)) => {
+                            let g_info = &self.typed.fns[g.index()];
+                            (g_info.owner == Some(self.owner)
+                                && matches!(g_info.sig.receiver, Some(OwnKind::Ref | OwnKind::Mut))
+                                && !other_package(
+                                    ast,
+                                    self.typed.fn_modules[g.index()],
+                                    self.module,
+                                ))
+                            .then_some(g.index())
+                        }
+                        _ => None,
+                    };
+                    if let Some(g) = same_struct_method {
+                        if !self.calls.contains(&g) {
+                            self.calls.push(g);
+                        }
+                    } else {
+                        self.whole = true;
+                    }
+                } else {
+                    let recv_mut = self.typed.receivers[id.index()] == Some(OwnKind::Mut);
+                    self.expr(receiver, recv_mut);
+                }
+            }
+            ExprKind::Binary { lhs, rhs, .. } if self.typed.is_operator_call(ast, id) => {
+                let recv_mut = self.typed.receivers[id.index()] == Some(OwnKind::Mut);
+                self.expr(lhs, recv_mut);
+                self.expr(rhs, false);
+            }
+            ExprKind::Unary { operand, .. } if self.typed.is_operator_call(ast, id) => {
+                let recv_mut = self.typed.receivers[id.index()] == Some(OwnKind::Mut);
+                self.expr(operand, recv_mut);
+            }
+            ExprKind::Call { args, .. } => {
+                for &arg in ast.list(args) {
+                    self.expr(arg, false);
+                }
+            }
+            ExprKind::Tuple(l) | ExprKind::Array(l) => {
+                for &e in ast.list(l) {
+                    self.expr(e, false);
+                }
+            }
+            ExprKind::ArrayRepeat { value, count } => {
+                self.expr(value, false);
+                self.expr(count, false);
+            }
+            ExprKind::StructLit { fields, .. } => {
+                for f in ast.list(fields) {
+                    if let Some(v) = f.value {
+                        self.expr(v, false);
+                    }
+                }
+            }
+            ExprKind::Str(parts) => {
+                for p in ast.list(parts) {
+                    if let StrPart::Value { expr, .. } = *p {
+                        self.expr(expr, false);
+                    }
+                }
+            }
+            ExprKind::Unary { operand, .. } | ExprKind::Adj(operand) => self.expr(operand, false),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.expr(lhs, false);
+                self.expr(rhs, false);
+            }
+            ExprKind::BraTest { operand, parts, .. } => {
+                for e in label_values(ast, parts) {
+                    self.expr(e, false);
+                }
+                self.expr(operand, false);
+            }
+            ExprKind::Ket { parts, .. } => {
+                for e in label_values(ast, parts) {
+                    self.expr(e, false);
+                }
+            }
+            ExprKind::PrepTest { prep, operand } => {
+                if let ExprKind::Call { args, .. } = ast.expr(prep).kind {
+                    for &a in ast.list(args) {
+                        self.expr(a, false);
+                    }
+                }
+                self.expr(operand, false);
+            }
+            ExprKind::Expectation {
+                observable,
+                precision,
+                ..
+            } => {
+                self.expr(observable, false);
+                if let Some(p) = precision {
+                    self.expr(p, false);
+                }
+            }
+            ExprKind::Overlap {
+                observable,
+                precision,
+                ..
+            } => {
+                if let Some(o) = observable {
+                    self.expr(o, false);
+                }
+                if let Some(p) = precision {
+                    self.expr(p, false);
+                }
+            }
+            ExprKind::Sample { shots, .. } => self.expr(shots, false),
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block(b),
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                self.expr(cond, false);
+                self.block(then);
+                if let Some(o) = otherwise {
+                    self.expr(o, false);
+                }
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.expr(scrutinee, false);
+                for arm in ast.list(arms) {
+                    self.expr(arm.body, false);
+                }
+            }
+            ExprKind::While { cond, body } => {
+                self.expr(cond, false);
+                self.block(body);
+            }
+            ExprKind::For {
+                start, end, body, ..
+            } => {
+                self.expr(start, false);
+                self.expr(end, false);
+                self.block(body);
+            }
+            ExprKind::Ctrl { controls, body } => {
+                for &c in ast.list(controls) {
+                    self.expr(c, false);
+                }
+                self.block(body);
+            }
+            ExprKind::With { with, body } => {
+                self.block(with);
+                self.block(body);
+            }
+            _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Package-wide return-borrow inference (`spec/ownership.md` §5)
+// ---------------------------------------------------------------------------------------
+
+/// For every function, which parameters (and field paths) its returned reference(s) may
+/// borrow from: taken verbatim from [`FnInfo::return_borrows`] when explicit or elided, and
+/// inferred from the body otherwise.
+fn infer_return_borrows(ast: &Ast, typed: &Typed) -> Vec<Vec<BorrowSource>> {
+    let n = ast.all_fns().len();
+    let mut result: Vec<Vec<BorrowSource>> = Vec::with_capacity(n);
+    let mut infer: Vec<usize> = Vec::new();
+    for i in 0..n {
+        if let Some(fixed) = &typed.fns[i].return_borrows {
+            result.push(fixed.clone());
+        } else {
+            result.push(Vec::new());
+            if ast.all_fns()[i].body.is_some() && typed.types.has_ref(typed.fns[i].sig.ret) {
+                infer.push(i);
+            }
+        }
+    }
+    if infer.is_empty() {
+        return result;
+    }
+
+    loop {
+        let mut changed = false;
+        for &index in &infer {
+            let body = ast.all_fns()[index].body.expect("filtered");
+            let found = infer_fn_return_borrows(ast, typed, index, body, &result);
+            if found != result[index] {
+                result[index] = found;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    result
+}
+
+fn infer_fn_return_borrows(
+    ast: &Ast,
+    typed: &Typed,
+    fn_index: usize,
+    body: BlockId,
+    known: &[Vec<BorrowSource>],
+) -> Vec<BorrowSource> {
+    let info = &typed.fns[fn_index];
+    let mut env: FxHashMap<LocalId, Vec<BorrowSource>> = FxHashMap::default();
+    if let Some(self_local) = info.self_local {
+        env.insert(
+            self_local,
+            vec![BorrowSource {
+                root: BorrowRoot::Receiver,
+                fields: Vec::new(),
+            }],
+        );
+    }
+    for (i, &param) in info.params.iter().enumerate() {
+        if typed.types.has_ref(typed.local(param).ty) {
+            env.insert(
+                param,
+                vec![BorrowSource {
+                    root: BorrowRoot::Param(i),
+                    fields: Vec::new(),
+                }],
+            );
+        }
+    }
+    let mut returned: Vec<BorrowSource> = Vec::new();
+    let mut walker = BorrowInfer {
+        ast,
+        typed,
+        fn_index,
+        known,
+        env,
+        returned: Vec::new(),
+    };
+    // Run at most twice so loop-carried reassignments converge.
+    for _ in 0..2 {
+        let before = walker.env.len() + walker.returned.len();
+        let tail = walker.block(body);
+        merge_sources(&mut walker.returned, &tail);
+        if walker.env.len() + walker.returned.len() == before {
+            break;
+        }
+    }
+    returned.extend(walker.returned);
+    returned
+}
+
+fn merge_sources(dst: &mut Vec<BorrowSource>, src: &[BorrowSource]) {
+    for s in src {
+        if !dst.contains(s) {
+            dst.push(s.clone());
+        }
+    }
+}
+
+struct BorrowInfer<'a> {
+    ast: &'a Ast,
+    typed: &'a Typed,
+    fn_index: usize,
+    known: &'a [Vec<BorrowSource>],
+    env: FxHashMap<LocalId, Vec<BorrowSource>>,
+    returned: Vec<BorrowSource>,
+}
+
+impl BorrowInfer<'_> {
+    fn param_root(&self, local: LocalId) -> Option<BorrowRoot> {
+        let info = &self.typed.fns[self.fn_index];
+        if info.self_local == Some(local) {
+            return Some(BorrowRoot::Receiver);
+        }
+        info.params
+            .iter()
+            .position(|&p| p == local)
+            .filter(|&i| self.typed.types.has_ref(info.sig.params[i]))
+            .map(BorrowRoot::Param)
+    }
+
+    /// If `id` is a place path rooted directly at a parameter (e.g. `self.a.b` or `p.a`),
+    /// returns that parameter and its leading struct field indices.
+    fn direct_param_place(&self, id: ExprId) -> Option<BorrowSource> {
+        let ast = self.ast;
+        match ast.expr(id).kind {
+            ExprKind::Own {
+                kind: OwnKind::Ref | OwnKind::Mut,
+                place,
+            } => self.direct_param_place(place),
+            ExprKind::Name(_) => match self.typed.res[id.index()] {
+                Res::Local(l) => Some(BorrowSource {
+                    root: self.param_root(l)?,
+                    fields: Vec::new(),
+                }),
+                _ => None,
+            },
+            ExprKind::Field { base, name } => {
+                let mut src = self.direct_param_place(base)?;
+                let base_ty = self.typed.types.deref(self.typed.ty(base));
+                if let TyKind::Struct(s) = *self.typed.types.kind(base_ty)
+                    && let Some(idx) = self.typed.types.structs[s.index()]
+                        .fields
+                        .iter()
+                        .position(|(n, _)| *n == name)
+                {
+                    src.fields.push(idx as u32);
+                }
+                Some(src)
+            }
+            ExprKind::TupleIndex { base, .. } | ExprKind::Index { base, .. } => {
+                self.direct_param_place(base)
+            }
+            _ => None,
+        }
+    }
+
+    fn bind_pat(&mut self, pat: PatId, sources: &[BorrowSource]) {
+        if sources.is_empty() {
+            return;
+        }
+        match self.ast.pat(pat).kind {
+            PatKind::Name(_) => {
+                if let Some(local) = self.typed.pat_locals[pat.index()]
+                    && self.typed.types.has_ref(self.typed.local(local).ty)
+                {
+                    merge_sources(self.env.entry(local).or_default(), sources);
+                }
+            }
+            PatKind::Tuple(pats) | PatKind::Array(pats) => {
+                for &p in self.ast.list(pats) {
+                    self.bind_pat(p, sources);
+                }
+            }
+            PatKind::Variant { data, .. } => match data {
+                PatData::None => {}
+                PatData::Tuple(pats) => {
+                    for &p in self.ast.list(pats) {
+                        self.bind_pat(p, sources);
+                    }
+                }
+                PatData::Fields { fields, .. } => {
+                    for f in self.ast.list(fields) {
+                        if let Some(p) = f.pat {
+                            self.bind_pat(p, sources);
+                        }
+                    }
+                }
+            },
+            PatKind::Wildcard | PatKind::Literal(_) => {}
+        }
+    }
+
+    fn block(&mut self, block: BlockId) -> Vec<BorrowSource> {
+        let stmts = self.ast.list(self.ast.block(block).stmts);
+        let mut tail = Vec::new();
+        for (i, &stmt) in stmts.iter().enumerate() {
+            match self.ast.stmt(stmt).kind {
+                StmtKind::Expr { expr, semi: false } if i + 1 == stmts.len() => {
+                    tail = self.expr(expr);
+                }
+                StmtKind::Let { pat, init, .. } => {
+                    let s = self.expr(init);
+                    self.bind_pat(pat, &s);
+                }
+                StmtKind::Assign { place, value, .. } => {
+                    let s = self.expr(value);
+                    self.expr(place);
+                    if let Some(root) = root_local(self.ast, self.typed, place)
+                        && self.typed.types.has_ref(self.typed.local(root).ty)
+                    {
+                        merge_sources(self.env.entry(root).or_default(), &s);
+                    }
+                }
+                StmtKind::Return(Some(e)) => {
+                    let s = self.expr(e);
+                    merge_sources(&mut self.returned, &s);
+                }
+                StmtKind::Assert(e) | StmtKind::Expr { expr: e, .. } => {
+                    self.expr(e);
+                }
+                StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
+            }
+        }
+        tail
+    }
+
+    fn expr(&mut self, id: ExprId) -> Vec<BorrowSource> {
+        let ast = self.ast;
+        let ty = self.typed.ty(id);
+        match ast.expr(id).kind {
+            ExprKind::Name(_)
+            | ExprKind::Field { .. }
+            | ExprKind::TupleIndex { .. }
+            | ExprKind::Index { .. }
+            | ExprKind::Own { .. } => {
+                if let ExprKind::Index { base, index } = ast.expr(id).kind {
+                    self.expr(index);
+                    let _ = base;
+                }
+                if let Some(src) = self.direct_param_place(id) {
+                    return vec![src];
+                }
+                let place_expr = match ast.expr(id).kind {
+                    ExprKind::Own { place, .. } => place,
+                    _ => id,
+                };
+                if let Some(root) = root_local(ast, self.typed, place_expr)
+                    && let Some(sources) = self.env.get(&root)
+                {
+                    return sources.clone();
+                }
+                Vec::new()
+            }
+            ExprKind::Tuple(l) | ExprKind::Array(l) => {
+                let mut out = Vec::new();
+                for &e in ast.list(l) {
+                    let s = self.expr(e);
+                    if self.typed.types.has_ref(ty) {
+                        merge_sources(&mut out, &s);
+                    }
+                }
+                out
+            }
+            ExprKind::StructLit { fields, .. } => {
+                let mut out = Vec::new();
+                for f in ast.list(fields) {
+                    let s = match f.value {
+                        Some(v) => self.expr(v),
+                        None => self
+                            .env
+                            .iter()
+                            .filter(|&(&l, _)| self.typed.local(l).name == f.name)
+                            .flat_map(|(_, s)| s.iter().cloned())
+                            .collect(),
+                    };
+                    if self.typed.types.has_ref(ty) {
+                        merge_sources(&mut out, &s);
+                    }
+                }
+                out
+            }
+            ExprKind::Call { args, .. } => self.call(id, None, ast.list(args)),
+            ExprKind::MethodCall { receiver, args, .. } => {
+                self.call(id, Some(receiver), ast.list(args))
+            }
+            ExprKind::Binary { lhs, rhs, .. } if self.typed.is_operator_call(ast, id) => {
+                self.call(id, Some(lhs), &[rhs])
+            }
+            ExprKind::Unary { operand, .. } if self.typed.is_operator_call(ast, id) => {
+                self.call(id, Some(operand), &[])
+            }
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                self.expr(cond);
+                let mut out = self.block(then);
+                if let Some(o) = otherwise {
+                    let s = self.expr(o);
+                    merge_sources(&mut out, &s);
+                }
+                if self.typed.types.has_ref(ty) {
+                    out
+                } else {
+                    Vec::new()
+                }
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                let scr = self.expr(scrutinee);
+                let mut out = Vec::new();
+                for arm in ast.list(arms) {
+                    self.bind_pat(arm.pat, &scr);
+                    let s = self.expr(arm.body);
+                    if self.typed.types.has_ref(ty) {
+                        merge_sources(&mut out, &s);
+                    }
+                }
+                out
+            }
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block(b),
+            ExprKind::With { with, body } => {
+                self.block(with);
+                self.block(body)
+            }
+            ExprKind::While { cond, body } => {
+                self.expr(cond);
+                self.block(body);
+                Vec::new()
+            }
+            ExprKind::For {
+                start, end, body, ..
+            } => {
+                self.expr(start);
+                self.expr(end);
+                self.block(body);
+                Vec::new()
+            }
+            ExprKind::Ctrl { controls, body } => {
+                for &c in ast.list(controls) {
+                    self.expr(c);
+                }
+                self.block(body);
+                Vec::new()
+            }
+            ExprKind::Unary { operand, .. } | ExprKind::Adj(operand) => self.expr(operand),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn call(&mut self, id: ExprId, receiver: Option<ExprId>, args: &[ExprId]) -> Vec<BorrowSource> {
+        let recv_src = receiver.map(|r| (r, self.expr(r)));
+        let arg_srcs: Vec<(ExprId, Vec<BorrowSource>)> =
+            args.iter().map(|&a| (a, self.expr(a))).collect();
+        let ret = self.typed.ty(id);
+        if !self.typed.types.has_ref(ret) {
+            return Vec::new();
+        }
+        let Some(callee) = self.typed.callees[id.index()] else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        match callee {
+            Callee::Variant(..) => {
+                for (_, s) in &arg_srcs {
+                    merge_sources(&mut out, s);
+                }
+            }
+            Callee::Builtin(_) | Callee::Convert(_) | Callee::TryConvert(_) => {
+                if let Some((_, s)) = &recv_src {
+                    merge_sources(&mut out, s);
+                } else {
+                    for (_, s) in &arg_srcs {
+                        merge_sources(&mut out, s);
+                    }
+                }
+            }
+            Callee::Fn(g) => {
+                let caller_mod = self.typed.fn_modules[self.fn_index];
+                let callee_mod = self.typed.fn_modules[g.index()];
+                let g_sources = if other_package(self.ast, callee_mod, caller_mod) {
+                    self.typed.fns[g.index()]
+                        .return_borrows
+                        .as_deref()
+                        .unwrap_or(&[])
+                } else {
+                    &self.known[g.index()]
+                };
+                for src in g_sources {
+                    let target = match src.root {
+                        BorrowRoot::Receiver => recv_src.as_ref(),
+                        BorrowRoot::Param(k) => arg_srcs.get(k),
+                    };
+                    let Some((expr, sources)) = target else {
+                        continue;
+                    };
+                    let direct = self.direct_param_place(*expr);
+                    for s in sources {
+                        let mut mapped = s.clone();
+                        if !src.fields.is_empty() && direct.as_ref() == Some(s) {
+                            mapped.fields.extend_from_slice(&src.fields);
+                        }
+                        if !out.contains(&mapped) {
+                            out.push(mapped);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Polonius-style backward liveness for non-lexical lifetimes (`spec/ownership.md` §5)
+// ---------------------------------------------------------------------------------------
+
+/// Compact bitset over the reference-holding locals in one function.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct LiveSet {
+    low: u64,
+    high: Vec<u64>,
+}
+
+impl LiveSet {
+    fn clear(&mut self) {
+        self.low = 0;
+        self.high.clear();
+    }
+
+    fn insert(&mut self, bit: usize) {
+        if bit < 64 {
+            self.low |= 1u64 << bit;
+        } else {
+            let word = (bit - 64) / 64;
+            if self.high.len() <= word {
+                self.high.resize(word + 1, 0);
+            }
+            self.high[word] |= 1u64 << ((bit - 64) % 64);
+        }
+    }
+
+    fn remove(&mut self, bit: usize) {
+        if bit < 64 {
+            self.low &= !(1u64 << bit);
+        } else {
+            let word = (bit - 64) / 64;
+            if let Some(slot) = self.high.get_mut(word) {
+                *slot &= !(1u64 << ((bit - 64) % 64));
+            }
+        }
+    }
+
+    fn contains(&self, bit: usize) -> bool {
+        if bit < 64 {
+            (self.low & (1u64 << bit)) != 0
+        } else {
+            let word = (bit - 64) / 64;
+            self.high
+                .get(word)
+                .is_some_and(|w| (*w & (1u64 << ((bit - 64) % 64))) != 0)
+        }
+    }
+
+    fn union_with(&mut self, other: &LiveSet) {
+        self.low |= other.low;
+        if other.high.len() > self.high.len() {
+            self.high.resize(other.high.len(), 0);
+        }
+        for (a, &b) in self.high.iter_mut().zip(&other.high) {
+            *a |= b;
+        }
+    }
+}
+
+/// Backward liveness of reference-holding local variables in one function.
+struct Liveness {
+    /// Maps each reference-holding local in the function to its bit index.
+    bits: FxHashMap<LocalId, usize>,
+    /// Reference-holding locals live strictly after each expression.
+    after_expr: FxHashMap<ExprId, LiveSet>,
+    /// Reference-holding locals live strictly after each statement.
+    after_stmt: FxHashMap<StmtId, LiveSet>,
+    /// Reference-holding locals live strictly after a shorthand struct field `(struct_lit, idx)`.
+    after_shorthand: FxHashMap<(ExprId, usize), LiveSet>,
+}
+
+impl Liveness {
+    fn contains(&self, set: &LiveSet, local: LocalId) -> bool {
+        self.bits.get(&local).is_none_or(|&bit| set.contains(bit))
+    }
+}
+
+/// Computes backward liveness for `body`, or returns `None` when `body` declares no
+/// reference-holding locals (fast path: zero overhead for functions without local borrows).
+fn compute_liveness(ast: &Ast, typed: &Typed, f: FnId, body: BlockId) -> Option<Liveness> {
+    let mut bits: FxHashMap<LocalId, usize> = FxHashMap::default();
+    let mut by_name: FxHashMap<Symbol, Vec<usize>> = FxHashMap::default();
+    let collect_pat = |pat: PatId,
+                       bits: &mut FxHashMap<LocalId, usize>,
+                       by_name: &mut FxHashMap<Symbol, Vec<usize>>| {
+        let mut stack = vec![pat];
+        while let Some(p) = stack.pop() {
+            match ast.pat(p).kind {
+                PatKind::Name(_) => {
+                    if let Some(l) = typed.pat_locals[p.index()]
+                        && typed.types.has_ref(typed.local(l).ty)
+                    {
+                        let idx = bits.len();
+                        if bits.entry(l).or_insert(idx) == &idx {
+                            by_name.entry(typed.local(l).name).or_default().push(idx);
+                        }
+                    }
+                }
+                PatKind::Tuple(ps) | PatKind::Array(ps) => stack.extend(ast.list(ps)),
+                PatKind::Variant { data, .. } => match data {
+                    PatData::None => {}
+                    PatData::Tuple(ps) => stack.extend(ast.list(ps)),
+                    PatData::Fields { fields, .. } => {
+                        stack.extend(ast.list(fields).iter().filter_map(|f| f.pat));
+                    }
+                },
+                PatKind::Wildcard | PatKind::Literal(_) => {}
+            }
+        }
+    };
+
+    // Scan `body` for any bound reference-holding locals (`let` or `match` patterns).
+    let mut blocks = vec![body];
+    let mut exprs = Vec::new();
+    while !blocks.is_empty() || !exprs.is_empty() {
+        while let Some(b) = blocks.pop() {
+            for &s in ast.list(ast.block(b).stmts) {
+                match ast.stmt(s).kind {
+                    StmtKind::Let { pat, init, .. } => {
+                        collect_pat(pat, &mut bits, &mut by_name);
+                        exprs.push(init);
+                    }
+                    StmtKind::Assign { place, value, .. } => {
+                        exprs.push(place);
+                        exprs.push(value);
+                    }
+                    StmtKind::Return(Some(e))
+                    | StmtKind::Assert(e)
+                    | StmtKind::Expr { expr: e, .. } => exprs.push(e),
+                    StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
+                }
+            }
+        }
+        while let Some(e) = exprs.pop() {
+            match ast.expr(e).kind {
+                ExprKind::Match { scrutinee, arms } => {
+                    exprs.push(scrutinee);
+                    for arm in ast.list(arms) {
+                        collect_pat(arm.pat, &mut bits, &mut by_name);
+                        exprs.push(arm.body);
+                    }
+                }
+                ExprKind::Block(b) | ExprKind::Unsafe(b) => blocks.push(b),
+                ExprKind::If {
+                    cond,
+                    then,
+                    otherwise,
+                } => {
+                    exprs.push(cond);
+                    blocks.push(then);
+                    exprs.extend(otherwise);
+                }
+                ExprKind::While { cond, body } => {
+                    exprs.push(cond);
+                    blocks.push(body);
+                }
+                ExprKind::For {
+                    start, end, body, ..
+                } => {
+                    exprs.push(start);
+                    exprs.push(end);
+                    blocks.push(body);
+                }
+                ExprKind::Ctrl { controls, body } => {
+                    exprs.extend(ast.list(controls));
+                    blocks.push(body);
+                }
+                ExprKind::With { with, body } => {
+                    blocks.push(with);
+                    blocks.push(body);
+                }
+                ExprKind::Tuple(l) | ExprKind::Array(l) => exprs.extend(ast.list(l)),
+                ExprKind::ArrayRepeat { value, count } => {
+                    exprs.push(value);
+                    exprs.push(count);
+                }
+                ExprKind::StructLit { fields, .. } => {
+                    exprs.extend(ast.list(fields).iter().filter_map(|f| f.value));
+                }
+                ExprKind::Field { base, .. }
+                | ExprKind::TupleIndex { base, .. }
+                | ExprKind::Unary { operand: base, .. }
+                | ExprKind::Own { place: base, .. }
+                | ExprKind::Adj(base) => exprs.push(base),
+                ExprKind::Index { base, index } => {
+                    exprs.push(base);
+                    exprs.push(index);
+                }
+                ExprKind::Call { args, .. } => exprs.extend(ast.list(args)),
+                ExprKind::MethodCall { receiver, args, .. } => {
+                    exprs.push(receiver);
+                    exprs.extend(ast.list(args));
+                }
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    exprs.push(lhs);
+                    exprs.push(rhs);
+                }
+                ExprKind::Str(parts) => {
+                    for p in ast.list(parts) {
+                        if let StrPart::Value { expr, .. } = *p {
+                            exprs.push(expr);
+                        }
+                    }
+                }
+                ExprKind::BraTest { operand, parts, .. } => {
+                    exprs.push(operand);
+                    exprs.extend(label_values(ast, parts));
+                }
+                ExprKind::Ket { parts, .. } => exprs.extend(label_values(ast, parts)),
+                ExprKind::PrepTest { prep, operand } => {
+                    if let ExprKind::Call { args, .. } = ast.expr(prep).kind {
+                        exprs.extend(ast.list(args));
+                    }
+                    exprs.push(operand);
+                }
+                ExprKind::Sample { shots, .. } => exprs.push(shots),
+                _ => {}
+            }
+        }
+    }
+
+    if bits.is_empty() {
+        return None;
+    }
+    let _ = f;
+    let mut pass = LivenessPass {
+        ast,
+        typed,
+        bits,
+        by_name,
+        after_expr: FxHashMap::default(),
+        after_stmt: FxHashMap::default(),
+        after_shorthand: FxHashMap::default(),
+        loops: Vec::new(),
+    };
+    let mut live = LiveSet::default();
+    pass.block(body, &mut live);
+    Some(Liveness {
+        bits: pass.bits,
+        after_expr: pass.after_expr,
+        after_stmt: pass.after_stmt,
+        after_shorthand: pass.after_shorthand,
+    })
+}
+
+struct LivenessPass<'a> {
+    ast: &'a Ast,
+    typed: &'a Typed,
+    bits: FxHashMap<LocalId, usize>,
+    by_name: FxHashMap<Symbol, Vec<usize>>,
+    after_expr: FxHashMap<ExprId, LiveSet>,
+    after_stmt: FxHashMap<StmtId, LiveSet>,
+    after_shorthand: FxHashMap<(ExprId, usize), LiveSet>,
+    /// Stack of `(loop_head_live, loop_exit_live)`.
+    loops: Vec<(LiveSet, LiveSet)>,
+}
+
+impl LivenessPass<'_> {
+    fn kill_pat(&self, pat: PatId, live: &mut LiveSet) {
+        match self.ast.pat(pat).kind {
+            PatKind::Name(_) => {
+                if let Some(l) = self.typed.pat_locals[pat.index()]
+                    && let Some(&bit) = self.bits.get(&l)
+                {
+                    live.remove(bit);
+                }
+            }
+            PatKind::Tuple(ps) | PatKind::Array(ps) => {
+                for &p in self.ast.list(ps) {
+                    self.kill_pat(p, live);
+                }
+            }
+            PatKind::Variant { data, .. } => match data {
+                PatData::None => {}
+                PatData::Tuple(ps) => {
+                    for &p in self.ast.list(ps) {
+                        self.kill_pat(p, live);
+                    }
+                }
+                PatData::Fields { fields, .. } => {
+                    for f in self.ast.list(fields) {
+                        if let Some(p) = f.pat {
+                            self.kill_pat(p, live);
+                        }
+                    }
+                }
+            },
+            PatKind::Wildcard | PatKind::Literal(_) => {}
+        }
+    }
+
+    fn place_subexprs_rev(&mut self, id: ExprId, live: &mut LiveSet) {
+        match self.ast.expr(id).kind {
+            ExprKind::Field { base, .. } | ExprKind::TupleIndex { base, .. } => {
+                self.place_subexprs_rev(base, live)
+            }
+            ExprKind::Index { base, index } => {
+                self.expr(index, live);
+                self.place_subexprs_rev(base, live);
+            }
+            _ => {}
+        }
+    }
+
+    fn block(&mut self, block: BlockId, live: &mut LiveSet) {
+        let stmts = self.ast.list(self.ast.block(block).stmts);
+        for &stmt in stmts.iter().rev() {
+            self.after_stmt.insert(stmt, live.clone());
+            match self.ast.stmt(stmt).kind {
+                StmtKind::Return(opt) => {
+                    live.clear();
+                    if let Some(e) = opt {
+                        self.expr(e, live);
+                    }
+                }
+                StmtKind::Break => {
+                    if let Some((_, exit)) = self.loops.last() {
+                        *live = exit.clone();
+                    } else {
+                        live.clear();
+                    }
+                }
+                StmtKind::Continue => {
+                    if let Some((head, _)) = self.loops.last() {
+                        *live = head.clone();
+                    } else {
+                        live.clear();
+                    }
+                }
+                StmtKind::Let { pat, init, .. } => {
+                    self.kill_pat(pat, live);
+                    self.expr(init, live);
+                }
+                StmtKind::Assign { op, place, value } => {
+                    if self.typed.callees[place.index()].is_some() {
+                        // Operator `a += b`: `value` runs first, then `place` is lent.
+                        if let Some(root) = root_local(self.ast, self.typed, place)
+                            && let Some(&bit) = self.bits.get(&root)
+                        {
+                            live.insert(bit);
+                        }
+                        self.place_subexprs_rev(place, live);
+                        self.expr(value, live);
+                    } else {
+                        if op == AssignOp::Assign
+                            && matches!(self.ast.expr(place).kind, ExprKind::Name(_))
+                            && let Res::Local(l) = self.typed.res[place.index()]
+                        {
+                            if let Some(&bit) = self.bits.get(&l) {
+                                live.remove(bit);
+                            }
+                        } else {
+                            self.expr(place, live);
+                        }
+                        self.expr(value, live);
+                    }
+                }
+                StmtKind::Assert(e) | StmtKind::Expr { expr: e, .. } => {
+                    self.expr(e, live);
+                }
+            }
+        }
+    }
+
+    fn expr(&mut self, id: ExprId, live: &mut LiveSet) {
+        self.after_expr.insert(id, live.clone());
+        let ast = self.ast;
+        match ast.expr(id).kind {
+            ExprKind::Name(_) => {
+                if let Res::Local(l) = self.typed.res[id.index()]
+                    && let Some(&bit) = self.bits.get(&l)
+                {
+                    live.insert(bit);
+                }
+            }
+            ExprKind::Field { base, .. }
+            | ExprKind::TupleIndex { base, .. }
+            | ExprKind::Unary { operand: base, .. }
+            | ExprKind::Own { place: base, .. }
+            | ExprKind::Adj(base) => self.expr(base, live),
+            ExprKind::Index { base, index } => {
+                self.expr(index, live);
+                self.expr(base, live);
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.expr(rhs, live);
+                self.expr(lhs, live);
+            }
+            ExprKind::Tuple(l) | ExprKind::Array(l) => {
+                for &e in ast.list(l).iter().rev() {
+                    self.expr(e, live);
+                }
+            }
+            ExprKind::ArrayRepeat { value, count } => {
+                self.expr(count, live);
+                self.expr(value, live);
+            }
+            ExprKind::Str(parts) => {
+                for p in ast.list(parts).iter().rev() {
+                    if let StrPart::Value { expr, .. } = *p {
+                        self.expr(expr, live);
+                    }
+                }
+            }
+            ExprKind::Ket { parts, .. } => {
+                for p in ast.list(parts).iter().rev() {
+                    if let KetPart::Value(e) = *p {
+                        self.expr(e, live);
+                    }
+                }
+            }
+            ExprKind::BraTest { operand, parts, .. } => {
+                self.expr(operand, live);
+                for p in ast.list(parts).iter().rev() {
+                    if let KetPart::Value(e) = *p {
+                        self.expr(e, live);
+                    }
+                }
+            }
+            ExprKind::PrepTest { prep, operand } => {
+                self.expr(operand, live);
+                if let ExprKind::Call { args, .. } = ast.expr(prep).kind {
+                    for &a in ast.list(args).iter().rev() {
+                        self.expr(a, live);
+                    }
+                }
+            }
+            ExprKind::StructLit { fields, .. } => {
+                for (idx, f) in ast.list(fields).iter().enumerate().rev() {
+                    match f.value {
+                        Some(v) => self.expr(v, live),
+                        None => {
+                            self.after_shorthand.insert((id, idx), live.clone());
+                            if let Some(bs) = self.by_name.get(&f.name) {
+                                for &bit in bs {
+                                    live.insert(bit);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::Call { args, .. } => {
+                for &a in ast.list(args).iter().rev() {
+                    self.expr(a, live);
+                }
+            }
+            ExprKind::MethodCall { receiver, args, .. } => {
+                let two_phase = is_place_expr(ast, receiver)
+                    && matches!(
+                        self.typed.receivers[id.index()],
+                        Some(OwnKind::Ref | OwnKind::Mut)
+                    );
+                if two_phase {
+                    // Forward order: place_subexprs(receiver), args, lend(receiver).
+                    if let Some(root) = root_local(ast, self.typed, receiver)
+                        && let Some(&bit) = self.bits.get(&root)
+                    {
+                        live.insert(bit);
+                    }
+                    for &a in ast.list(args).iter().rev() {
+                        self.expr(a, live);
+                    }
+                    self.place_subexprs_rev(receiver, live);
+                } else {
+                    for &a in ast.list(args).iter().rev() {
+                        self.expr(a, live);
+                    }
+                    self.expr(receiver, live);
+                }
+            }
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block(b, live),
+            ExprKind::With { with, body } => {
+                self.block(body, live);
+                self.block(with, live);
+            }
+            ExprKind::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                let after = live.clone();
+                let mut then_live = after.clone();
+                self.block(then, &mut then_live);
+                let mut else_live = after;
+                if let Some(o) = otherwise {
+                    self.expr(o, &mut else_live);
+                }
+                then_live.union_with(&else_live);
+                *live = then_live;
+                self.expr(cond, live);
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                let after = live.clone();
+                let mut joined = LiveSet::default();
+                for arm in ast.list(arms) {
+                    let mut arm_live = after.clone();
+                    self.expr(arm.body, &mut arm_live);
+                    self.kill_pat(arm.pat, &mut arm_live);
+                    joined.union_with(&arm_live);
+                }
+                *live = joined;
+                self.expr(scrutinee, live);
+            }
+            ExprKind::While { cond, body } => {
+                let exit = live.clone();
+                let mut head = exit.clone();
+                let limit = self.bits.len() + 2;
+                for _ in 0..limit {
+                    self.loops.push((head.clone(), exit.clone()));
+                    let mut body_in = head.clone();
+                    self.block(body, &mut body_in);
+                    self.loops.pop();
+                    let mut new_head = exit.clone();
+                    new_head.union_with(&body_in);
+                    self.expr(cond, &mut new_head);
+                    if new_head == head {
+                        break;
+                    }
+                    head = new_head;
+                }
+                *live = head;
+            }
+            ExprKind::For {
+                start, end, body, ..
+            } => {
+                let exit = live.clone();
+                let mut head = exit.clone();
+                let limit = self.bits.len() + 2;
+                for _ in 0..limit {
+                    self.loops.push((head.clone(), exit.clone()));
+                    let mut body_in = head.clone();
+                    self.block(body, &mut body_in);
+                    self.loops.pop();
+                    let mut new_head = exit.clone();
+                    new_head.union_with(&body_in);
+                    if new_head == head {
+                        break;
+                    }
+                    head = new_head;
+                }
+                *live = head;
+                self.expr(end, live);
+                self.expr(start, live);
+            }
+            ExprKind::Ctrl { controls, body } => {
+                self.block(body, live);
+                for &c in ast.list(controls).iter().rev() {
+                    self.expr(c, live);
+                }
+            }
+            ExprKind::Sample { shots, .. } => self.expr(shots, live),
+            ExprKind::Expectation {
+                observable,
+                precision,
+                ..
+            } => {
+                if let Some(p) = precision {
+                    self.expr(p, live);
+                }
+                self.expr(observable, live);
+            }
+            ExprKind::Overlap {
+                observable,
+                precision,
+                ..
+            } => {
+                if let Some(p) = precision {
+                    self.expr(p, live);
+                }
+                if let Some(o) = observable {
+                    self.expr(o, live);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn is_place_expr(ast: &Ast, id: ExprId) -> bool {
+    matches!(
+        ast.expr(id).kind,
+        ExprKind::Name(_)
+            | ExprKind::Field { .. }
+            | ExprKind::TupleIndex { .. }
+            | ExprKind::Index { .. }
+    )
+}
+
+// ---------------------------------------------------------------------------------------
 // Functions, blocks and statements
 // ---------------------------------------------------------------------------------------
 
@@ -896,7 +2271,10 @@ impl Owner<'_> {
         self.unsafe_depth = 0;
         self.diverged = false;
         self.order = 0;
-        self.returns_ref = matches!(self.typed.types.kind(info.sig.ret), TyKind::Ref { .. });
+        self.current_fn = Some(f);
+        self.returns_ref = self.typed.types.has_ref(info.sig.ret);
+        self.liveness = compute_liveness(self.ast, self.typed, f, body);
+        self.current_live.clear();
 
         let params: Vec<LocalId> = info
             .self_local
@@ -1059,15 +2437,9 @@ impl Owner<'_> {
                 let zero = !poisoned && self.expr_is_zero(init);
                 let mut bound = Vec::new();
                 let ty = self.typed.ty(init);
-                self.bind(pat, ty, poisoned, zero, &mut bound);
-                match bound.as_slice() {
-                    [local] if !carried.is_empty() => {
-                        for &i in &carried {
-                            self.lends[i].holder = Holder::Local(*local);
-                        }
-                    }
-                    _ => self.release(&carried),
-                }
+                self.bind(pat, ty, poisoned, zero, &mut Vec::new(), &mut bound);
+                let locals: Vec<LocalId> = bound.iter().map(|(l, _)| *l).collect();
+                self.attach_carried(&locals, &carried);
             }
             // `a += b` on a type of the program's own calls `AddAssign::add_assign`, lending
             // `a` for changing once `b` is evaluated.
@@ -1077,14 +2449,36 @@ impl Owner<'_> {
                 self.callee_rules(self.typed.callees[place.index()], stmt.span);
                 self.check_size_requirements(place, stmt.span);
                 let mut carried = self.expr(value, Use::Value);
+                let prev_live = self.set_stmt_live(id);
                 carried.extend(self.receiver(place, place));
+                self.restore_live(prev_live);
                 self.release(&carried);
             }
             StmtKind::Assign { op, place, value } => {
                 let carried = self.expr(value, Use::Value);
                 let value_zero = self.expr_is_zero(value);
-                self.release(&carried);
-                self.assign(place, op, value_zero, stmt.span);
+                let value_is_ref = matches!(
+                    self.typed.types.kind(self.typed.ty(value)),
+                    TyKind::Ref { .. }
+                );
+                let prev_live = self.set_stmt_live(id);
+                self.assign(place, op, value_zero, value_is_ref, stmt.span);
+                self.restore_live(prev_live);
+                if op == AssignOp::Assign
+                    && let Some(p) = self.place_of(place)
+                    && self.typed.types.has_ref(self.typed.local(p.root).ty)
+                {
+                    if p.proj.is_empty() {
+                        for lend in &mut self.lends {
+                            if lend.holder == Holder::Local(p.root) {
+                                lend.alive = false;
+                            }
+                        }
+                    }
+                    self.attach_carried(&[p.root], &carried);
+                } else {
+                    self.release(&carried);
+                }
             }
             StmtKind::Return(value) => {
                 if let Some(value) = value {
@@ -1112,16 +2506,25 @@ impl Owner<'_> {
         }
     }
 
-    /// Declares the locals a pattern binds from a value of type `ty`. N003 for a `_` that
-    /// would throw qubits away (unless proven to be in \|0⟩).
-    fn bind(&mut self, pat: PatId, ty: Ty, poisoned: bool, zero: bool, bound: &mut Vec<LocalId>) {
+    /// Declares the locals a pattern binds from a value of type `ty`, recording each local's
+    /// projection path within the matched value. N003 for a `_` that would throw qubits away
+    /// (unless proven to be in \|0⟩).
+    fn bind(
+        &mut self,
+        pat: PatId,
+        ty: Ty,
+        poisoned: bool,
+        zero: bool,
+        path: &mut Vec<Proj>,
+        bound: &mut Vec<(LocalId, Vec<Proj>)>,
+    ) {
         let types = &self.typed.types;
         match self.ast.pat(pat).kind {
             PatKind::Name(_) => {
                 if let Some(local) = self.typed.pat_locals[pat.index()] {
                     self.declare(local, poisoned);
                     self.locals[local.index()].zero = zero;
-                    bound.push(local);
+                    bound.push((local, path.clone()));
                 }
             }
             PatKind::Wildcard => {
@@ -1139,48 +2542,180 @@ impl Owner<'_> {
                 };
                 for (i, &p) in self.ast.list(pats).iter().enumerate() {
                     let ty = elems.get(i).copied().unwrap_or(Ty::ERROR);
-                    self.bind(p, ty, poisoned, zero, bound);
+                    path.push(Proj::Field(i as u32));
+                    self.bind(p, ty, poisoned, zero, path, bound);
+                    path.pop();
                 }
             }
             PatKind::Array(pats) => {
                 let elem = types.elem_of(ty).unwrap_or(Ty::ERROR);
-                for &p in self.ast.list(pats) {
-                    self.bind(p, elem, poisoned, zero, bound);
+                for (i, &p) in self.ast.list(pats).iter().enumerate() {
+                    path.push(Proj::Index(Some(facts_constant(i as i64))));
+                    self.bind(p, elem, poisoned, zero, path, bound);
+                    path.pop();
                 }
             }
             PatKind::Literal(_) => {}
             PatKind::Variant { data, .. } => {
-                let pats: Vec<PatId> = match data {
+                let pats: Vec<(u32, PatId)> = match data {
                     PatData::None => Vec::new(),
-                    PatData::Tuple(pats) => self.ast.list(pats).to_vec(),
-                    PatData::Fields { fields, .. } => {
-                        self.ast.list(fields).iter().filter_map(|f| f.pat).collect()
-                    }
+                    PatData::Tuple(pats) => self
+                        .ast
+                        .list(pats)
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &p)| (i as u32, p))
+                        .collect(),
+                    PatData::Fields { fields, .. } => self
+                        .ast
+                        .list(fields)
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, f)| f.pat.map(|p| (i as u32, p)))
+                        .collect(),
                 };
-                for p in pats {
+                for (i, p) in pats {
                     let ty = self.typed.pat_types[p.index()];
-                    self.bind(p, ty, poisoned, zero, bound);
+                    path.push(Proj::Field(i));
+                    self.bind(p, ty, poisoned, zero, path, bound);
+                    path.pop();
                 }
             }
         }
     }
 
-    /// N008: a returned reference must not point into a local of this function.
-    fn check_returned_ref(&mut self, carried: &[usize]) {
-        if !self.returns_ref {
+    /// Attaches `carried` lends to every local in `bound` whose type holds a reference, or
+    /// releases them if none do.
+    fn attach_carried(&mut self, bound: &[LocalId], carried: &[usize]) {
+        if carried.is_empty() {
             return;
         }
+        let holders: Vec<LocalId> = bound
+            .iter()
+            .copied()
+            .filter(|&l| self.typed.types.has_ref(self.typed.local(l).ty))
+            .collect();
+        if holders.is_empty() {
+            self.release(carried);
+            return;
+        }
+        let first = holders[0];
         for &i in carried {
-            let root = self.lends[i].place.root;
-            if !self.is_reference(root) {
-                let name = self.name(root).to_string();
-                let span = self.lends[i].span;
-                self.error("N008", span, format!("`{name}` is dropped when the function returns, so a reference to it cannot be returned"));
+            self.lends[i].holder = Holder::Local(first);
+            self.lends[i].alive = true;
+        }
+        for &other in &holders[1..] {
+            for &i in carried {
+                let mut cloned = self.lends[i].clone();
+                cloned.holder = Holder::Local(other);
+                cloned.alive = true;
+                self.lends.push(cloned);
             }
         }
     }
 
-    fn assign(&mut self, place_expr: ExprId, op: AssignOp, value_zero: bool, span: Span) {
+    fn set_stmt_live(&mut self, id: StmtId) -> Option<LiveSet> {
+        let next = self.liveness.as_ref()?.after_stmt.get(&id)?.clone();
+        Some(std::mem::replace(&mut self.current_live, next))
+    }
+
+    fn set_expr_live(&mut self, id: ExprId) -> Option<LiveSet> {
+        let next = self.liveness.as_ref()?.after_expr.get(&id)?.clone();
+        Some(std::mem::replace(&mut self.current_live, next))
+    }
+
+    fn set_shorthand_live(&mut self, id: ExprId, idx: usize) -> Option<LiveSet> {
+        let next = self
+            .liveness
+            .as_ref()?
+            .after_shorthand
+            .get(&(id, idx))?
+            .clone();
+        Some(std::mem::replace(&mut self.current_live, next))
+    }
+
+    fn restore_live(&mut self, prev: Option<LiveSet>) {
+        if let Some(prev) = prev {
+            self.current_live = prev;
+        }
+    }
+
+    /// Which parameter `local` is in the current function (if it is one that may be borrowed
+    /// from in the return value).
+    fn borrowable_param(&self, local: LocalId) -> Option<BorrowRoot> {
+        let f = self.current_fn?;
+        let info = &self.typed.fns[f.index()];
+        if info.self_local == Some(local) {
+            let can = matches!(info.sig.receiver, Some(OwnKind::Ref | OwnKind::Mut))
+                || self.typed.types.has_ref(self.typed.local(local).ty);
+            return can.then_some(BorrowRoot::Receiver);
+        }
+        info.params
+            .iter()
+            .position(|&p| p == local)
+            .filter(|&i| self.typed.types.has_ref(info.sig.params[i]))
+            .map(BorrowRoot::Param)
+    }
+
+    /// N008: a returned reference must point into a parameter allowed by the signature, never
+    /// into a local of this function.
+    fn check_returned_ref(&mut self, carried: &[usize]) {
+        if !self.returns_ref {
+            return;
+        }
+        let allowed = self
+            .current_fn
+            .and_then(|f| self.typed.fns[f.index()].return_borrows.clone());
+        for &i in carried {
+            if self.lends[i].reborrow {
+                continue;
+            }
+            let place = self.lends[i].place.clone();
+            let root = place.root;
+            let span = self.lends[i].span;
+            let Some(borrow_root) = self.borrowable_param(root) else {
+                let name = self.name(root).to_string();
+                self.error(
+                    "N008",
+                    span,
+                    format!(
+                        "`{name}` is dropped when the function returns, so a reference to it cannot be returned"
+                    ),
+                );
+                continue;
+            };
+            if let Some(allowed) = &allowed {
+                let matches = allowed.iter().any(|src| {
+                    src.root == borrow_root
+                        && src
+                            .fields
+                            .iter()
+                            .enumerate()
+                            .all(|(k, &idx)| place.proj.get(k) == Some(&Proj::Field(idx)))
+                });
+                if !matches {
+                    let text = self.place_text(&place);
+                    self.error(
+                        "N008",
+                        span,
+                        format!(
+                            "returned reference borrows from `{text}`, which is not listed in the return type"
+                        ),
+                    )
+                    .help = Some("list it in the return type, e.g. `ref[…] T`".into());
+                }
+            }
+        }
+    }
+
+    fn assign(
+        &mut self,
+        place_expr: ExprId,
+        op: AssignOp,
+        value_zero: bool,
+        value_is_ref: bool,
+        span: Span,
+    ) {
         self.place_subexprs(place_expr);
         let Some(place) = self.place_of(place_expr) else {
             self.expr(place_expr, Use::Read);
@@ -1191,24 +2726,31 @@ impl Owner<'_> {
         if matches!(op, AssignOp::Compound(_)) {
             self.read(&place, span);
         }
-        if self.is_reference(root) {
-            if !self.is_mut_reference(root) {
+        // Rebinding a reference variable or field (`r = ref b`, `w.q = ref b`) writes the
+        // reference slot itself rather than through the reference it currently holds.
+        let deref_final = !(op == AssignOp::Assign && value_is_ref);
+        match self.place_through_ref(&place, deref_final) {
+            Some(false) => {
+                let text = self.place_text(&place);
                 self.error(
                     "N015",
                     span,
                     format!(
-                        "`{name}` is a `ref` reference, so it cannot be used to change the value"
+                        "`{text}` is a `ref` reference, so it cannot be used to change the value"
                     ),
                 )
                 .help = Some("take it as `mut` to change it".into());
             }
-        } else if !self.typed.local(root).mutable {
-            self.error(
-                "N015",
-                span,
-                format!("`{name}` is not declared `let mut`, so it cannot be changed"),
-            )
-            .help = Some(format!("declare it with `let mut {name}`"));
+            Some(true) => {}
+            None if !self.typed.local(root).mutable => {
+                self.error(
+                    "N015",
+                    span,
+                    format!("`{name}` is not declared `let mut`, so it cannot be changed"),
+                )
+                .help = Some(format!("declare it with `let mut {name}`"));
+            }
+            None => {}
         }
         if let Some(&base) = self.reversible.last()
             && self.locals[root.index()].order < base
@@ -1254,6 +2796,13 @@ impl Owner<'_> {
 
 impl Owner<'_> {
     fn expr(&mut self, id: ExprId, use_: Use) -> Carried {
+        let prev_live = self.set_expr_live(id);
+        let carried = self.expr_inner(id, use_);
+        self.restore_live(prev_live);
+        carried
+    }
+
+    fn expr_inner(&mut self, id: ExprId, use_: Use) -> Carried {
         let ast = self.ast;
         let expr = *ast.expr(id);
         match expr.kind {
@@ -1286,15 +2835,22 @@ impl Owner<'_> {
             | ExprKind::TupleIndex { .. }
             | ExprKind::Index { .. } => self.place_use(id, use_),
             ExprKind::Tuple(elems) | ExprKind::Array(elems) => {
+                let keep = use_ != Use::Discard && self.typed.types.has_ref(self.typed.ty(id));
+                let mut out = Vec::new();
                 for &e in ast.list(elems) {
                     let carried = self.expr(e, Use::Value);
-                    self.release(&carried);
+                    if keep {
+                        out.extend(carried);
+                    } else {
+                        self.release(&carried);
+                    }
                 }
                 self.discarded(id, use_);
-                Vec::new()
+                out
             }
             ExprKind::ArrayRepeat { value, count } => {
-                self.expr(value, Use::Value);
+                let keep = use_ != Use::Discard && self.typed.types.has_ref(self.typed.ty(id));
+                let carried = self.expr(value, Use::Value);
                 self.expr(count, Use::Read);
                 // `[|0>; N - 1]` needs `N - 1 ≥ 0`.
                 if let TyKind::SizedArray(_, len) = *self.typed.types.kind(self.typed.ty(id))
@@ -1314,20 +2870,34 @@ impl Owner<'_> {
                     ));
                 }
                 self.discarded(id, use_);
-                Vec::new()
+                if keep {
+                    carried
+                } else {
+                    self.release(&carried);
+                    Vec::new()
+                }
             }
             ExprKind::StructLit { fields, .. } => {
-                for field in ast.list(fields) {
-                    match field.value {
-                        Some(value) => {
-                            let carried = self.expr(value, Use::Value);
-                            self.release(&carried);
+                let keep = use_ != Use::Discard && self.typed.types.has_ref(self.typed.ty(id));
+                let mut out = Vec::new();
+                for (idx, field) in ast.list(fields).iter().enumerate() {
+                    let carried = match field.value {
+                        Some(value) => self.expr(value, Use::Value),
+                        None => {
+                            let prev = self.set_shorthand_live(id, idx);
+                            let c = self.shorthand_field(field.name, field.span);
+                            self.restore_live(prev);
+                            c
                         }
-                        None => self.shorthand_field(field.name, field.span),
+                    };
+                    if keep {
+                        out.extend(carried);
+                    } else {
+                        self.release(&carried);
                     }
                 }
                 self.discarded(id, use_);
-                Vec::new()
+                out
             }
             ExprKind::Call { args, .. } => self.call(id, None, self.ast.list(args), use_),
             ExprKind::MethodCall { receiver, args, .. } => {
@@ -1460,13 +3030,9 @@ impl Owner<'_> {
                 cond,
                 then,
                 otherwise,
-            } => {
-                self.if_expr(cond, then, otherwise, use_, expr.span);
-                Vec::new()
-            }
+            } => self.if_expr(id, cond, then, otherwise, use_, expr.span),
             ExprKind::Match { scrutinee, arms } => {
-                self.match_expr(scrutinee, arms, use_, expr.span);
-                Vec::new()
+                self.match_expr(id, scrutinee, arms, use_, expr.span)
             }
             ExprKind::While { cond, body } => {
                 self.expr(cond, Use::Read);
@@ -1580,6 +3146,7 @@ impl Owner<'_> {
         let facts_mark = self.facts.len();
         let scope_mark = self.scope.len();
         let before_zero: Vec<bool> = self.locals.iter().map(|l| l.zero).collect();
+        let before_lends: Vec<bool> = self.lends.iter().map(|l| l.alive).collect();
         self.loops.push(scope_mark);
         if let Some(var) = var {
             self.declare(var, false);
@@ -1594,6 +3161,10 @@ impl Owner<'_> {
         self.facts.truncate(body_facts_mark);
         self.leave_scope(scope_mark);
         self.loops.pop();
+        // A loop may run zero times, so outer-local lends alive before it can still be alive.
+        for (lend, &was_alive) in self.lends.iter_mut().zip(&before_lends) {
+            lend.alive |= was_alive;
+        }
         // A loop may run zero times, so a local stays proven |0⟩ only if it was before and
         // still is after.
         for (l, &was) in self.locals.iter_mut().zip(&before_zero) {
@@ -1605,40 +3176,57 @@ impl Owner<'_> {
 
     fn if_expr(
         &mut self,
+        id: ExprId,
         cond: ExprId,
         then: BlockId,
         otherwise: Option<ExprId>,
         use_: Use,
         span: Span,
-    ) {
+    ) -> Carried {
         self.expr(cond, Use::Read);
         let mut then_facts = Vec::new();
         let mut else_facts = Vec::new();
         facts::facts_from(self.ast, self.typed, cond, true, &mut then_facts);
         facts::facts_from(self.ast, self.typed, cond, false, &mut else_facts);
 
+        let keep = use_ != Use::Discard && self.typed.types.has_ref(self.typed.ty(id));
         let before = self.moved.clone();
         let before_zero: Vec<bool> = self.locals.iter().map(|l| l.zero).collect();
+        let before_lends: Vec<bool> = self.lends.iter().map(|l| l.alive).collect();
         let mark = self.facts.len();
         self.facts.extend(then_facts);
-        let carried = self.block(then, use_);
-        self.release(&carried);
+        let then_carried = self.block(then, use_);
+        if !keep {
+            self.release(&then_carried);
+        }
         self.facts.truncate(mark);
         let then_moved = std::mem::replace(&mut self.moved, before.clone());
         let then_zero: Vec<bool> = self.locals.iter().map(|l| l.zero).collect();
+        let then_lends: Vec<bool> = self.lends.iter().map(|l| l.alive).collect();
         for (l, &was) in self.locals.iter_mut().zip(&before_zero) {
             l.zero = was;
+        }
+        for (i, lend) in self.lends.iter_mut().enumerate() {
+            lend.alive = before_lends.get(i).copied().unwrap_or(false);
         }
         let then_diverged = std::mem::replace(&mut self.diverged, false);
 
         self.facts.extend(else_facts);
-        if let Some(otherwise) = otherwise {
-            let carried = self.expr(otherwise, use_);
-            self.release(&carried);
-        }
+        let else_carried = if let Some(otherwise) = otherwise {
+            let c = self.expr(otherwise, use_);
+            if !keep {
+                self.release(&c);
+                Vec::new()
+            } else {
+                c
+            }
+        } else {
+            Vec::new()
+        };
         self.facts.truncate(mark);
         let else_moved = std::mem::take(&mut self.moved);
         let else_zero: Vec<bool> = self.locals.iter().map(|l| l.zero).collect();
+        let else_lends: Vec<bool> = self.lends.iter().map(|l| l.alive).collect();
         let else_diverged = self.diverged;
 
         self.diverged = then_diverged && else_diverged;
@@ -1647,6 +3235,15 @@ impl Owner<'_> {
             (_, true) => then_moved,
             _ => self.merge_branches(then_moved, else_moved, span, false),
         };
+        for (i, lend) in self.lends.iter_mut().enumerate() {
+            let ta = then_lends.get(i).copied().unwrap_or(false);
+            let ea = else_lends.get(i).copied().unwrap_or(false);
+            lend.alive = match (then_diverged, else_diverged) {
+                (true, _) => ea,
+                (_, true) => ta,
+                _ => ta || ea,
+            };
+        }
         for ((l, &tz), &ez) in self.locals.iter_mut().zip(&then_zero).zip(&else_zero) {
             l.zero = match (then_diverged, else_diverged) {
                 (true, _) => ez,
@@ -1654,11 +3251,34 @@ impl Owner<'_> {
                 _ => tz && ez,
             };
         }
+        let mut out = Vec::new();
+        if keep {
+            if !then_diverged {
+                for &i in &then_carried {
+                    self.lends[i].alive = true;
+                    out.push(i);
+                }
+            }
+            if !else_diverged {
+                for &i in &else_carried {
+                    self.lends[i].alive = true;
+                    out.push(i);
+                }
+            }
+        }
+        out
     }
 
     /// The arms of a `match` are branches: each starts from what was moved before it, and
     /// anything with qubits must be moved in all of them or none (N009).
-    fn match_expr(&mut self, scrutinee: ExprId, arms: List<Arm>, use_: Use, span: Span) {
+    fn match_expr(
+        &mut self,
+        id: ExprId,
+        scrutinee: ExprId,
+        arms: List<Arm>,
+        use_: Use,
+        span: Span,
+    ) -> Carried {
         // `match mv x` and temporaries give the arms the parts; a place or a reference is lent
         // to the names in the patterns, as the checker typed them (`spec/ownership.md` §13).
         let scrutinee_ty = self.typed.ty(scrutinee);
@@ -1679,39 +3299,90 @@ impl Owner<'_> {
             ExprKind::Own { place, .. } => self.place_of(place),
             _ => self.place_of(scrutinee),
         };
-        self.expr(scrutinee, Use::Read);
+        let scrutinee_carried = if moved {
+            self.expr(scrutinee, Use::Value)
+        } else {
+            self.expr(scrutinee, Use::Read)
+        };
         let scrutinee_zero = lent.is_none() && self.expr_is_zero(scrutinee);
+        let keep = use_ != Use::Discard && self.typed.types.has_ref(self.typed.ty(id));
         let before = self.moved.clone();
         let before_zero: Vec<bool> = self.locals.iter().map(|l| l.zero).collect();
+        let before_lends: Vec<bool> = self.lends.iter().map(|l| l.alive).collect();
         let mut merged: Option<Vec<Moved>> = None;
         let mut merged_zero: Option<Vec<bool>> = None;
+        let mut merged_lends: Option<Vec<bool>> = None;
+        let mut all_carried: Vec<usize> = Vec::new();
         let mut all_diverged = true;
         for arm in self.ast.list(arms).to_vec() {
             self.moved = before.clone();
             for (l, &was) in self.locals.iter_mut().zip(&before_zero) {
                 l.zero = was;
             }
+            for (i, lend) in self.lends.iter_mut().enumerate() {
+                lend.alive = before_lends.get(i).copied().unwrap_or(false);
+            }
             self.diverged = false;
             let scope_mark = self.scope.len();
             let mut bound = Vec::new();
             let ty = self.typed.pat_types[arm.pat.index()];
             self.lent_match = lent.is_some();
-            self.bind(arm.pat, ty, false, scrutinee_zero, &mut bound);
+            self.bind(
+                arm.pat,
+                ty,
+                false,
+                scrutinee_zero,
+                &mut Vec::new(),
+                &mut bound,
+            );
             self.lent_match = false;
-            // The names bound to parts hold a lend on the matched place for their arm; they
-            // all end with it, so one lend, held by the first, covers them.
-            if let (Some(mutable), Some(place)) = (lent, &lent_place)
-                && let Some(&holder) = bound.iter().find(|&&l| {
-                    matches!(
-                        self.typed.types.kind(self.typed.local(l).ty),
-                        TyKind::Ref { .. }
-                    )
-                })
-            {
-                self.lend_place(place, scrutinee, mutable, false, Holder::Local(holder));
+            // Attach both the scrutinee's place lend (projected per pattern binding so disjoint
+            // variant/tuple bindings don't conflict) and any origin lends carried by the scrutinee.
+            let ref_holders: Vec<(LocalId, Vec<Proj>)> = bound
+                .into_iter()
+                .filter(|&(l, _)| self.typed.types.has_ref(self.typed.local(l).ty))
+                .collect();
+            if !ref_holders.is_empty() {
+                if let (Some(mutable), Some(place)) = (lent, &lent_place) {
+                    let span = self.ast.expr(scrutinee).span;
+                    if let Some(base_lend) =
+                        self.lend_place(place, scrutinee, mutable, false, Holder::Pending)
+                    {
+                        self.lends[base_lend].alive = false;
+                        for (holder, sub_proj) in &ref_holders {
+                            let mut field_place = place.clone();
+                            field_place.proj.extend(sub_proj.iter().cloned());
+                            self.lends.push(Lend {
+                                place: field_place,
+                                mutable,
+                                holder: Holder::Local(*holder),
+                                span,
+                                alive: true,
+                                reborrow: false,
+                            });
+                        }
+                    }
+                    let origins = self.clone_origin_lends(place.root);
+                    let holders: Vec<LocalId> = ref_holders.iter().map(|(l, _)| *l).collect();
+                    self.attach_carried(&holders, &origins);
+                }
+                if !scrutinee_carried.is_empty() {
+                    let holders: Vec<LocalId> = ref_holders.iter().map(|(l, _)| *l).collect();
+                    let mut cloned = Vec::with_capacity(scrutinee_carried.len());
+                    for &i in &scrutinee_carried {
+                        let mut c = self.lends[i].clone();
+                        c.holder = Holder::Pending;
+                        c.alive = true;
+                        self.lends.push(c);
+                        cloned.push(self.lends.len() - 1);
+                    }
+                    self.attach_carried(&holders, &cloned);
+                }
             }
             let carried = self.expr(arm.body, use_);
-            self.release(&carried);
+            if !keep {
+                self.release(&carried);
+            }
             if !self.diverged {
                 let end = Span::new(arm.span.end, arm.span.end);
                 self.check_consumed(scope_mark, end);
@@ -1719,6 +3390,7 @@ impl Owner<'_> {
             self.leave_scope(scope_mark);
             let moved = std::mem::take(&mut self.moved);
             let arm_zero: Vec<bool> = self.locals.iter().map(|l| l.zero).collect();
+            let arm_lends: Vec<bool> = self.lends.iter().map(|l| l.alive).collect();
             if !self.diverged {
                 merged = Some(match merged {
                     None => moved,
@@ -1732,15 +3404,44 @@ impl Owner<'_> {
                         .map(|(a, b)| a && b)
                         .collect(),
                 });
+                merged_lends = Some(match merged_lends {
+                    None => arm_lends,
+                    Some(mut earlier) => {
+                        if arm_lends.len() > earlier.len() {
+                            earlier.resize(arm_lends.len(), false);
+                        }
+                        for (e, a) in earlier.iter_mut().zip(arm_lends) {
+                            *e |= a;
+                        }
+                        earlier
+                    }
+                });
+                if keep {
+                    all_carried.extend(carried);
+                }
             }
             all_diverged &= self.diverged;
         }
+        self.release(&scrutinee_carried);
         self.diverged = all_diverged;
         self.moved = merged.unwrap_or(before);
+        if let Some(lends_alive) = merged_lends {
+            for (i, lend) in self.lends.iter_mut().enumerate() {
+                lend.alive = lends_alive.get(i).copied().unwrap_or(false);
+            }
+        }
         if let Some(zeros) = merged_zero {
             for (l, z) in self.locals.iter_mut().zip(zeros) {
                 l.zero = z;
             }
+        }
+        if keep {
+            for &i in &all_carried {
+                self.lends[i].alive = true;
+            }
+            all_carried
+        } else {
+            Vec::new()
         }
     }
 
@@ -1865,6 +3566,7 @@ impl Owner<'_> {
                     holder: Holder::With,
                     span,
                     alive: true,
+                    reborrow: false,
                 });
                 held.push(self.lends.len() - 1);
             }
@@ -1883,6 +3585,7 @@ impl Owner<'_> {
                     holder: Holder::With,
                     span: self.typed.local(local).span,
                     alive: true,
+                    reborrow: false,
                 });
                 held.push(self.lends.len() - 1);
             }
@@ -1891,6 +3594,9 @@ impl Owner<'_> {
         let carried = self.block(body, use_);
         if use_ != Use::Discard {
             for &i in &carried {
+                if self.lends[i].reborrow {
+                    continue;
+                }
                 let root = self.lends[i].place.root;
                 if !self.is_reference(root) && self.locals[root.index()].order >= with_order {
                     let name = self.name(root).to_string();
@@ -1951,6 +3657,12 @@ impl Owner<'_> {
     /// Why the value `text` of type `ty` cannot be copied, and how else to fix it than by
     /// moving it: requiring a type parameter to be classical.
     fn uncopyable(&self, text: &str, ty: Ty) -> (String, String) {
+        if self.lin(ty) == Kind::Affine {
+            return (
+                format!("`{text}` holds a `mut` reference, which cannot be copied"),
+                String::new(),
+            );
+        }
         match self.typed.types.quantum_param(ty) {
             Some(p) => {
                 let param = self.ast.name(self.typed.types.params[p.index()].name);
@@ -2083,7 +3795,7 @@ impl Owner<'_> {
                     let ty = typed.local(l).ty;
                     if typed.types.linearity_assuming(ty, &assume) != Kind::Copyable {
                         problems.push((l, ast.expr(e).span, "uses"));
-                    } else if matches!(typed.types.kind(ty), TyKind::Ref { .. }) {
+                    } else if typed.types.has_ref(ty) {
                         problems.push((l, ast.expr(e).span, "uses the reference"));
                     } else if matches!(typed.adjust[e.index()], Adjust::Lend { mutable: true }) {
                         problems.push((l, ast.expr(e).span, "lends"));
@@ -2194,30 +3906,37 @@ impl Owner<'_> {
         }
     }
 
-    fn shorthand_field(&mut self, name: Symbol, span: Span) {
+    fn shorthand_field(&mut self, name: Symbol, span: Span) -> Carried {
         let Some(&local) = self
             .scope
             .iter()
             .rev()
             .find(|&&l| self.typed.local(l).name == name)
         else {
-            return;
+            return Vec::new();
         };
         let ty = self.typed.local(local).ty;
         let place = Place {
             root: local,
             proj: Vec::new(),
         };
-        if self.lin(ty) == Kind::Copyable {
-            self.read(&place, span);
-        } else {
+        let copyable = self.lin(ty) == Kind::Copyable
+            || matches!(self.typed.types.kind(ty), TyKind::Ref { .. });
+        if !copyable {
             let text = self.ast.name(name).to_string();
             let (message, or) = self.uncopyable(&text, ty);
             self.error("N001", span, message).help = Some(format!(
                 "write `{text}: mv {text}` to move it into the struct{or}"
             ));
+            let origins = if self.typed.types.has_ref(ty) {
+                self.clone_origin_lends(local)
+            } else {
+                Vec::new()
+            };
             self.move_place(&place, ty, span);
+            return origins;
         }
+        self.carry_value_place(&place, ty, span)
     }
 
     fn own(&mut self, id: ExprId, kind: OwnKind, place_expr: ExprId, use_: Use) -> Carried {
@@ -2236,21 +3955,21 @@ impl Owner<'_> {
                         format!("`{text}` is only lent here, so it cannot be moved"),
                     )
                     .help = Some("remove `mv`".into());
-                    return self
-                        .lend_place(&place, place_expr, mutable, false, Holder::Pending)
-                        .into_iter()
-                        .collect();
+                    return self.lend_and_origins(&place, place_expr, mutable, false);
                 }
                 let ty = self.typed.ty(place_expr);
+                let origins = if use_ != Use::Discard && self.typed.types.has_ref(ty) {
+                    self.clone_origin_lends(place.root)
+                } else {
+                    Vec::new()
+                };
                 self.move_place(&place, ty, span);
                 self.discarded(id, use_);
-                Vec::new()
+                origins
             }
             OwnKind::Ref | OwnKind::Mut => {
                 let mutable = kind == OwnKind::Mut;
-                self.lend_place(&place, place_expr, mutable, false, Holder::Pending)
-                    .into_iter()
-                    .collect()
+                self.lend_and_origins(&place, place_expr, mutable, false)
             }
         }
     }
@@ -2265,10 +3984,7 @@ impl Owner<'_> {
         let ty = self.typed.ty(id);
         match self.typed.adjust[id.index()] {
             Adjust::Lend { mutable } => {
-                return self
-                    .lend_place(&place, id, mutable, true, Holder::Pending)
-                    .into_iter()
-                    .collect();
+                return self.lend_and_origins(&place, id, mutable, true);
             }
             Adjust::Deref => {
                 let target = self.typed.types.deref(ty);
@@ -2293,11 +4009,114 @@ impl Owner<'_> {
             let (message, or) = self.uncopyable(&text, ty);
             self.error("N001", span, message).help =
                 Some(format!("write `mv {text}` to move it{or}"));
+            let origins = if self.typed.types.has_ref(ty) {
+                self.clone_origin_lends(place.root)
+            } else {
+                Vec::new()
+            };
             self.move_place(&place, ty, span);
-        } else {
-            self.read(&place, span);
+            return origins;
         }
+        if use_ == Use::Value && self.typed.types.has_ref(ty) {
+            return self.carry_value_place(&place, ty, span);
+        }
+        self.read(&place, span);
         Vec::new()
+    }
+
+    /// Reads/reborrows a copyable or `mut`-ref place whose value holds references (`Use::Value`),
+    /// returning the `Pending` lends carried by the resulting value.
+    fn carry_value_place(&mut self, place: &Place, ty: Ty, span: Span) -> Carried {
+        let is_mut_ref = matches!(self.typed.types.kind(ty), TyKind::Ref { mutable: true, .. });
+        let mut out = Vec::new();
+        if is_mut_ref {
+            if !self.report_moved(place, span) {
+                self.check_lend_conflicts(place, true, span, None);
+                let origins = self.clone_origin_lends(place.root);
+                self.lends.push(Lend {
+                    place: place.clone(),
+                    mutable: true,
+                    holder: Holder::Pending,
+                    span,
+                    alive: true,
+                    // If `place.root` is a local with origin lends, this is a reborrow guard on
+                    // that intermediate local; if it's a parameter, `place` itself is the origin.
+                    reborrow: !origins.is_empty(),
+                });
+                out.push(self.lends.len() - 1);
+                out.extend(origins);
+            }
+        } else {
+            self.read(place, span);
+            let origins = self.clone_origin_lends(place.root);
+            if !origins.is_empty() {
+                out.extend(origins);
+            } else if self.borrowable_param(place.root).is_some() {
+                self.lends.push(Lend {
+                    place: place.clone(),
+                    mutable: false,
+                    holder: Holder::Pending,
+                    span,
+                    alive: true,
+                    reborrow: false,
+                });
+                out.push(self.lends.len() - 1);
+            }
+        }
+        out
+    }
+
+    /// Lends `place` (`Holder::Pending`), and if `place.root` is a local holding references,
+    /// also carries cloned copies of its origin lends (marking the lend on a local ref variable
+    /// as `reborrow = true` so returning through it checks its origin, not the local pointer).
+    fn lend_and_origins(
+        &mut self,
+        place: &Place,
+        expr: ExprId,
+        mutable: bool,
+        implicit_arg: bool,
+    ) -> Carried {
+        let mut out = Vec::new();
+        let lent = self.lend_place(place, expr, mutable, implicit_arg, Holder::Pending);
+        let origins = if self.typed.types.has_ref(self.typed.local(place.root).ty) {
+            self.clone_origin_lends(place.root)
+        } else {
+            Vec::new()
+        };
+        if let Some(i) = lent {
+            if self.is_reference(place.root) && !origins.is_empty() {
+                self.lends[i].reborrow = true;
+            }
+            out.push(i);
+        }
+        out.extend(origins);
+        out
+    }
+
+    /// Clones every alive, non-reborrow lend held by `Holder::Local(local)` as a fresh
+    /// `Holder::Pending` lend (deduplicating identical `(place, mutable)` entries).
+    fn clone_origin_lends(&mut self, local: LocalId) -> Carried {
+        let mut copies: Vec<Lend> = Vec::new();
+        for lend in &self.lends {
+            if lend.alive
+                && !lend.reborrow
+                && lend.holder == Holder::Local(local)
+                && !copies
+                    .iter()
+                    .any(|c| c.place == lend.place && c.mutable == lend.mutable)
+            {
+                let mut cloned = lend.clone();
+                cloned.holder = Holder::Pending;
+                cloned.alive = true;
+                copies.push(cloned);
+            }
+        }
+        let mut out = Vec::with_capacity(copies.len());
+        for lend in copies {
+            self.lends.push(lend);
+            out.push(self.lends.len() - 1);
+        }
+        out
     }
 
     fn call(
@@ -2311,29 +4130,96 @@ impl Owner<'_> {
         let callee = self.typed.callees[id.index()];
         self.callee_rules(callee, span);
         self.check_size_requirements(id, span);
-        let mut receiver_carried = Vec::new();
-        if let Some(receiver) = receiver {
-            receiver_carried = self.receiver(id, receiver);
-        }
-        let mut arg_carried = Vec::new();
-        for &arg in args {
-            arg_carried.extend(self.expr(arg, Use::Value));
-        }
 
-        // A returned reference keeps its lend alive: the receiver's for methods, otherwise
-        // the single lent argument's (the elision rule).
+        // Two-phase receiver lends (`spec/ownership.md` §5): for a place receiver taken by
+        // `ref` or `mut`, evaluate its index subexpressions and all call arguments BEFORE
+        // starting the receiver's lend, so `c.add(c.get())` and `e.rotate_by(e.angle)` work.
+        let recv_kind = self.typed.receivers[id.index()].unwrap_or(OwnKind::Ref);
+        let two_phase = receiver.is_some_and(|r| {
+            is_place_expr(self.ast, r) && matches!(recv_kind, OwnKind::Ref | OwnKind::Mut)
+        });
+        let (receiver_carried, arg_carried_list) = if two_phase {
+            let r = receiver.expect("checked");
+            self.place_subexprs(r);
+            let mut per_arg = Vec::with_capacity(args.len());
+            for &arg in args {
+                per_arg.push(self.expr(arg, Use::Value));
+            }
+            let recv_c = self.lend_receiver_place(id, r, callee, recv_kind == OwnKind::Mut);
+            (recv_c, per_arg)
+        } else {
+            let recv_c = match receiver {
+                Some(r) => self.receiver(id, r),
+                None => Vec::new(),
+            };
+            let mut per_arg = Vec::with_capacity(args.len());
+            for &arg in args {
+                per_arg.push(self.expr(arg, Use::Value));
+            }
+            (recv_c, per_arg)
+        };
+
+        // Keep only the lends that the returned value (if it holds references) may borrow from.
         let ret = self.typed.ty(id);
-        let returns_ref = matches!(self.typed.types.kind(ret), TyKind::Ref { .. });
+        let returns_ref = self.typed.types.has_ref(ret);
         let carried = if !returns_ref {
             Vec::new()
-        } else if receiver.is_some() {
-            receiver_carried.clone()
         } else {
-            arg_carried.clone()
+            match callee {
+                Some(Callee::Variant(..)) => arg_carried_list
+                    .iter()
+                    .flat_map(|v| v.iter().copied())
+                    .collect(),
+                Some(Callee::Fn(f)) => {
+                    let sources = self.return_borrows[f.index()].clone();
+                    let recv_place = receiver.and_then(|r| self.place_of(r));
+                    let mut kept = Vec::new();
+                    for src in &sources {
+                        match src.root {
+                            BorrowRoot::Receiver => {
+                                self.keep_matching_lends(
+                                    &receiver_carried,
+                                    recv_place.as_ref(),
+                                    &src.fields,
+                                    &mut kept,
+                                );
+                            }
+                            BorrowRoot::Param(k) => {
+                                if let Some(list) = arg_carried_list.get(k) {
+                                    let arg_place = args.get(k).and_then(|&a| {
+                                        let inner = match self.ast.expr(a).kind {
+                                            ExprKind::Own { place, .. } => place,
+                                            _ => a,
+                                        };
+                                        self.place_of(inner)
+                                    });
+                                    self.keep_matching_lends(
+                                        list,
+                                        arg_place.as_ref(),
+                                        &src.fields,
+                                        &mut kept,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    kept
+                }
+                _ => {
+                    if receiver.is_some() {
+                        receiver_carried.clone()
+                    } else {
+                        arg_carried_list
+                            .iter()
+                            .flat_map(|v| v.iter().copied())
+                            .collect()
+                    }
+                }
+            }
         };
         let finished: Vec<usize> = receiver_carried
             .into_iter()
-            .chain(arg_carried)
+            .chain(arg_carried_list.into_iter().flatten())
             .filter(|i| !carried.contains(i))
             .collect();
         self.release(&finished);
@@ -2351,6 +4237,134 @@ impl Owner<'_> {
             self.discarded(id, use_);
         }
         carried
+    }
+
+    /// Selects lends from `candidates` matching `fields` relative to `base_place` (narrowing
+    /// a whole-place lend to `base_place + fields` when a cross-package signature specifies a
+    /// field borrow like `mut[self.state] Qubit`).
+    fn keep_matching_lends(
+        &mut self,
+        candidates: &[usize],
+        base_place: Option<&Place>,
+        fields: &[u32],
+        kept: &mut Vec<usize>,
+    ) {
+        if fields.is_empty() {
+            for &i in candidates {
+                if !kept.contains(&i) {
+                    kept.push(i);
+                }
+            }
+            return;
+        }
+        let target = base_place.map(|bp| {
+            let mut p = bp.clone();
+            for &idx in fields {
+                p.proj.push(Proj::Field(idx));
+            }
+            p
+        });
+        for &i in candidates {
+            if let (Some(bp), Some(tp)) = (base_place, &target) {
+                if self.lends[i].place == *bp {
+                    // Narrow a whole-parameter lend to the declared/inferred field path.
+                    let mut narrowed = self.lends[i].clone();
+                    narrowed.place = tp.clone();
+                    self.lends.push(narrowed);
+                    kept.push(self.lends.len() - 1);
+                    continue;
+                }
+                if self.lends[i].place.root == bp.root {
+                    if self.overlap(&self.lends[i].place, tp) != Overlap::Disjoint
+                        && !kept.contains(&i)
+                    {
+                        kept.push(i);
+                    }
+                    continue;
+                }
+            }
+            // Transitive origin lend carried inside a reference-holding parameter (e.g. `Window`).
+            if !kept.contains(&i) {
+                kept.push(i);
+            }
+        }
+    }
+
+    /// Lends a place receiver for a `ref self` or `mut self` call, lending only the fields of
+    /// `self` the method uses when it is a same-package struct method (`spec/ownership.md` §5).
+    fn lend_receiver_place(
+        &mut self,
+        _call: ExprId,
+        receiver: ExprId,
+        callee: Option<Callee>,
+        mutable: bool,
+    ) -> Carried {
+        let Some(place) = self.place_of(receiver) else {
+            return Vec::new();
+        };
+        if let Some(Callee::Fn(f)) = callee
+            && !other_package(self.ast, self.typed.fn_modules[f.index()], self.module)
+            && let MethodFields::Fields(fields) = self.method_fields[f.index()].clone()
+        {
+            // Check mutability on the receiver when the method takes `mut self` on a classical type.
+            let span = self.ast.expr(receiver).span;
+            let ty = self.place_ty(&place);
+            let root = place.root;
+            if mutable {
+                let through_ref = self.place_through_ref(&place, true);
+                if through_ref == Some(false) {
+                    let root_name = self.name(root).to_string();
+                    let name = self.place_text(&place);
+                    self.error(
+                        "N015",
+                        span,
+                        format!(
+                            "`{root_name}` is a `ref` reference, so it cannot be used to change `{name}`"
+                        ),
+                    );
+                } else if !self.typed.types.is_pure_quantum(self.typed.types.deref(ty))
+                    && through_ref.is_none()
+                    && !self.typed.local(root).mutable
+                {
+                    let root_name = self.name(root).to_string();
+                    let name = self.place_text(&place);
+                    let what = if name == root_name {
+                        "it".to_string()
+                    } else {
+                        format!("`{name}`")
+                    };
+                    self.error(
+                        "N015",
+                        span,
+                        format!(
+                            "`{root_name}` is not declared `let mut`, so {what} cannot be changed"
+                        ),
+                    )
+                    .help = Some(format!("declare it with `let mut {root_name}`"));
+                }
+            }
+            let mut out = Vec::new();
+            for (field_idx, field_mut) in fields {
+                let mut fp = place.clone();
+                fp.proj.push(Proj::Field(field_idx));
+                if let Some(i) = self.lend_place(&fp, receiver, field_mut, false, Holder::Pending) {
+                    out.push(i);
+                }
+            }
+            let origins = if self.typed.types.has_ref(self.typed.local(root).ty) {
+                self.clone_origin_lends(root)
+            } else {
+                Vec::new()
+            };
+            if self.is_reference(root) && !origins.is_empty() {
+                for &i in &out {
+                    self.lends[i].reborrow = true;
+                }
+            }
+            out.extend(origins);
+            return out;
+        }
+        self.lend_and_origins(&place, receiver, mutable, false)
     }
 
     /// The sizes `f`'s signature subtracts in (`N - 1`), each of which must be at least 0.
@@ -2538,13 +4552,8 @@ impl Owner<'_> {
                 let mutable = kind == OwnKind::Mut;
                 if is_place {
                     self.place_subexprs(receiver);
-                    let Some(place) = self.place_of(receiver) else {
-                        return Vec::new();
-                    };
-                    return self
-                        .lend_place(&place, receiver, mutable, false, Holder::Pending)
-                        .into_iter()
-                        .collect();
+                    let callee = self.typed.callees[call.index()];
+                    return self.lend_receiver_place(call, receiver, callee, mutable);
                 }
                 // The result of a chain or expression is lent on as it is.
                 self.expr(receiver, Use::Read)
@@ -2562,13 +4571,6 @@ impl Owner<'_> {
         matches!(
             self.typed.types.kind(self.typed.local(local).ty),
             TyKind::Ref { .. }
-        )
-    }
-
-    fn is_mut_reference(&self, local: LocalId) -> bool {
-        matches!(
-            self.typed.types.kind(self.typed.local(local).ty),
-            TyKind::Ref { mutable: true, .. }
         )
     }
 
@@ -2709,16 +4711,55 @@ impl Owner<'_> {
         result
     }
 
+    /// Whether accessing the value at `place` goes through a reference (`Some(true)` if every
+    /// reference along the path is `mut`, `Some(false)` if any is `ref`, `None` if direct).
+    /// When `deref_final` is false, a reference type at the leaf itself is not dereferenced
+    /// (for rebinding `r = ref b` or `w.q = ref b`).
+    fn place_through_ref(&self, place: &Place, deref_final: bool) -> Option<bool> {
+        let types = &self.typed.types;
+        let mut ty = self.typed.local(place.root).ty;
+        let mut through: Option<bool> = None;
+        let mut step_ref = |ty: &mut Ty| {
+            while let TyKind::Ref { mutable, inner } = *types.kind(*ty) {
+                through = Some(through.unwrap_or(true) && mutable);
+                *ty = inner;
+            }
+        };
+        if !place.proj.is_empty() || deref_final {
+            step_ref(&mut ty);
+        }
+        for (i, proj) in place.proj.iter().enumerate() {
+            ty = match (types.kind(ty), proj) {
+                (&TyKind::Struct(s), Proj::Field(idx)) => types.structs[s.index()]
+                    .fields
+                    .get(*idx as usize)
+                    .map_or(Ty::ERROR, |&(_, t)| t),
+                (TyKind::Tuple(elems), Proj::Field(idx)) => {
+                    elems.get(*idx as usize).copied().unwrap_or(Ty::ERROR)
+                }
+                (&TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _), Proj::Index(_)) => elem,
+                _ => return through,
+            };
+            if i + 1 < place.proj.len() || deref_final {
+                step_ref(&mut ty);
+            }
+        }
+        through
+    }
+
     /// The type of a place, following its projections from the root local.
     fn place_ty(&self, place: &Place) -> Ty {
         let types = &self.typed.types;
         let mut ty = types.deref(self.typed.local(place.root).ty);
         for proj in &place.proj {
             ty = match (types.kind(ty), proj) {
-                (&TyKind::Struct(s), Proj::Field(i)) => {
-                    types.structs[s.index()].fields[*i as usize].1
+                (&TyKind::Struct(s), Proj::Field(i)) => types.structs[s.index()]
+                    .fields
+                    .get(*i as usize)
+                    .map_or(Ty::ERROR, |&(_, t)| t),
+                (TyKind::Tuple(elems), Proj::Field(i)) => {
+                    elems.get(*i as usize).copied().unwrap_or(Ty::ERROR)
                 }
-                (TyKind::Tuple(elems), Proj::Field(i)) => elems[*i as usize],
                 (&TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _), Proj::Index(_)) => elem,
                 _ => return Ty::ERROR,
             };
@@ -2817,11 +4858,114 @@ impl Owner<'_> {
         }
     }
 
-    /// An alive lend that conflicts with using `place` (for changing, if `mutable`).
+    /// Whether `lend` is active at the current program point under Polonius-style NLL:
+    /// a variable's lend is active only while that variable is still live on a future path.
+    fn lend_active(&self, lend: &Lend) -> bool {
+        if !lend.alive {
+            return false;
+        }
+        match lend.holder {
+            Holder::Local(l) => match &self.liveness {
+                Some(live) => live.contains(&self.current_live, l),
+                None => true,
+            },
+            Holder::Pending | Holder::Control | Holder::With => true,
+        }
+    }
+
+    /// An active lend that conflicts with using `place` (for changing, if `mutable`).
     fn conflicting_lend(&self, place: &Place, mutable: bool) -> Option<usize> {
-        self.lends.iter().position(|l| {
-            l.alive && (mutable || l.mutable) && self.overlap(place, &l.place) != Overlap::Disjoint
-        })
+        if let Some(i) = self.lends.iter().position(|l| {
+            self.lend_active(l)
+                && (mutable || l.mutable)
+                && self.overlap(place, &l.place) != Overlap::Disjoint
+        }) {
+            return Some(i);
+        }
+        // If `place.root` is a local reference variable, check conflicts against its origin
+        // storage (excluding its own lend) so aliasing through a dead intermediate is caught.
+        if self.is_reference(place.root) {
+            let root = place.root;
+            for origin in &self.lends {
+                if origin.alive
+                    && !origin.reborrow
+                    && origin.holder == Holder::Local(root)
+                    && let Some(i) = self.lends.iter().position(|l| {
+                        self.lend_active(l)
+                            && l.holder != Holder::Local(root)
+                            && (mutable || l.mutable)
+                            && self.overlap(&origin.place, &l.place) != Overlap::Disjoint
+                    })
+                {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    /// Checks `place` (and its origin storage, if `place.root` is a local reference) for
+    /// conflicting active lends, reporting N005 or N017.
+    fn check_lend_conflicts(
+        &mut self,
+        place: &Place,
+        mutable: bool,
+        span: Span,
+        skip_holder: Option<Holder>,
+    ) {
+        let name = self.place_text(place);
+        for i in 0..self.lends.len() {
+            let other = &self.lends[i];
+            if !self.lend_active(other)
+                || Some(other.holder) == skip_holder
+                || !(mutable || other.mutable)
+            {
+                continue;
+            }
+            match self.overlap(place, &other.place) {
+                Overlap::Disjoint => continue,
+                Overlap::Overlaps => {
+                    let other_span = other.span;
+                    let message = match other.holder {
+                        Holder::Control => format!("`{name}` is a control of this block"),
+                        Holder::With => {
+                            format!("`{name}` was used in `with` and can only be read in `do`")
+                        }
+                        Holder::Local(l) => {
+                            format!("`{name}` is already lent to `{}`", self.name(l))
+                        }
+                        Holder::Pending if mutable && other.mutable => {
+                            format!("`{name}` is lent for changing twice")
+                        }
+                        Holder::Pending => {
+                            format!("`{name}` is lent for changing and for reading at once")
+                        }
+                    };
+                    self.error("N005", span, message)
+                        .with_label_mut(other_span, "lent here");
+                }
+                Overlap::Unproven => {
+                    let other_span = other.span;
+                    let other_name = self.place_text(&other.place);
+                    self.error("N017", span, format!("cannot prove `{name}` and `{other_name}` are different"))
+                        .with_label_mut(other_span, "lent here")
+                        .help = Some("use indices that differ by a constant, or establish it with `if` or `assert`".into());
+                }
+            }
+            return;
+        }
+        if skip_holder.is_none() && self.is_reference(place.root) {
+            let root = place.root;
+            let origins: Vec<Place> = self
+                .lends
+                .iter()
+                .filter(|l| l.alive && !l.reborrow && l.holder == Holder::Local(root))
+                .map(|l| l.place.clone())
+                .collect();
+            for origin in origins {
+                self.check_lend_conflicts(&origin, mutable, span, Some(Holder::Local(root)));
+            }
+        }
     }
 
     fn move_place(&mut self, place: &Place, ty: Ty, span: Span) {
@@ -2863,7 +5007,7 @@ impl Owner<'_> {
         if let Some(i) = self
             .lends
             .iter()
-            .position(|l| l.alive && self.overlap(place, &l.place) != Overlap::Disjoint)
+            .position(|l| self.lend_active(l) && self.overlap(place, &l.place) != Overlap::Disjoint)
         {
             let lend_span = self.lends[i].span;
             let holder = match self.lends[i].holder {
@@ -2919,15 +5063,19 @@ impl Owner<'_> {
         let ty = self.place_ty(place);
         let name = self.place_text(place);
         let root = place.root;
-        let classical = !self.typed.types.is_pure_quantum(ty);
-        if mutable && self.is_reference(root) && !self.is_mut_reference(root) {
+        let classical = !self.typed.types.is_pure_quantum(self.typed.types.deref(ty));
+        let through_ref = self.place_through_ref(place, true);
+        if mutable && through_ref == Some(false) {
             let root_name = self.name(root).to_string();
+            let what = if self.is_reference(root) {
+                root_name
+            } else {
+                name.clone()
+            };
             self.error(
                 "N015",
                 span,
-                format!(
-                    "`{root_name}` is a `ref` reference, so it cannot be used to change `{name}`"
-                ),
+                format!("`{what}` is a `ref` reference, so it cannot be used to change `{name}`"),
             );
         } else if mutable && classical {
             if implicit_arg {
@@ -2937,7 +5085,7 @@ impl Owner<'_> {
                     format!("this call changes `{name}`, which holds classical data"),
                 )
                 .help = Some(format!("write `mut {name}` to show it is changed"));
-            } else if !self.is_reference(root) && !self.typed.local(root).mutable {
+            } else if through_ref.is_none() && !self.typed.local(root).mutable {
                 let root_name = self.name(root).to_string();
                 let what = if name == root_name {
                     "it".to_string()
@@ -2952,43 +5100,7 @@ impl Owner<'_> {
                 .help = Some(format!("declare it with `let mut {root_name}`"));
             }
         }
-        for i in 0..self.lends.len() {
-            let other = &self.lends[i];
-            if !other.alive || !(mutable || other.mutable) {
-                continue;
-            }
-            match self.overlap(place, &other.place) {
-                Overlap::Disjoint => continue,
-                Overlap::Overlaps => {
-                    let other_span = other.span;
-                    let message = match other.holder {
-                        Holder::Control => format!("`{name}` is a control of this block"),
-                        Holder::With => {
-                            format!("`{name}` was used in `with` and can only be read in `do`")
-                        }
-                        Holder::Local(l) => {
-                            format!("`{name}` is already lent to `{}`", self.name(l))
-                        }
-                        Holder::Pending if mutable && other.mutable => {
-                            format!("`{name}` is lent for changing twice")
-                        }
-                        Holder::Pending => {
-                            format!("`{name}` is lent for changing and for reading at once")
-                        }
-                    };
-                    self.error("N005", span, message)
-                        .with_label_mut(other_span, "lent here");
-                }
-                Overlap::Unproven => {
-                    let other_span = other.span;
-                    let other_name = self.place_text(&other.place);
-                    self.error("N017", span, format!("cannot prove `{name}` and `{other_name}` are different"))
-                        .with_label_mut(other_span, "lent here")
-                        .help = Some("use indices that differ by a constant, or establish it with `if` or `assert`".into());
-                }
-            }
-            break;
-        }
+        self.check_lend_conflicts(place, mutable, span, None);
         if mutable {
             self.locals[root.index()].zero = false;
         }
@@ -3006,6 +5118,7 @@ impl Owner<'_> {
             holder,
             span,
             alive: true,
+            reborrow: false,
         });
         Some(self.lends.len() - 1)
     }
@@ -3023,7 +5136,10 @@ impl Owner<'_> {
         for proj in &place.proj {
             match (types.kind(ty), proj) {
                 (&TyKind::Struct(s), Proj::Field(i)) => {
-                    let (name, field_ty) = types.structs[s.index()].fields[*i as usize];
+                    let Some(&(name, field_ty)) = types.structs[s.index()].fields.get(*i as usize)
+                    else {
+                        break;
+                    };
                     text.push('.');
                     text.push_str(self.ast.name(name));
                     ty = field_ty;

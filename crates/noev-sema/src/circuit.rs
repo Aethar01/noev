@@ -266,14 +266,25 @@ fn repeated_run_warnings(ast: &Ast, typed: &Typed, circuits: &Circuits, out: &mu
 
 fn holds_quantum_or_ref(typed: &Typed, ty: Ty) -> bool {
     let types = &typed.types;
+    if types.has_ref(ty) {
+        return true;
+    }
     match types.kind(ty) {
-        TyKind::Qubit | TyKind::Ref { .. } => true,
+        TyKind::Qubit => true,
         TyKind::Tuple(elems) => elems.iter().any(|&t| holds_quantum_or_ref(typed, t)),
         &TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _) => holds_quantum_or_ref(typed, elem),
-        &TyKind::Struct(s) => types.structs[s.index()]
-            .fields
-            .iter()
-            .any(|&(_, t)| holds_quantum_or_ref(typed, t)),
+        &TyKind::Struct(s) => {
+            let def = &types.structs[s.index()];
+            def.fields
+                .iter()
+                .any(|&(_, t)| holds_quantum_or_ref(typed, t))
+                || def
+                    .variants
+                    .iter()
+                    .flatten()
+                    .flat_map(|v| v.data.iter())
+                    .any(|&t| holds_quantum_or_ref(typed, t))
+        }
         _ => false,
     }
 }

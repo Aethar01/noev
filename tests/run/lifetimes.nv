@@ -1,0 +1,133 @@
+// End-to-end execution of Step 6 lifetimes: NLL, Polonius conditional return, two-phase
+// receiver lends, field-level method lends, structs & enums holding references, and
+// place-based borrow annotations.
+
+struct Counter {
+    n: Int
+
+    fn get(ref self) -> Int {
+        self.n
+    }
+
+    fn add(mut self, delta: Int) {
+        self.n += delta
+    }
+}
+
+struct Pair {
+    a: Qubit
+    b: Qubit
+
+    fn flip_b(mut self) {
+        self.b.x()
+    }
+
+    fn a_mut(mut self) -> mut[self.a] Qubit {
+        mut self.a
+    }
+
+    fn b_mut(mut self) -> mut[self.b] Qubit {
+        mut self.b
+    }
+}
+
+struct Window {
+    q: ref Qubit
+}
+
+struct MutWindow {
+    q: mut Qubit
+}
+
+struct PairRef<T> {
+    a: ref T
+    b: ref T
+}
+
+struct Rotator {
+    q: Qubit
+    angle: Float
+
+    fn rotate_by(mut self, theta: Float) {
+        self.q.rx(theta)
+    }
+}
+
+fn pick_str(a: ref String, b: ref String, first: Bool) -> ref[a, b] String {
+    if first { a } else { b }
+}
+
+fn make_window(q: ref Qubit) -> Window[q] {
+    Window { q }
+}
+
+fn make_pair_ref<T>(a: ref T, b: ref T) -> PairRef<T>[a, b] {
+    PairRef { a, b }
+}
+
+fn flip_if_false(q: mut Qubit, flag: Bool) -> mut Qubit {
+    let r = mut q
+    if flag {
+        return r
+    }
+    q.x()
+    q
+}
+
+fn main() {
+    // 1. Two-phase receiver lends (classical + quantum).
+    let mut c = Counter { n: 21 }
+    c.add(c.get())
+    print(c.n)
+
+    let mut rot = Rotator { q: |0>, angle: 3.141592653589793 }
+    rot.rotate_by(rot.angle)
+    print(mv rot.q.measure())
+
+    // 2. Polonius conditional early borrow return.
+    let q1 = |0>
+    let r1 = flip_if_false(q1, true)
+    let _ = r1
+    let b1 = mv q1.measure()
+    let q2 = |0>
+    let r2 = flip_if_false(q2, false)
+    let _ = r2
+    let b2 = mv q2.measure()
+    print(b1, b2)
+
+    // 3. Field-level method lends (`ctrl p.a { p.flip_b() }` and disjoint `a_mut`/`b_mut`).
+    let p = Pair { a: |1>, b: |0> }
+    ctrl p.a { p.flip_b() }
+    let a = p.a_mut()
+    let b = p.b_mut()
+    swap(a, b)
+    print(mv p.a.measure(), mv p.b.measure())
+
+    // 4. Structs & enums holding references (`Window`, `MutWindow`, `Option<ref Qubit>`, `PairRef`).
+    let ctrl_q = |1>
+    let target_q = |0>
+    let w = make_window(ctrl_q)
+    let mw = MutWindow { q: mut target_q }
+    ctrl w.q { mw.q.x() }
+    // NLL: `w` and `mw` are dead here, so we can measure both qubits directly.
+    print(mv ctrl_q.measure(), mv target_q.measure())
+
+    let opt_q = |1>
+    let target2 = |0>
+    let opt: Option<ref Qubit> = Some(ref opt_q)
+    match opt {
+        Some(cq) => ctrl cq { target2.x() },
+        None => {}
+    }
+    print(mv opt_q.measure(), mv target2.measure())
+
+    // 5. Classical references in `PairRef<Int>` and `ref[a, b] String`.
+    let x = 10
+    let y = 32
+    let pr = make_pair_ref(ref x, ref y)
+    print(pr.a + pr.b)
+
+    let s1 = "hello"
+    let s2 = "world"
+    print(pick_str(ref s1, ref s2, true), pick_str(ref s1, ref s2, false))
+}

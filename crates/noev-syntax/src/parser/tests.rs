@@ -767,3 +767,74 @@ fn sizes_and_type_arguments() {
             .is_empty()
     );
 }
+
+#[test]
+fn borrow_annotations() {
+    let src = "
+        fn pick(a: ref String, b: ref String) -> ref[a, b] String { a }
+        fn slice(a: ref [Qubit; 4]) -> ref[a] [Qubit; 4] { a }
+        fn plain(a: ref [Qubit; 4]) -> ref [Qubit; 4] { a }
+        fn win(q: ref Qubit) -> Window[q] { Window { q } }
+        fn pair<T>(a: ref T, b: ref T) -> PairRef<T>[a, b] { PairRef { a, b } }
+        struct S {
+            state: Qubit,
+            fn get(mut self) -> mut[self.state] Qubit { mut self.state }
+        }
+    ";
+    let parsed = parse(src);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ast = &parsed.ast;
+    let fns = ast.all_fns();
+    // pick: ref[a, b] String
+    let TypeKind::Ref {
+        mutable: false,
+        borrows,
+        ..
+    } = ast.ty(fns[0].ret.unwrap()).kind
+    else {
+        panic!("expected ref[a, b]");
+    };
+    let names: Vec<&str> = ast.list(borrows).iter().map(|p| ast.name(p.root)).collect();
+    assert_eq!(names, ["a", "b"]);
+    // slice: ref[a] [Qubit; 4]
+    let TypeKind::Ref { borrows, inner, .. } = ast.ty(fns[1].ret.unwrap()).kind else {
+        panic!("expected ref[a] [Qubit; 4]");
+    };
+    assert_eq!(ast.list(borrows).len(), 1);
+    assert!(matches!(ast.ty(inner).kind, TypeKind::Array { .. }));
+    // plain: ref [Qubit; 4] (array, not a borrow list)
+    let TypeKind::Ref { borrows, inner, .. } = ast.ty(fns[2].ret.unwrap()).kind else {
+        panic!("expected ref [Qubit; 4]");
+    };
+    assert!(borrows.is_empty());
+    assert!(matches!(ast.ty(inner).kind, TypeKind::Array { .. }));
+    // win: Window[q]
+    let TypeKind::Borrowed { inner, borrows } = ast.ty(fns[3].ret.unwrap()).kind else {
+        panic!("expected Window[q]");
+    };
+    assert!(matches!(ast.ty(inner).kind, TypeKind::Path(_)));
+    assert_eq!(ast.name(ast.list(borrows)[0].root), "q");
+    // pair: PairRef<T>[a, b]
+    let TypeKind::Borrowed { inner, borrows } = ast.ty(fns[4].ret.unwrap()).kind else {
+        panic!("expected PairRef<T>[a, b]");
+    };
+    assert!(matches!(ast.ty(inner).kind, TypeKind::Generic { .. }));
+    assert_eq!(ast.list(borrows).len(), 2);
+    // get: mut[self.state] Qubit
+    let TypeKind::Ref {
+        mutable: true,
+        borrows,
+        ..
+    } = ast.ty(fns[5].ret.unwrap()).kind
+    else {
+        panic!("expected mut[self.state]");
+    };
+    let place = ast.list(borrows)[0];
+    assert_eq!(ast.name(place.root), "self");
+    let fields: Vec<&str> = ast
+        .list(place.fields)
+        .iter()
+        .map(|&s| ast.name(s))
+        .collect();
+    assert_eq!(fields, ["state"]);
+}

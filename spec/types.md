@@ -76,9 +76,8 @@ logical qubit. The compiler and runtime decide which physical qubit that is.
   everywhere (below).
 - **Distributions** `Distribution<T>`: how often each value of a classical type `T` occurred
   in repeated runs, made by `sample` ([execution.md](execution.md) §3). Copyable.
-- **References** `ref T` (shared) and `mut T` (exclusive). See
-  [ownership.md](ownership.md) §4–5. Only elided lifetimes are supported so far; references stored
-  in struct fields are Reserved.
+- **References** `ref T` (shared) and `mut T` (exclusive), and structs or enums holding
+  references (`Window[r]`). See [ownership.md](ownership.md) §4–5.
 
 ### Enums
 

@@ -110,17 +110,61 @@ measurement. "No operation is applied *through* this reference" is what `ref` gu
 
 ## 5. How long a lend lasts
 
-**Lifetimes are lexical for now:** a lend stored in a variable lasts until the end of the
-block that declares the variable; a lend that is only used within one statement (a call
-argument, a method receiver, a chain) lasts until the end of that statement.
+**Non-lexical, path-sensitive lifetimes.** A lend held by a variable lasts only on execution
+paths that use the variable again (before it is overwritten or leaves scope). Once a reference
+variable has no remaining uses on a path, the place it borrowed from is free again — including
+after a conditional early return of a borrow:
 
-This is stricter than Rust's non-lexical lifetimes, which end a lend at its last use. Moving
-to non-lexical lifetimes later only accepts more programs, so it breaks nothing.
+```noev
+fn pick(a: mut Qubit, b: mut Qubit, flag: Bool) -> mut Qubit {
+    let r = mut a
+    if flag {
+        return r            // `r` is used on this path
+    }
+    a.h()                   // ok: `r` is not used on this path, so `a` is free again
+    mut b
+}
+```
 
-References in function signatures follow Rust's elision rules: a returned reference borrows
-from the receiver if there is one, otherwise from the single reference parameter. Signatures
-that need anything else, and references stored in struct fields, need explicit lifetimes,
-which are Reserved.
+**Two-phase receiver lends.** When a method takes `mut self` on a place, its call arguments
+are evaluated before the receiver's `mut` lend starts, so `c.add(c.get())` and
+`e.rotate_by(e.angle)` are allowed when the argument does not keep lending `c` or `e`.
+
+**Field-level method lends.** Within a package, the compiler infers which fields of `self`
+each method reads or mutates, so calling a method only lends the fields it actually uses
+(`ctrl p.a { p.flip_b() }`, or holding `p.a_mut()` and `p.b_mut()` at the same time). Across
+packages, a method lends `self` as a whole unless its return type names a field
+(`mut[self.a] Qubit`).
+
+**References in structs and place-based borrow annotations.** Structs and enums may store
+references (`struct Window { q: ref Qubit }`) without lifetime parameters. When a function
+returns a reference or a value containing references, it can name the parameter places it
+borrows from in brackets — `ref[a, b] String`, `mut[self.state] Qubit`, `Window[r]`:
+
+```noev
+struct Window {
+    q: ref Qubit
+    tag: Int
+}
+
+pub fn view(r: ref [Qubit; 4]) -> Window[r] {
+    Window { q: ref r[0], tag: 0 }
+}
+
+pub fn longer(a: ref String, b: ref String, pick_a: Bool) -> ref[a, b] String {
+    if pick_a { a } else { b }
+}
+```
+
+- **Within a package**, what a function's return value borrows from is inferred from its body
+  (following calls), so `[…]` only needs to be written to make a promise checked against the
+  body (returning a borrow from a place not listed is N008).
+- **Elision** still applies when `[…]` is omitted on a library's `pub` function or a trait
+  function: a returned borrow borrows from `self` if there is a receiver, otherwise from the
+  single parameter whose type holds a reference. Where elision does not decide (such as two
+  reference parameters and no `self`), a library's `pub` function or trait signature must name
+  the sources in `[…]`.
+- Self-referential structs are out of scope.
 
 ## 6. Rules
 

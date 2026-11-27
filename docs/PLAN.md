@@ -433,7 +433,7 @@ gets a compile-fail test under `tests/ui/`.
 | 4a | Operator traits               | `std::ops` (`Add`, `Sub`, `Mul`, `Div`, `Rem`, bit ops, `Neg`, `BitNot`, `…Assign`) and `std::cmp` (`Eq`, `Ord`) with parameter defaults (`Rhs = Self`) | ☑ Done |
 | 4b | Arithmetic in sizes           | `[Qubit; N + 1]`, `2 * N`: linear size expressions, compared after normalising | ☑ Done: `N - 1` too, proven at least 0 at each call (N024) |
 | 5  | `with`/`do` and release       | Compute–use–uncompute blocks, and automatic release of qubits proven to be in \|0⟩ (`spec/ownership.md` §8–9) | ☑ Done |
-| 6  | Lifetimes                     | Non-lexical lifetimes, explicit lifetimes, references in structs     | ☐ |
+| 6  | Lifetimes                     | Non-lexical lifetimes, explicit lifetimes, references in structs     | ☑ Done |
 | 7  | Runtime C ABI                 | Shaped like QIR's, with the interpreter moved onto it (`spec/runtime.md` §4) | ☐ |
 | 8  | Cranelift code generator      | `noev build --emit=binary\|object`; compiled programs tested against the interpreter | ☐ |
 | 9  | QIR export                    | `--emit=qir`: base profile for circuits, adaptive profile for classical control | ☐ |

@@ -223,6 +223,7 @@ pools! {
     bound_args: BoundArg,
     where_preds: WherePred,
     assoc_types: AssocType,
+    borrow_places: BorrowPlace,
 }
 
 /// The variants of `Option` and `Result`, named without their enum: alone, each is a path
@@ -1272,6 +1273,17 @@ pub struct TypeExpr {
     pub span: Span,
 }
 
+/// A place named in a type's borrow annotation: `a`, `self`, or `self.state`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BorrowPlace {
+    /// The starting parameter name, or `self`.
+    pub root: Symbol,
+    /// Any field names after it, in order (`state` in `self.state`).
+    pub fields: List<Symbol>,
+    /// Where it is.
+    pub span: Span,
+}
+
 /// The kinds of type annotation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TypeKind {
@@ -1286,10 +1298,19 @@ pub enum TypeKind {
         /// The type arguments.
         args: List<TypeId>,
     },
-    /// `ref T` or `mut T`.
+    /// A named or generic type with a borrow annotation, such as `Window[r]`.
+    Borrowed {
+        /// The underlying type.
+        inner: TypeId,
+        /// The places it may borrow from.
+        borrows: List<BorrowPlace>,
+    },
+    /// `ref T`, `mut T`, `ref[a, b] T` or `mut[self.state] T`.
     Ref {
         /// Whether it is `mut T`.
         mutable: bool,
+        /// Any places named in `[…]`; empty when elided or inferred.
+        borrows: List<BorrowPlace>,
         /// The referenced type.
         inner: TypeId,
     },

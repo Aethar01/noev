@@ -452,6 +452,58 @@ fn type_aliases() {
 }
 
 #[test]
+fn borrow_annotations_checked() {
+    // Library (no `fn main`): `pub fn` with multiple ref params requires `[…]`.
+    ok(
+        "pub fn pick(a: ref Int, b: ref Int, flag: Bool) -> ref[a, b] Int { if flag { a } else { b } }",
+    );
+    // Private fn inside a package infers without `[…]`.
+    ok("fn pick(a: ref Int, b: ref Int, flag: Bool) -> ref Int { if flag { a } else { b } }");
+    // Library `pub fn` with single ref param uses elision without `[…]`.
+    ok("pub fn id(a: ref Int) -> ref Int { a }");
+    // Library `pub fn` with multiple ref params and no `[…]` is rejected.
+    assert_eq!(
+        one_error(
+            "pub fn pick(a: ref Int, b: ref Int, flag: Bool) -> ref Int { if flag { a } else { b } }"
+        ),
+        "`pick` returns a reference, and more than one parameter could be its source"
+    );
+    // Borrow annotation on a type that holds no reference.
+    assert_eq!(
+        one_error("fn f(a: ref Int) -> Int[a] { 1 }"),
+        "`Int` does not hold a reference, so it cannot have a borrow annotation"
+    );
+    // Unknown parameter name in `[…]`.
+    assert_eq!(
+        one_error("fn f(a: ref Int) -> ref[missing] Int { a }"),
+        "`missing` is not a parameter of `f`"
+    );
+    // Parameter holding no reference in `[…]`.
+    assert_eq!(
+        one_error("fn f(a: Int, b: ref Int) -> ref[a] Int { b }"),
+        "`a` holds no reference, so the return value cannot borrow from it"
+    );
+    // Borrow annotation outside a function return type.
+    assert_eq!(
+        one_error("struct S { x: ref[a] Int }"),
+        "borrow annotations are only allowed in function return types"
+    );
+    // Trait method requiring `[…]` when ambiguous; `impl` cannot widen borrow sources.
+    assert_eq!(
+        one_error("trait Picker { fn pick(a: ref Int, b: ref Int) -> ref Int }"),
+        "`pick` returns a reference, and more than one parameter could be its source"
+    );
+    assert_eq!(
+        one_error(
+            "trait Picker { fn pick(ref self, a: ref Int, b: ref Int) -> ref[a] Int }\n\
+             struct P {}\n\
+             impl Picker for P { fn pick(ref self, a: ref Int, b: ref Int) -> ref[b] Int { b } }"
+        ),
+        "`pick` borrows from a parameter that `Picker` does not allow"
+    );
+}
+
+#[test]
 fn ui_tests_type_check_cleanly() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/ui");
     let mut stack = vec![std::path::PathBuf::from(dir)];

@@ -1128,13 +1128,43 @@ impl Types {
         }
     }
 
+    /// Whether `ty` is a reference or contains one (in a tuple, array, struct field or enum
+    /// variant).
+    pub fn has_ref(&self, ty: Ty) -> bool {
+        self.has_ref_at(ty, 0)
+    }
+
+    fn has_ref_at(&self, ty: Ty, depth: usize) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        match self.kind(ty) {
+            TyKind::Ref { .. } => true,
+            TyKind::Tuple(elems) => elems.iter().any(|&t| self.has_ref_at(t, depth + 1)),
+            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) => {
+                self.has_ref_at(*elem, depth + 1)
+            }
+            TyKind::Struct(id) => {
+                let def = &self.structs[id.index()];
+                def.fields
+                    .iter()
+                    .any(|&(_, t)| self.has_ref_at(t, depth + 1))
+                    || def
+                        .variants
+                        .iter()
+                        .flatten()
+                        .flat_map(|v| v.data.iter())
+                        .any(|&t| self.has_ref_at(t, depth + 1))
+            }
+            _ => false,
+        }
+    }
+
     /// Whether values of `ty` can be printed and interpolated into strings: classical
     /// values, through any number of shared references (`spec/types.md` §7).
     pub fn is_printable(&self, ty: Ty) -> bool {
         let ty = self.deref(ty);
-        self.linearity(ty) == Kind::Copyable
-            && !matches!(self.kind(ty), TyKind::Ref { .. })
-            && !self.has_params(ty)
+        self.linearity(ty) == Kind::Copyable && !self.has_ref(ty) && !self.has_params(ty)
     }
 
     /// What the built-in operator `op` gives on `lhs` and `rhs`, if it applies.

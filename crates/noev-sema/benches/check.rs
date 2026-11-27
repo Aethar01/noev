@@ -115,6 +115,7 @@ fn main() {
     impls(400);
     operators(2000);
     with_do(1000);
+    lifetimes(1000);
     inferred("inferred", 2000, true);
     inferred("irrev", 2000, false);
     modules("modules", 2000, |i| {
@@ -310,5 +311,58 @@ fn inferred(phase: &str, count: usize, rev: bool) {
         types.as_secs_f64() * 1e3,
         ownership.as_secs_f64() * 1e3,
         circuits.as_secs_f64() * 1e3,
+    );
+}
+
+/// Checks `count` functions exercising NLL, Polonius conditional borrow returns, two-phase
+/// receiver lends, field-level method lends, and structs holding references.
+fn lifetimes(count: usize) {
+    let mut text = String::from(
+        "struct Pair { a: Qubit\n b: Qubit\n\
+           fn flip_b(mut self) { self.b.x() }\n\
+           fn a_mut(mut self) -> mut[self.a] Qubit { mut self.a }\n\
+           fn b_mut(mut self) -> mut[self.b] Qubit { mut self.b }\n }\n\
+         struct Window { q: ref Qubit }\n\
+         struct Counter { n: Int\n\
+           fn get(ref self) -> Int { self.n }\n\
+           fn add(mut self, d: Int) { self.n += d }\n }\n\
+         fn pick(a: ref Qubit, b: ref Qubit, flag: Bool) -> ref[a, b] Qubit { if flag { a } else { b } }\n",
+    );
+    for i in 0..count {
+        text.push_str(&format!(
+            "fn f{i}(flag: Bool) -> Bit {{\n\
+               let mut c = Counter {{ n: {i} }}\n\
+               c.add(c.get())\n\
+               let p = Pair {{ a: |+>, b: |0> }}\n\
+               ctrl p.a {{ p.flip_b() }}\n\
+               let w = Window {{ q: ref p.a }}\n\
+               let r = pick(w.q, ref p.b, flag)\n\
+               ctrl r {{}}\n\
+               let a = p.a_mut()\n\
+               let b = p.b_mut()\n\
+               swap(a, b)\n\
+               mv p.a.discard()\n\
+               mv p.b.measure()\n\
+             }}\n"
+        ));
+    }
+    text.push_str("fn main() { let _ = f0(true) }\n");
+    let parsed = noev_syntax::parse(&text);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let (typed, errors) = noev_sema::check(&parsed.ast);
+    assert!(errors.is_empty(), "{errors:?}");
+    let errors = noev_sema::check_ownership(&parsed.ast, &typed);
+    assert!(errors.is_empty(), "{errors:?}");
+    let repeats = 5;
+    let time = fastest(10, || {
+        for _ in 0..repeats {
+            black_box(noev_sema::check_ownership(black_box(&parsed.ast), &typed));
+        }
+    });
+    println!(
+        "{:<9} {:>10.0} fns/s  ({:.2} ms for {count} functions)",
+        "lifetimes",
+        (count * repeats) as f64 / time.as_secs_f64(),
+        time.as_secs_f64() * 1e3 / repeats as f64,
     );
 }
