@@ -1,0 +1,68 @@
+---
+title: Installation
+description: Install the Noev compiler from prebuilt release archives or build from source.
+---
+
+import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
+
+## Prebuilt binaries
+
+Prebuilt archives are published on [GitHub Releases](https://github.com/Aethar01/noev/releases) for:
+
+- Linux (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`)
+- macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`)
+- Windows (`x86_64-pc-windows-msvc`)
+
+Each archive contains:
+
+- `bin/noev` (compiler CLI and language server)
+- `lib/libnoev_runtime.a` and `lib/libnoev_c.a` (runtime and C embedding static libraries)
+- `include/noev.h` and `include/noev_backend.h` (C/C++ embedding and backend plug-in headers)
+
+Extract the archive and add `bin/` to your `PATH`.
+
+## Build from source
+
+Building from source requires **Rust 1.88 or later**.
+
+<Tabs>
+  <TabItem label="Full build (default)">
+    Includes the `ketrs` simulator plus Cranelift and LLVM native code generation:
+
+    ```bash
+    git clone https://github.com/Aethar01/noev
+    cd noev
+    cargo build --release
+    ```
+
+    The binary is written to `target/release/noev`.
+  </TabItem>
+  <TabItem label="Minimal build (no optional features)">
+    Builds the compiler without `ketrs`, Cranelift, or LLVM:
+
+    ```bash
+    cargo build --release --no-default-features
+    ```
+
+    Type checking, ownership checking, circuit planning, and OpenQASM 3 / QIR 1.0 export all work without optional features. Running programs requires `--backend=export` or a plug-in backend.
+  </TabItem>
+  <TabItem label="Python bindings">
+    Build and install the Python package (`noev`) with [maturin](https://www.maturin.rs/):
+
+    ```bash
+    pip install maturin
+    maturin develop --release
+    ```
+  </TabItem>
+</Tabs>
+
+<Aside type="note">
+LLVM code generation (`--codegen=llvm`) uses `libLLVM` or `llc` when emitting native object files. Cranelift (`--codegen=cranelift`, the default) needs no external LLVM installation.
+</Aside>
+
+## Verify your installation
+
+```bash
+noev --version
+noev run examples/bell.nv --seed 7
+```

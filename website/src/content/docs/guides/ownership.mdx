@@ -1,0 +1,87 @@
+---
+title: Ownership and Borrowing
+description: How Noev enforces no-cloning, linear consumption, non-aliasing, and safe uncomputation at compile time.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Noev uses Rust's ownership and borrowing model, extended with **linear types** for quantum values. Every ownership violation is rejected at compile time with an error code (`N001`–`N024`).
+
+## Three kinds of value
+
+1. **Copyable (classical):** `Int`, `Float`, `Complex`, `Bool`, `Bit`, `String`, and structs/enums/arrays containing only copyable fields. Copying them is free and they drop automatically at scope exit.
+2. **Affine (owned classical resources):** `Vec<T>` (when `T` is not linear) and types that own heap buffers. They move with `mv` rather than copying implicitly, and drop automatically when unused.
+3. **Linear (quantum):** `Qubit` and any struct, enum, tuple, or array holding a linear value. Linear values cannot be copied (`N001`) and cannot be dropped silently (`N003`).
+
+## Explicit moves: `mv`
+
+A variable only becomes unusable at a visible `mv`:
+
+```noev
+let a = |+>
+let b = a          // error[N001]: `a` holds qubits, which cannot be copied
+let b = mv a       // OK: ownership transfers to `b`
+a.x()              // error[N002]: `a` was moved
+```
+
+Measurements and `discard` consume the qubit, so they require `mv`:
+
+```noev
+let bit = mv b.measure()
+```
+
+## Lending: `ref` and `mut`
+
+- `ref T` lends a value for reading (or as a quantum `ctrl` control). Multiple shared lends can coexist.
+- `mut T` lends a value exclusively for changing (applying gates or modifying classical fields). No other `ref` or `mut` lend of the same place can overlap (`N005`).
+
+### Implicit lending shortcuts
+
+Because bare names never move a linear value, Noev allows two unambiguous shortcuts:
+
+- `ref` can always be omitted at call sites.
+- `mut` can be omitted for **pure quantum values** (`q.h()`, `h(q)`). Classical mutations must still write `mut` (`bump(mut count)`, otherwise `N016`).
+
+```noev
+let a = |+>
+ctrl a { a.x() }   // error[N005]: `a` is a control of this block
+swap(a, a)         // error[N005]: `a` is lent for changing twice
+```
+
+## Linear consumption and automatic release
+
+Every owned linear value must be consumed along every control-flow path by measuring it (`mv q.measure()`), discarding it (`mv q.discard()`), or returning/moving it out. Leaving it unconsumed is `N003`:
+
+```noev
+fn leak() {
+    let q = |+>
+}   // error[N003]: `q` is still owned when it goes out of scope
+```
+
+Two rules make temporary qubits ergonomic without hiding physics:
+
+- **Automatic release of `|0>`:** a qubit proven by the compiler to be in `|0>` (an untouched `|0>` literal/aggregate, or a qubit immediately after `q.reset()`) releases automatically at scope exit without `N003`.
+- **`with`/`do` uncomputation:** ancillas allocated inside `with { … }` are lent `ref` to `do { … }`, uncomputed by running `adj` of `with`, and released automatically.
+
+## Lifetimes and borrowing
+
+Noev implements Polonius-style non-lexical, path-sensitive lifetimes:
+
+- Lends end immediately after their last use on each path (conditional early borrow returns are accepted).
+- Methods lend only the struct fields they touch (inferred within a package), so disjoint field borrows like `ctrl p.a { p.flip_b() }` work.
+- Structs and enums can hold references (`Option<ref Qubit>`, `Window[r]`).
+- Place-based borrow annotations (`ref[a, b] String`, `mut[self.state] Qubit`) replace lifetime parameters, avoiding variance and HRTB complexity.
+
+## Compile-time array index checks
+
+When two elements of a qubit register are used together (`ctrl r[i] { r[j].x() }`), the compiler proves at compile time that `i != j` (`N017`) and that both indices are in bounds (`N018`). Loop bounds (`for i in 0..N`, `for j in i + 1..N`) and `assert` statements supply facts to the prover.
+
+## `unsafe`
+
+<Aside type="caution">
+Noev has no raw pointers, so `unsafe` never causes memory UB. Instead, `unsafe` vouches for a physical or FFI claim the compiler cannot prove, such as `unsafe { mv q.release() }` (claiming `q` is in `|0>`) or calling `extern "C"` / inline `qasm("…")`.
+</Aside>
+
+Simulators like `ketrs` actively check `release()` claims at runtime and fail if the qubit is not in `|0>`, so unsafe quantum code can be tested before running on hardware.
+
+See the [Error Index](../../reference/errors/) or [Ownership Specification](../../spec/ownership/) for all 24 rules.

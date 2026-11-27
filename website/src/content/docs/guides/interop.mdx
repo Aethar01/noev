@@ -1,0 +1,101 @@
+---
+title: Interop (Rust, Python, C)
+description: Embed Noev in Rust, Python, and C/C++ applications, or call host functions, C libraries, and inline OpenQASM from Noev.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Hybrid algorithms rely on existing classical ecosystems for optimisation, linear algebra, and plotting. Noev supports interop in both directions:
+
+1. **Embedding:** a host program in Rust, Python, or C/C++ compiles a Noev program and calls its functions.
+2. **Imports:** a Noev program calls host-provided `extern fn`s, C libraries via `extern "C"`, or hardware-specific inline OpenQASM.
+
+Only **classical (copyable) values** cross the boundary. Qubits never leave Noev's ownership checker; foreign code drives quantum work by calling Noev functions that create and consume their own qubits.
+
+## Embedding Noev
+
+<Tabs>
+  <TabItem label="Python">
+    Built from `crates/noev-py` with PyO3 and maturin (`maturin develop --release`):
+
+    ```python
+    import noev
+
+    program = noev.Program.compile_file("examples/energy.nv")
+    rt = noev.Runtime(program, seed=42)
+
+    e = rt.call("energy", 0.5)
+    print(f"energy(0.5) = {e:.6f}")
+    ```
+
+    Python host functions can also call back into Noev (for example, passing an objective function to `scipy.optimize.minimize`) using `rt.host_fn_with_context(...)`.
+  </TabItem>
+  <TabItem label="Rust">
+    Use the safe Rust embedding API in the `noev` crate:
+
+    ```rust
+    let program = noev::Program::compile_file("vqe.nv")?;
+    let mut runtime = noev::Runtime::new(&program)
+        .host_fn("minimize_step", |energy: f64, theta: f64| {
+            optimiser.step(energy, theta)
+        });
+    let energy: f64 = runtime.call("vqe", ())?;
+    ```
+
+    Every `extern fn` declared in the `.nv` file is type-checked against the registered host functions when the program is loaded, so calling a host function from Noev requires no `unsafe`.
+  </TabItem>
+  <TabItem label="C / C++">
+    Link against `libnoev_c.a` and include `include/noev.h`. The C API exposes `noev_program_compile_file`, `noev_runtime_new`, host function registration, and typed call helpers with explicit error reporting.
+  </TabItem>
+</Tabs>
+
+## Calling host functions from Noev
+
+Declare host-provided functions with `extern fn`:
+
+```noev
+extern fn minimize_step(energy: Float, theta: Float) -> Float
+
+fn vqe() -> Float {
+    let mut theta = 0.1
+    for i in 0..50 {
+        theta = minimize_step(<ansatz(theta)| h |ansatz(theta)>, theta)
+    }
+    <ansatz(theta)| h |ansatz(theta)>
+}
+```
+
+## Calling C libraries (`extern "C"`)
+
+C imports are declared in `extern "C"` blocks and called inside `unsafe`:
+
+```noev
+extern "C" {
+    fn erf(x: Float) -> Float
+    fn normalize3(v: mut [Float; 3])
+}
+
+extern "C" struct Point { x: Float, y: Float }
+
+fn error_rate(x: Float) -> Float {
+    unsafe { erf(x) }
+}
+```
+
+- Arrays cross by reference (`ref [T; N]` as `const T*`, `mut [T; N]` as `T*`).
+- Structs cross when declared `extern "C" struct`.
+- Non-capturing `extern "C" fn` callbacks can be passed as C function pointers (for example, into C optimisers).
+
+## Inline OpenQASM
+
+For hardware-specific gates not in the standard gate set, use `qasm("…")` inside `unsafe`:
+
+```noev
+unsafe {
+    qasm("rzz(0.5) $0, $1;", a, b)
+}
+```
+
+Noev still checks ownership of the passed qubits (`a` and `b`) around the inline QASM call (`N005` on aliasing, `N013` in reversible contexts).
+
+See [Interop Specification](../../spec/interop/) for full type-mapping tables and ABI details.

@@ -1,0 +1,103 @@
+---
+title: CLI Reference
+description: Complete command and option reference for the noev command-line interface.
+---
+
+All file-taking commands accept either a single `.nv` source file or a package directory containing `noev.toml` (defaulting to `.`).
+
+## `noev check`
+
+Type-check, ownership-check, and validate target capabilities without building or running.
+
+```bash
+noev check [OPTIONS] [FILE]
+```
+
+| Option | Description |
+| --- | --- |
+| `--backend <NAME[:DEVICE]>` | Backend target (`ketrs`, `export`, a `.toml`/plug-in path, or cached `NAME[:DEVICE]`) |
+| `--message-format <human\|short>` | Diagnostic output format (`human` with source excerpts, or single-line `short`) |
+
+## `noev run`
+
+Execute `main` in a file or package.
+
+```bash
+noev run [OPTIONS] [FILE]
+```
+
+| Option | Description |
+| --- | --- |
+| `--seed <N>` | PRNG seed for reproducible simulator runs |
+| `--backend <NAME[:DEVICE]>` | Execution backend (`ketrs`, `export`, plug-in library path, or cached target) |
+| `--circuits <DIR>` | Save every circuit sent to the backend as OpenQASM 3 files in `<DIR>` |
+| `--message-format <human\|short>` | Diagnostic output format |
+
+## `noev build`
+
+Compile a program to native code, IR, QIR, or an execution plan.
+
+```bash
+noev build [OPTIONS] [FILE]
+```
+
+| Option | Description |
+| --- | --- |
+| `--emit <EMIT>` | Output kind: `binary` (default), `object`, `ir`, `plan`, `qir`, or `llvm-ir` |
+| `--codegen <cranelift\|llvm>` | Native code generator for `binary`, `object`, and `llvm-ir` (`cranelift` by default) |
+| `--qir-runtime` | Emit QIR runtime calls (`__quantum__qis__*`, `__quantum__rt__*`) with `--codegen=llvm` |
+| `-l, --link <LIB>` | Extra C objects, static libraries, or library names to link |
+| `--backend <NAME[:DEVICE]>` | Target description for compile-time capability checks |
+| `-o, --output <PATH>` | Output path (defaults to file stem for binaries/objects, stdout for text formats) |
+| `--message-format <human\|short>` | Diagnostic output format |
+
+## `noev test`
+
+Discover and run `test fn` suites in a file, package, or directory.
+
+```bash
+noev test [OPTIONS] [PATH] [FILTER]
+```
+
+| Option | Description |
+| --- | --- |
+| `FILTER` | Only run tests whose full name contains this substring |
+| `--list` | List matching test names without executing them |
+| `--seed <N>` | Base PRNG seed for reproducible runs |
+| `--backend <NAME[:DEVICE]>` | Backend to run tests on |
+| `--compile` | Compile tests into a native test runner binary |
+| `--codegen <cranelift\|llvm>` | Native code generator (implies `--compile`) |
+| `--nocapture` | Print test stdout as it runs instead of hiding output for passing tests |
+| `--message-format <human\|short>` | Diagnostic output format |
+
+## `noev export`
+
+Export a program's circuits without simulating anything (equivalent to `noev run --backend=export`).
+
+```bash
+noev export [OPTIONS] [FILE]
+```
+
+| Option | Description |
+| --- | --- |
+| `-o, --output <DIR>` | Directory for circuit files, one per job (defaults to stdout) |
+| `--format <qasm3\|qir>` | Circuit format: `qasm3` (OpenQASM 3, default) or `qir` (QIR 1.0 LLVM IR) |
+| `--message-format <human\|short>` | Diagnostic output format |
+
+## `noev target`
+
+Manage built-in and locally cached backend target descriptions.
+
+```bash
+noev target list
+noev target show <TARGET>
+noev target fetch <SPEC>
+```
+
+## `noev lsp`
+
+Start the Language Server Protocol server over standard input and output.
+
+```bash
+noev lsp
+```

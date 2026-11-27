@@ -1,0 +1,89 @@
+---
+title: Testing and Tooling
+description: Built-in test runner, language server (LSP), tree-sitter grammar, and Neovim setup.
+---
+
+## Built-in testing (`noev test`)
+
+Tests are written directly in `.nv` files using `test fn`:
+
+```noev
+test fn bell_correlation() {
+    let d = sample 100 {
+        let a = |+>
+        let b = |0>
+        ctrl a { b.x() }
+        (mv a.measure(), mv b.measure())
+    }
+    assert d.count((0, 1)) == 0, "unexpected 01 outcome"
+    assert d.count((1, 0)) == 0, "unexpected 10 outcome"
+}
+
+test(fail) fn release_non_zero() {
+    let q = |1>
+    unsafe { mv q.release() }
+}
+
+test(fail = "out of range") fn expected_message() {
+    assert false, "index out of range"
+}
+```
+
+Run tests on a file, package (`noev.toml`), or directory:
+
+```bash
+noev test                           # discover and run package tests
+noev test bell.nv --seed 42         # reproducible run on one file
+noev test correlation               # filter tests by substring
+noev test --compile                 # run as a compiled Cranelift binary
+noev test --codegen=llvm            # run as an LLVM -O2 binary
+noev test --list                    # list matching tests without running
+```
+
+Each test runs with an isolated quantum state and deterministic per-test seed derived from `--seed`. On failure, `noev test` prints the failure diagnostic and the exact `--seed` to reproduce it.
+
+## Packages (`noev.toml`)
+
+A Noev package has a `noev.toml` manifest at its root, source modules under `src/`, and optional integration tests under `tests/*.nv`. Files map directly to modules with Rust-style `use`, `pub`, `pub(pkg)`, and `pub(super)` visibility. See [Modules and Packages](../../spec/modules/).
+
+## Language Server (`noev lsp`)
+
+The compiler ships with a built-in LSP server speaking over standard input/output:
+
+```bash
+noev lsp
+```
+
+Features provided to any LSP-compatible editor:
+
+- Diagnostics as you type (including error codes `N001`–`N024`, help hints, and shot-by-shot warnings)
+- Hover information: types, `///` doc comments, circuit eligibility, reversibility status, and ket/bra descriptions
+- Go to definition (`gd`) for variables, functions, methods, structs, enums, and fields
+- Document symbols
+
+## Tree-sitter and Neovim
+
+The repository includes a tree-sitter grammar in `editors/tree-sitter-noev/` (syntax highlighting, indentation, and folding) and a Neovim 0.11+ plugin configuration in `editors/nvim/`:
+
+```lua
+vim.opt.rtp:append(vim.fn.expand('~/Projects/noev/editors/nvim'))
+
+vim.lsp.config('noev', {
+  cmd = { vim.fn.expand('~/Projects/noev/target/release/noev'), 'lsp' },
+})
+
+vim.api.nvim_create_autocmd('User', {
+  pattern = 'TSUpdate',
+  callback = function()
+    require('nvim-treesitter.parsers').noev = {
+      install_info = {
+        path = vim.fn.expand('~/Projects/noev/editors/tree-sitter-noev'),
+      },
+    }
+  end,
+})
+
+vim.lsp.enable('noev')
+```
+
+Run `:TSInstall noev` once to build the parser.

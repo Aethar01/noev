@@ -1,0 +1,181 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "noev",
+  "scopeName": "source.noev",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#quantum-literals" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#functions" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.documentation.noev",
+          "match": "///.*$"
+        },
+        {
+          "name": "comment.line.double-slash.noev",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.noev",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [{ "include": "#comments" }]
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.noev",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.noev",
+              "match": "\\\\(?:[ntr0\\\\\"]|u\\{[0-9a-fA-F]+\\})|\\{\\{"
+            },
+            {
+              "name": "meta.interpolation.noev",
+              "begin": "\\{",
+              "end": "\\}",
+              "beginCaptures": {
+                "0": { "name": "punctuation.definition.template-expression.begin.noev" }
+              },
+              "endCaptures": {
+                "0": { "name": "punctuation.definition.template-expression.end.noev" }
+              },
+              "patterns": [
+                {
+                  "name": "constant.other.format-spec.noev",
+                  "match": ":[^}]+"
+                },
+                { "include": "$self" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "quantum-literals": {
+      "patterns": [
+        {
+          "name": "string.other.ket.noev",
+          "match": "\\|(?:[01+\\-]|\\([+\\-]i\\)|\\{[^}]+\\})+>"
+        },
+        {
+          "name": "string.other.bra.noev",
+          "match": "<(?:[01+\\-]|\\([+\\-]i\\)|\\{[^}]+\\})+\\|"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.imaginary.noev",
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?(?:[eE][+\\-]?[0-9_]+)?i\\b"
+        },
+        {
+          "name": "constant.numeric.hex.noev",
+          "match": "\\b0x[0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.noev",
+          "match": "\\b0b[01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.noev",
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*(?:[eE][+\\-]?[0-9_]+)?|[eE][+\\-]?[0-9_]+)\\b"
+        },
+        {
+          "name": "constant.numeric.integer.noev",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "storage.modifier.ownership.noev",
+          "match": "\\b(?:mv|ref|mut)\\b"
+        },
+        {
+          "name": "keyword.other.quantum.noev",
+          "match": "\\b(?:ctrl|adj|rev|circuit|sample|within|with|do|unsafe)\\b"
+        },
+        {
+          "name": "keyword.control.noev",
+          "match": "\\b(?:if|else|match|for|in|while|return|break|continue|assert)\\b"
+        },
+        {
+          "name": "keyword.declaration.noev",
+          "match": "\\b(?:fn|let|struct|enum|trait|impl|type|extern|use|pub|const|where|as|test)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.noev",
+          "match": "\\b(?:and|or|not)\\b"
+        },
+        {
+          "name": "variable.language.self.noev",
+          "match": "\\b(?:self|Self|pkg|super)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.builtin.noev",
+          "match": "\\b(?:Qubit|Bit|Int|Float|Complex|Bool|String|Observable|Distribution|Basis|Option|Result|Vec|State|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|c32|c64)\\b"
+        },
+        {
+          "name": "entity.name.type.noev",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b(?=(?:\\s*::|\\s*<|\\s*\\{))"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.noev",
+          "match": "\\b(?:true|false)\\b"
+        },
+        {
+          "name": "constant.language.variant.noev",
+          "match": "\\b(?:Some|None|Ok|Err)\\b"
+        },
+        {
+          "name": "constant.other.caps.noev",
+          "match": "\\b[A-Z][A-Z0-9_]{1,}\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.noev",
+          "match": "\\b(?:X|Y|Z|I|P|PX|print|eprint|measure|measure_in|swap|discard|release|qasm)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "entity.name.function.noev",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b(?=\\s*(?::<|\\())"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.noev",
+          "match": "->|=>|::|\\.\\.|<<=|>>=|<<|>>|==|!=|<=|>=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|[+\\-*/%&|^~<>=]"
+        }
+      ]
+    }
+  }
+}

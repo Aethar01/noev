@@ -1,0 +1,81 @@
+---
+title: Circuits and Execution
+description: Single-run semantics, explicit sampling, classical control, circuit extraction, and OpenQASM 3 / QIR export.
+---
+
+## Every call runs once
+
+In Noev, calling a function executes it once, in order, whether it is classical or quantum. Repeating a quantum computation for statistics is always explicit with `sample`:
+
+```noev
+let d = sample 10000 { bell_pair() }
+print("P(11) = {d.probability((1, 1)):.3}")
+```
+
+`sample n { … }` evaluates its body `n` times and returns a `Distribution<T>`. The block must be repeatable (`N020`): it can read classical variables from the surrounding scope, but cannot use outside qubits, mutate outside variables, or print (`N022`).
+
+## When a run is a circuit
+
+The compiler analyses every `sample` block and function to decide whether it executes as a **single circuit** or **shot by shot**:
+
+> A run is a circuit if its measurement results are only used in conditions (`if`, `while`), boolean/bit logic, or its final return value.
+
+Runs that compile to a circuit are simulated once for all shots on `ketrs` (sharing statevector work before any mid-circuit measurement) and submitted as a single job to hardware backends.
+
+### Classical control stays in the circuit
+
+Mid-circuit measurements feeding `if` and `while` corrections stay inside the circuit. Quantum teleportation is a good example:
+
+```noev
+fn correct(receiver: mut Qubit, m1: Bit, m2: Bit) {
+    if m2 == 1 { receiver.x() }
+    if m1 == 1 { receiver.z() }
+}
+```
+
+Checking the execution plan confirms it compiles to one circuit:
+
+```text
+$ noev build examples/teleport.nv --emit=plan
+sample (line 41)  circuit: sampled from one simulation
+fn correct        circuit
+fn teleported     circuit
+```
+
+If a run cannot be a circuit (for example, it computes a floating-point angle from a mid-circuit measurement or calls a host function inside the loop), `--emit=plan` explains why and the runtime executes it shot by shot.
+
+### Requiring a circuit: `circuit fn`
+
+Prefix a function with `circuit fn` to make circuit compilation a compile-time requirement. If a later edit breaks circuit eligibility, the compiler reports `N021`.
+
+## Exporting circuits
+
+You can export a program's circuits without running any simulation:
+
+```bash
+# OpenQASM 3
+noev export examples/teleport.nv -o out/
+
+# QIR 1.0 LLVM IR (Base Profile for straight-line, Adaptive Profile for classical control)
+noev export examples/teleport.nv --format=qir -o out/
+
+# Single-file QIR directly from build
+noev build examples/teleport.nv --emit=qir
+```
+
+Multi-controlled gates, arbitrary unitary matrix gates, and `U`/`P` gates are decomposed automatically into standard QIR QIS intrinsics without extra ancillas.
+
+## Native compilation
+
+`noev build` compiles the full hybrid program (classical + quantum) to a standalone executable or object file:
+
+```bash
+noev build prog.nv                          # Cranelift native binary (default)
+noev build prog.nv --codegen=llvm           # LLVM -O2 native binary
+noev build prog.nv --emit=llvm-ir           # Inspect LLVM IR
+noev build prog.nv --codegen=llvm --qir-runtime --emit=object
+```
+
+Passing `--qir-runtime` emits standard `__quantum__qis__*` and `__quantum__rt__*` calls so compiled object files link directly against external QIR runtimes.
+
+See [Execution Model](../../spec/execution/) and [Runtime and Backends](../../spec/runtime/) for full specifications.

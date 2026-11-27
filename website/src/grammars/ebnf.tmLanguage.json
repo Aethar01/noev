@@ -1,0 +1,31 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "ebnf",
+  "scopeName": "source.ebnf",
+  "patterns": [
+    {
+      "name": "comment.line.double-slash.ebnf",
+      "match": "//.*$"
+    },
+    {
+      "name": "string.quoted.single.ebnf",
+      "match": "'[^']*'"
+    },
+    {
+      "name": "string.quoted.double.ebnf",
+      "match": "\"[^\"]*\""
+    },
+    {
+      "name": "entity.name.type.rule.ebnf",
+      "match": "^[a-z_][a-zA-Z0-9_]*(?=\\s*=)"
+    },
+    {
+      "name": "keyword.operator.ebnf",
+      "match": "::=|:=|=|\\||\\*|\\+|\\?"
+    },
+    {
+      "name": "variable.other.nonterminal.ebnf",
+      "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+---
+title: Quickstart
+description: Write, check, run, test, and inspect your first Noev program.
+---
+
+Create a file named `bell.nv`:
+
+```noev
+fn bell_pair() -> (Bit, Bit) {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    (mv a.measure(), mv b.measure())
+}
+
+fn main() {
+    let d = sample 1000 { bell_pair() }
+    print(d)
+    print("P(11) = {d.probability((1, 1)):.3}")
+}
+
+test fn bell_is_correlated() {
+    let d = sample 200 { bell_pair() }
+    assert d.count((0, 1)) == 0
+    assert d.count((1, 0)) == 0
+}
+```
+
+## 1. Check types and ownership
+
+```bash
+noev check bell.nv
+```
+
+`noev check` runs the full type checker, linear ownership checker, circuit analyser, and target capability checks without executing anything.
+
+## 2. Run it
+
+```bash
+noev run bell.nv --seed 7
+```
+
+```text
+00   526   52.6%
+11   474   47.4%
+P(11) = 0.474
+```
+
+Passing `--seed` makes random sampling reproducible.
+
+## 3. Inspect the execution plan
+
+```bash
+noev build bell.nv --emit=plan
+```
+
+```text
+sample (line 9)   circuit: sampled from one simulation
+fn bell_pair      circuit
+```
+
+Because `bell_pair` only returns measurement outcomes without side effects, the compiler recognises it as a circuit and simulates it once for all 1,000 shots.
+
+## 4. Export OpenQASM 3 or QIR 1.0
+
+```bash
+noev export bell.nv -o out/               # OpenQASM 3
+noev export bell.nv --format=qir -o out/  # QIR 1.0 LLVM IR
+```
+
+## 5. Run the built-in tests
+
+```bash
+noev test bell.nv --seed 7
+```
+
+Add `--compile` to compile the test suite into a native binary before running it.
+
+## 6. Build a standalone native binary
+
+```bash
+noev build bell.nv -o bell
+./bell
+```
+
+By default, `noev build` uses the Cranelift backend. Pass `--codegen=llvm` to optimise with LLVM (`-O2`).
+
+## Next steps
+
+- Read the [Language Tour](../../guides/language-tour/) to see hybrid structs, expectation values, and `with`/`do`.
+- Read [Ownership and Borrowing](../../guides/ownership/) to learn how Noev enforces quantum mechanics at compile time.

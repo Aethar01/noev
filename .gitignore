@@ -11,3 +11,8 @@ __pycache__/
 /python/noev/*.so
 /python/noev/*.pyd
 /python/noev/*.dylib
+# Documentation website build artifacts and synced spec pages
+/website/node_modules/
+/website/dist/
+/website/.astro/
+/website/src/content/docs/spec/

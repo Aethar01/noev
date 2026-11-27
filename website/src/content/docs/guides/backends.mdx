@@ -1,0 +1,52 @@
+---
+title: Backends and Targets
+description: Built-in backends, compile-time target capability checks, target caching, and writing plug-in backends.
+---
+
+Noev separates programs from quantum hardware through a unified backend interface (`std::backend::Backend`) and declarative **target descriptions**. Programs never inspect whether they are running on a simulator or a QPU; they only see the capabilities declared by the target.
+
+## Built-in backends
+
+- **`ketrs` (default):** local statevector simulator powered by [`ketrs`](https://github.com/Aethar01/ketrs). Supports gate-level execution, circuit sampling, exact expectation values, and `std::debug::amplitudes`.
+- **`export`:** records circuits to OpenQASM 3 or QIR 1.0 files without simulating anything (`noev run --backend=export` or `noev export`).
+
+Select a backend on the CLI or in `noev.toml`:
+
+```bash
+noev check prog.nv --backend=target.toml
+noev run prog.nv --backend=ketrs
+noev build prog.nv --backend=target.toml
+```
+
+```toml
+# noev.toml
+[target]
+backend = "ketrs"
+```
+
+## Compile-time capability checks
+
+Before running or building, `noev-sema` checks the program against the chosen target's capabilities:
+
+- **Qubit limits:** rejects programs that exceed the target's maximum qubit count.
+- **Execution level:** rejects shot-by-shot runs on circuit-only hardware targets.
+- **State inspection:** rejects `std::debug::amplitudes` on targets with `read_state = false`.
+- **Gate set and foreign calls:** checks whether gates can decompose to the target's native gate set and whether foreign calls occur while qubits are live.
+
+## Managing cached targets
+
+Use `noev target` to list, inspect, and fetch target descriptions:
+
+```bash
+noev target list
+noev target show ketrs
+noev target fetch <backend-spec>
+```
+
+## Plug-in backends
+
+Hardware backends are separate packages written in Noev (`impl std::backend::Backend`), Rust, or C/C++ (implementing `include/noev_backend.h`).
+
+A backend implementation is checked by the compiler so it cannot hold or act on live Noev `Qubit` values; it receives compiled `Circuit` values (or gate-level instructions) and returns classical measurement results. Both `noev run` and compiled standalone binaries load plug-in backends dynamically via `--backend` or the `NOEV_BACKEND` environment variable.
+
+See [Runtime and Backends](../../spec/runtime/) for the full backend trait, target schema, and C plug-in ABI.

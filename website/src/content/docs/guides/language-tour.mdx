@@ -1,0 +1,159 @@
+---
+title: Language Tour
+description: A practical tour of Noev syntax, kets and bras, hybrid structs, expectation values, generics, and reversible functions.
+---
+
+Noev keeps Rust's ownership semantics while giving classical and quantum code a single syntax. Semicolons are optional, logic uses `and`, `or`, `not`, and quantum keywords (`mv`, `ctrl`, `adj`, `rev`, `with`, `do`, `sample`) are contextual where possible so they stay usable as ordinary variable names.
+
+## Kets, gates, and bras
+
+Ket literals create freshly prepared qubits in the computational (`0`, `1`), Hadamard (`+`, `-`), or Y (`(+i)`, `(-i)`) bases. Multi-character kets create fixed-size registers `[Qubit; N]`:
+
+```noev
+let q = |0>          // Qubit
+let p = |+>          // Qubit in (|0> + |1>) / sqrt(2)
+let y = |(+i)>       // Qubit in (|0> + i|1>) / sqrt(2)
+let r = |01+->       // [Qubit; 4]
+```
+
+Gates are methods returning `mut Self` (allowing chaining) or free functions:
+
+```noev
+q.h().s().ry(Float::PI / 4.0)
+```
+
+Quantum control wraps any reversible block in `ctrl`:
+
+```noev
+let a = |+>
+let b = |0>
+ctrl a { b.x() }          // CNOT
+ctrl a, b { c.x() }       // Toffoli (CCX)
+```
+
+Measurement consumes the qubit (`mv`) and returns a classical `Bit`. A bra literal measures in that basis and returns a `Bool`:
+
+```noev
+let bit = mv q.measure()   // Z basis -> Bit (0 or 1)
+let hit = <+| mv p         // X basis -> Bool
+```
+
+You can also test a register against any reversible preparation function:
+
+```noev
+let is_bell = <bell()| mv pair
+```
+
+## Hybrid structs
+
+A `struct` can hold classical fields and qubits together, and methods live directly inside the `struct`:
+
+```noev
+struct Experiment {
+    angle: Float
+    state: Qubit
+
+    fn new(angle: Float) -> Self {
+        Experiment { angle, state: |0> }
+    }
+
+    fn rotate(mut self) -> mut Self {
+        self.state.ry(self.angle)
+        mut self
+    }
+
+    fn finish(mv self) -> Bit {
+        mv self.state.measure()
+    }
+}
+```
+
+Because `Experiment` contains a `Qubit`, the whole struct is linear: it cannot be copied and must be consumed before leaving scope.
+
+## Expectation values and amplitudes
+
+Build observables from Pauli operators (`X`, `Y`, `Z`, `I`) and compute expectation values with `<prep| H |prep>`:
+
+```noev
+fn ansatz(theta: Float) -> [Qubit; 2] {
+    let r = |00>
+    r[0].ry(theta)
+    ctrl r[0] { r[1].x() }
+    mv r
+}
+
+fn energy(theta: Float) -> Float {
+    let h = -1.0 * Z(0) * Z(1) + 0.5 * (Z(0) + Z(1)) + 0.5 * X(0) * X(1)
+    <ansatz(theta)| h |ansatz(theta)>
+}
+```
+
+On hardware or shot-based backends, specify a target standard error with `within`:
+
+```noev
+let e = <ansatz(theta)| h |ansatz(theta)> within 0.005
+```
+
+Overlaps `<phi|psi>` and transition elements `<phi| H |psi>` evaluate to `Complex`.
+
+## Enums and exhaustive `match`
+
+Enums can carry classical or quantum payloads. `match` must cover every variant:
+
+```noev
+fn use_spare(spare: Option<Qubit>) -> Bit {
+    match mv spare {
+        Some(q) => mv q.measure(),
+        None => 0,
+    }
+}
+```
+
+## Generics, const sizes, and traits
+
+Generic type parameters default to assuming values may be linear (not `Copy`), so generic code is safe with qubits by default. Const size expressions support linear arithmetic (`N + 1`, `N - 1`, `2 * N`):
+
+```noev
+use std::ops::Add
+
+struct QInt<const N: Int> { r: [Qubit; N] }
+
+impl<const N: Int> Add for QInt<N> {
+    type Output = QInt<{N + 1}>
+
+    fn add(mv self, rhs: QInt<N>) -> QInt<{N + 1}> {
+        // ...
+    }
+}
+```
+
+Within a package, trait bounds (including `Copy` and `Measure`) are inferred from function bodies. Public library functions declare explicit bounds.
+
+## Reversible functions, `adj`, and `with`/`do`
+
+Reversibility is inferred automatically; writing `rev fn` makes it an explicit contract checked by the compiler. Any reversible call can be inverted with `adj`:
+
+```noev
+rev fn prepare(q: mut Qubit) {
+    q.h().t()
+}
+
+fn unprepare(q: mut Qubit) {
+    adj prepare(q)
+}
+```
+
+Use `with { … } do { … }` to compute temporary ancillas, read them in `do`, and automatically invert `with` and release the ancillas:
+
+```noev
+rev fn cccx(a: ref Qubit, b: ref Qubit, c: ref Qubit, target: mut Qubit) {
+    with {
+        let anc = |0>
+        ctrl a, b { anc.x() }
+    } do {
+        ctrl anc, c { target.x() }
+    }
+}
+```
+
+For full syntax details, see [Grammar](../../spec/grammar/) and [Types](../../spec/types/).

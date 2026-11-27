@@ -1,0 +1,214 @@
+---
+title: Error Index (N001–N024)
+description: Complete index of Noev ownership, linearity, reversibility, and circuit compile-time error codes.
+---
+
+Every ownership, borrowing, reversibility, and circuit rule in Noev has a dedicated compile-time error code with a corresponding compile-fail test in `tests/ui/`. Full formal definitions live in [Ownership Specification](../../spec/ownership/) and [Execution Model](../../spec/execution/).
+
+## Summary
+
+| Code | Error | Category |
+| --- | --- | --- |
+| [`N001`](#n001) | Move without `mv` | Moves and linearity |
+| [`N002`](#n002) | Use after move | Moves and linearity |
+| [`N003`](#n003) | Linear value not consumed | Moves and linearity |
+| [`N004`](#n004) | `mv` where a reference is expected | Borrowing |
+| [`N005`](#n005) | Conflicting lends (including `ctrl` controls) | Borrowing |
+| [`N006`](#n006) | Move while lent | Borrowing |
+| [`N007`](#n007) | Move out of a reference | Borrowing |
+| [`N008`](#n008) | Reference outlives its value | Lifetimes |
+| [`N009`](#n009) | Moved in only some branches | Control flow |
+| [`N010`](#n010) | Moved inside a loop | Control flow |
+| [`N011`](#n011) | Partially moved value used as a whole | Aggregates |
+| [`N012`](#n012) | Moving an array element with a non-constant index | Aggregates |
+| [`N013`](#n013) | Irreversible operation in a reversible context | Reversibility |
+| [`N014`](#n014) | `adj` on something that is not reversible | Reversibility |
+| [`N015`](#n015) | Change without `let mut` | Mutability |
+| [`N016`](#n016) | Classical value lent for changing without `mut` | Mutability |
+| [`N017`](#n017) | Array indices not proven different | Index analysis |
+| [`N018`](#n018) | Qubit index not proven in range | Index analysis |
+| [`N019`](#n019) | Unsafe operation outside `unsafe` | Safety |
+| [`N020`](#n020) | A repeated run is not repeatable | Sampling and expectations |
+| [`N021`](#n021) | A `circuit fn` is not a circuit | Circuits |
+| [`N022`](#n022) | A repeated run prints | Sampling and expectations |
+| [`N023`](#n023) | A bra's preparation is not reversible | Bras |
+| [`N024`](#n024) | A size that subtracts is not proven at least 0 | Const sizes |
+
+---
+
+## Moves and linearity
+
+### N001
+**Move without `mv`**
+
+A linear or affine value (such as a `Qubit`, a struct holding qubits, or an unconstrained generic `T`) was passed or assigned by value without writing `mv`.
+
+```noev
+let a = |+>
+let b = a          // error[N001]: write `mv a` to move it
+```
+
+### N002
+**Use after move**
+
+A place was read, lent, or moved after ownership had already transferred via `mv`.
+
+```noev
+let q = |0>
+let b = mv q.measure()
+q.x()              // error[N002]: `q` was moved
+```
+
+### N003
+**Linear value not consumed**
+
+An owned qubit (or aggregate holding qubits) reached the end of its scope, a `return`, an unused expression, or a `_` wildcard without being measured, discarded, returned, or proven to be in `|0>`.
+
+```noev
+fn leak() {
+    let q = |+>
+}                  // error[N003]: `q` is still owned when it goes out of scope
+```
+
+## Borrowing and lifetimes
+
+### N004
+**`mv` where a reference is expected**
+
+`mv` was written on an argument to a parameter that only lends (`ref` or `mut`). Remove `mv`.
+
+```noev
+let q = |0>
+h(mv q)            // error[N004]: `h` lends its argument
+```
+
+### N005
+**Conflicting lends**
+
+The same place (or overlapping places) was lent for changing twice at once, or lent for changing while also lent `ref` (including as a `ctrl` control or a `with` place inside `do`).
+
+```noev
+swap(a, a)         // error[N005]: `a` is lent for changing twice
+ctrl a { a.x() }   // error[N005]: `a` is a control of this block
+```
+
+### N006
+**Move while lent**
+
+A value was moved with `mv` while an active `ref` or `mut` lend still points to it.
+
+```noev
+let r = q.h()
+let b = mv q.measure()  // error[N006]: `q` is moved while lent to `r`
+r.s()
+```
+
+### N007
+**Move out of a reference**
+
+Attempted to take ownership (`mv`) from behind a `ref` or `mut` reference.
+
+```noev
+fn bad(q: mut Qubit) {
+    mv q.measure() // error[N007]: cannot move out of a reference
+}
+```
+
+### N008
+**Reference outlives its value**
+
+A reference would remain live after the value it borrows from is dropped (for example, returning a reference to a local variable or escaping a `with` local).
+
+## Control flow and aggregates
+
+### N009
+**Moved in only some branches**
+
+A linear value from an outer scope was moved in one branch of an `if` or `match` (or the right-hand side of `and`/`or`) without being moved in all branches.
+
+### N010
+**Moved inside a loop**
+
+A value declared outside a `for` or `while` loop was moved inside the loop body, where later iterations would see it moved.
+
+### N011
+**Partially moved value used as a whole**
+
+One field or element of a struct, tuple, or array was moved out, and the enclosing value was later used as a whole.
+
+### N012
+**Moving an array element with a non-constant index**
+
+Moving out of `r[i]` requires a compile-time constant index so the checker can track which element was consumed.
+
+## Reversibility
+
+### N013
+**Irreversible operation in a reversible context**
+
+An irreversible operation (measurement, `discard`, `reset`, `sample`, expectation value, `print`, `extern` call, or inline `qasm`) appeared inside a `rev fn`, `ctrl` block, `with` block, or `adj` target.
+
+### N014
+**`adj` on something that is not reversible**
+
+`adj` was applied to a function or operation that is not reversible (such as `adj q.measure()`).
+
+## Mutability
+
+### N015
+**Change without `let mut`**
+
+Attempted to mutate a classical variable or a hybrid struct's classical state without declaring the binding `let mut`. (Pure quantum bindings do not need `let mut`.)
+
+### N016
+**Classical value lent for changing without `mut`**
+
+Passed a classical value to a `mut` parameter without writing `mut` at the call site.
+
+```noev
+bump(count)        // error[N016]: write `bump(mut count)`
+```
+
+## Index analysis and const sizes
+
+### N017
+**Indices not proven different**
+
+Two elements of the same qubit register (`r[i]` and `r[j]`) were used together in a way that forbids aliasing, and the compiler could not prove `i != j`.
+
+### N018
+**Qubit index not proven in range**
+
+An index into a register holding qubits could not be proven to satisfy `0 <= i < N` at compile time.
+
+### N024
+**Size not proven at least 0**
+
+A generic const size expression involving subtraction (such as `[Qubit; N - 1]`) could not be proven non-negative at a call site.
+
+## Safety, sampling, circuits, and bras
+
+### N019
+**Unsafe operation outside `unsafe`**
+
+An unsafe operation (`q.release()`, calling an `unsafe fn`, `extern "C"` call, or inline `qasm("…")`) was written outside an `unsafe { … }` block.
+
+### N020
+**A repeated run is not repeatable**
+
+A `sample` block or expectation preparation `<prep| H |prep>` referenced an outside qubit, mutated an outside variable, or captured a reference from outside.
+
+### N021
+**A `circuit fn` is not a circuit**
+
+A function marked `circuit fn` used measurement results in a way that prevents compiling it as a single circuit.
+
+### N022
+**A repeated run prints**
+
+A `sample` block or expectation preparation called `print` or `eprint`.
+
+### N023
+**A bra's preparation is not reversible**
+
+A preparation used inside a measurement bra (`<prep()| mv q`) performed an irreversible operation and therefore cannot be inverted for the test.

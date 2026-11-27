@@ -1,0 +1,74 @@
+---
+title: Noev
+description: One language. Two computing paradigms.
+template: splash
+hero:
+  title: One language. Two computing paradigms.
+  tagline: A statically typed hybrid classical-quantum language. Linear ownership prevents copying, aliasing, or forgetting a qubit at compile time, and the compiler extracts circuits automatically.
+  actions:
+    - text: Quickstart
+      link: ./getting-started/quickstart/
+      icon: right-arrow
+    - text: Language Specification
+      link: ./spec/
+      variant: minimal
+      icon: open-book
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+```noev
+fn bell_pair() -> (Bit, Bit) {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    (mv a.measure(), mv b.measure())
+}
+
+fn main() {
+    let d = sample 1000 { bell_pair() }
+    print(d)
+    print("P(11) = {d.probability((1, 1)):.3}, most likely: {d.most_likely()}")
+}
+```
+
+```text
+$ noev run examples/bell.nv --seed 7
+00   526   52.6%
+11   474   47.4%
+P(11) = 0.474, most likely: 00
+```
+
+## Core ideas
+
+<CardGrid>
+  <Card title="Linear qubit ownership" icon="approve-check-circle">
+    Qubits cannot be copied, aliased, or silently dropped. Moves are written with `mv`, borrows use `ref` and `mut`, and violations fail at compile time with codes `N001` to `N024`.
+  </Card>
+  <Card title="Automatic circuit extraction" icon="rocket">
+    Every function call runs once. Repeated runs use `sample n { … }`, and any run whose measurements only drive conditions, logic, or return values compiles into a single circuit.
+  </Card>
+  <Card title="Direct quantum notation" icon="pencil">
+    Write kets (`|+>`, `|0{b}>`), bras (`<+| mv q`), expectation values (`<ψ| H |ψ>`), controlled blocks (`ctrl`), adjoints (`adj`), and automatic ancilla uncomputation (`with`/`do`).
+  </Card>
+  <Card title="Native code, export, and interop" icon="laptop">
+    Run on `ketrs`, compile natively with Cranelift or LLVM, export OpenQASM 3 or QIR 1.0, target plug-in hardware backends, and embed Noev in Rust, Python, or C/C++.
+  </Card>
+</CardGrid>
+
+## Where to go next
+
+<CardGrid>
+  <Card title="Install the compiler" icon="download">
+    Grab a prebuilt release binary or build from source with Cargo. [Installation guide](./getting-started/installation/)
+  </Card>
+  <Card title="Learn the ownership rules" icon="warning">
+    Understand `mv`, `ref`, `mut`, `with`/`do` uncomputation, and every error code. [Ownership guide](./guides/ownership/)
+  </Card>
+  <Card title="Embed in Python, Rust, or C" icon="puzzle">
+    Drive Noev circuits and expectation values from classical optimisers. [Interop guide](./guides/interop/)
+  </Card>
+  <Card title="Read the full specification" icon="document">
+    The authoritative 0.5 language spec, synced directly from `spec/`. [Specification](./spec/)
+  </Card>
+</CardGrid>
