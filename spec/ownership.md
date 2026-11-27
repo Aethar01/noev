@@ -567,13 +567,15 @@ memory sense. What it risks is a wrong quantum computation.
 
 ### Unsafe operations
 
-| Operation                    | Claim                             | Status   |
-| ---------------------------- | --------------------------------- | -------- |
-| `q.release()`                | `q` is in \|0⟩, so it can be released without a reset | Implemented |
-| Calling an `unsafe fn`       | Whatever that function documents  | Implemented |
-| Reversible functions the checker cannot verify, such as measurement-based uncomputation, with hand-written inverse and controlled versions | They act as the stated unitary | Reserved |
-| Calling C functions and inline OpenQASM ([interop.md](interop.md)) | They behave as declared | Implemented |
-| Choosing physical qubits     | The chosen qubits are valid on the target | Reserved |
+| Operation                    | Claim                             |
+| ---------------------------- | --------------------------------- |
+| `q.release()`                | `q` is in \|0⟩, so it can be released without a reset |
+| Calling an `unsafe fn`       | Whatever that function documents  |
+| Calling C functions and inline OpenQASM ([interop.md](interop.md)) | They behave as declared |
+
+Reserved for future versions: user-declared reversible functions with hand-written inverse
+and controlled versions (such as measurement-based uncomputation), and explicit physical
+qubit selection.
 
 `release` exists because a reset costs time and adds errors on hardware. Once the compiler
 can prove a qubit is back in \|0⟩ (§9), it releases it without being asked; `release` covers

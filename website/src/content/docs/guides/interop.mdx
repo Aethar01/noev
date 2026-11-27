@@ -92,7 +92,7 @@ For hardware-specific gates not in the standard gate set, use `qasm("…")` insi
 
 ```noev
 unsafe {
-    qasm("rzz(0.5) $0, $1;", a, b)
+    qasm("rzz(0.5) {a}, {b};")
 }
 ```
 

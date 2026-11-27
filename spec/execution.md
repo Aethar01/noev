@@ -190,11 +190,11 @@ the program's output:
 - `noev export` saves every circuit as OpenQASM 3 without running anything, and
   `noev run --circuits=DIR` saves them from a run ([runtime.md](runtime.md) §7).
 
-The current compiler turns `if`s, `match`es and `while`s on measurement results into
-classical control in the circuit (a `match` becomes nested `if`s, one per test its patterns
-make). Inside them a run may do what it does anywhere else: apply gates, create and
-measure qubits, call functions. `Bit` and `Bool` variables from outside that they change are
-kept in the circuit's classical bits, so a repeat-until-success loop is one circuit:
+An `if`, `match` or `while` on measurement results compiles into classical control in the
+circuit (a `match` becomes nested `if`s, one per test its patterns make). Inside them a run
+may do what it does anywhere else: apply gates, create and measure qubits, call functions.
+`Bit` and `Bool` variables from outside that they change are kept in the circuit's classical
+bits, so a repeat-until-success loop is one circuit:
 
 ```noev
 let mut done = false
@@ -234,7 +234,7 @@ not circuits.
   error, and the exit status is non-zero.
 - `--seed N` fixes the simulator's random numbers, so a run can be reproduced.
 
-## 7. On quantum hardware (not implemented yet)
+## 7. On quantum hardware
 
 - A circuit becomes a job: the compiler emits it (as QIR or OpenQASM 3) with its classical
   control, and the quantum computer runs it for every shot.
@@ -242,7 +242,8 @@ not circuits.
   (post-processing) runs on ordinary processors.
 - A run that is not a circuit needs its classical code to run on the quantum computer's
   control system between operations, in real time. What is possible there depends on the
-  hardware; the compiler will reject what a target cannot do, and report it.
+  hardware target; the compiler rejects what a target cannot do, and reports it
+  ([runtime.md](runtime.md) §5).
 
 ## 8. Error codes
 

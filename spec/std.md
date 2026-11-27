@@ -4,10 +4,9 @@ Everything that comes with Noev but is not an intrinsic ([core.md](core.md)). Ea
 specified by a **reference definition** written in Noev, using only core and other
 standard-library items.
 
-**Implementation.** The compiler implements the standard library natively, in Rust,
-so it costs nothing to compile or check. Each native item must behave exactly as its
-reference definition: same signature, same ownership rules, same reversibility, same
-results. An item can therefore move to Noev source later without any program noticing.
+**Reference semantics.** An implementation may provide standard-library items natively or
+as Noev source, provided every item behaves identically to its reference definition: same
+signature, same ownership rules, same reversibility, and same results.
 
 ## 1. What is in scope
 
@@ -170,8 +169,7 @@ fn print(values: …) {           // variadic: not expressible in Noev yet
 }
 ```
 
-Like the rest of the standard library, `print` and `eprint` are implemented natively.
-They are not allowed in a run that is repeated ([execution.md](execution.md) §3).
+`print` and `eprint` are not allowed in a run that is repeated ([execution.md](execution.md) §3).
 
 ### `std::io`
 
@@ -267,7 +265,9 @@ maintained C library so Noev never maintains TLS:
   `accept(ref self) -> Result<TcpStream, String>`,
   `close(mv self)`.
 
-## 7. Planned
+## 7. Backend interface and future libraries
 
-`std::backend` (the `Backend` trait, `Circuit`, `Target`, Step 17) and generic quantum
-algorithms (QFT, Grover, arithmetic circuits, Hamiltonians) build on these primitives.
+`std::backend` (`Backend`, `Target`, `Level`, `Capabilities`, `Circuit`, `Instruction`,
+`Op`, `GateKind`, `Shots`, `ShotCount`, `BackendError`) is specified in
+[runtime.md](runtime.md) §3–§5. Higher-level generic quantum algorithm libraries (QFT,
+Grover, arithmetic circuits, Hamiltonians) build on these primitives.

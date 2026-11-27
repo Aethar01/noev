@@ -2,35 +2,27 @@
 
 How a Noev program is turned into something that runs, and what it runs on. A compiled
 program is native code linked to the **Noev runtime**. The runtime sends quantum operations
-to a **quantum backend**: a simulator such as ketrs, or a quantum computer's control stack.
+to a **quantum backend**: a simulator or a quantum computer's control stack.
 The program does not depend on which backend it runs on.
-
-Status: **Implemented** — the backend interface (`std::backend` and `noev-runtime::backend`, §3),
-the runtime C ABI and plug-in backend C ABI (`include/noev_backend.h`, §4), target descriptions,
-compile-time capability checks, `[target]` in `noev.toml`, `--backend=NAME[:DEVICE]`, and
-`noev target fetch|list|show` (§5), the interpreter (`noev run`, §6), the Cranelift and LLVM
-code generators (`noev build --codegen=cranelift|llvm`, §2, §7, behind optional `cranelift` and
-`llvm` features, with `--qir-runtime` for linking to QIR runtimes), and QIR 1.0 export
-(`noev build --emit=qir` and `noev export --format=qir`, §4, §7).
 
 ```
 program.nv ─▶ front end ─▶ Noev IR ─┬─▶ code generator ─▶ native object ─┐
-                                    │   (Cranelift, LLVM, …)              ├─▶ binary
+                                    │                                     ├─▶ binary
                                     │                    Noev runtime ────┘     │
                                     ├─▶ interpreter (noev run) ──▶ Noev runtime │
                                     └─▶ QIR, OpenQASM 3 (export)                ▼
                                                                     quantum backend
-                                                                    (ketrs, hardware, …)
+                                                                    (simulator, hardware, …)
 ```
 
 ## 1. Two interfaces
 
 There are two boundaries, and each has several implementations behind it:
 
-| Boundary          | Between                      | Implementations                         |
-| ----------------- | ---------------------------- | --------------------------------------- |
-| Code generation   | Noev IR and native code      | Cranelift, LLVM; the interpreter        |
-| Quantum backend   | the runtime and quantum hardware | ketrs; hardware providers; future machines |
+| Boundary          | Between                      | Examples                                 |
+| ----------------- | ---------------------------- | ---------------------------------------- |
+| Code generation   | Noev IR and native code      | Fast JIT/AOT, optimising LLVM, interpreter |
+| Quantum backend   | the runtime and quantum hardware | simulators, hardware providers, future machines |
 
 Neither boundary leaks into the language: a program means the same thing, and with the same
 seed gives the same results on a simulator, whichever code generator built it.
@@ -75,8 +67,8 @@ backend's levels:
 A call that is not repeated (a quantum function called once from `main`) is a run with one
 shot, so the same table applies.
 
-A backend that accepts both levels, as ketrs does, takes circuits where it can, since that is
-faster.
+A backend that accepts both levels (such as a statevector simulator) takes circuits where
+it can, since that is faster.
 
 ### Capabilities
 
@@ -98,10 +90,8 @@ is a simulator, so a quantum computer that could see its state would declare the
 
 ### Backends are libraries
 
-A backend is an implementation of the trait `std::backend::Backend`, at one or both levels:
-written in Noev, or in Rust or C through the plug-in interface (§4). ketrs is one written in
-Rust. Writing a backend in Noev needs traits, so its exact signatures arrive with them; in
-outline:
+A backend implements the trait `std::backend::Backend`, at one or both levels, written in
+Noev, or in another language through the plug-in C ABI (§4):
 
 ```noev
 trait Backend {
@@ -127,8 +117,8 @@ A circuit's gates, angles and size depend on classical values computed by the pr
 as a `sample` block's captured variables or a loop bound. So the runtime builds each
 circuit when the run starts: it executes the run's code once in **recording** mode, where
 quantum operations are recorded instead of performed and measurement results are placeholders
-(§4). The recorded circuit is what goes to the backend, in the backend's format (ketrs
-circuits, OpenQASM 3 or QIR for hardware). Building a circuit is classical work that runs at
+(§4). The recorded circuit is what goes to the backend, in the backend's format (native
+simulator circuits, OpenQASM 3 or QIR for hardware). Building a circuit is classical work that runs at
 native speed; the runtime may cache a run's circuit and rebind only its angles when the same
 run is repeated with new values.
 
@@ -161,8 +151,8 @@ their diagnostic on the runtime handle.
 ### Functions
 
 - **Program and errors**:
-  - `noev_rt_new_ketrs(uint64_t seed) -> NoevRuntime*` (when built with ketrs),
-    `noev_rt_new_export(uint64_t seed) -> NoevRuntime*`, `noev_rt_free(NoevRuntime*)`.
+  - `noev_rt_new_export(uint64_t seed) -> NoevRuntime*`, `noev_rt_free(NoevRuntime*)`, plus
+    backend-specific constructors (for example `noev_rt_new_ketrs` for the `ketrs` simulator).
   - `noev_rt_has_error(const NoevRuntime*) -> bool`,
     `noev_rt_error_message(const NoevRuntime*, size_t* out_len) -> const uint8_t*`,
     `noev_rt_error_is_unknown(const NoevRuntime*) -> bool`,
@@ -216,7 +206,8 @@ backends, and calls the run's code once per shot for gate-level ones.
 
 Backends plug into the runtime through a C ABI too, in the other direction: the runtime calls
 the backend's functions for the `Backend` trait (§3). A backend written in Noev is compiled
-to the same functions, so ketrs, a backend in C and a backend in Noev are interchangeable.
+to the same functions, so built-in simulators, C plug-ins and backends written in Noev are
+interchangeable.
 
 ### QIR
 
@@ -255,8 +246,8 @@ package can name a default in its `noev.toml`:
 backend = "ketrs"
 ```
 
-Built-in backends such as ketrs come with their descriptions. Others, such as a remote
-device, are fetched once and cached, so building needs no network:
+Built-in backends come with their descriptions. Others, such as a remote device, are
+fetched once and cached, so building needs no network:
 `noev target fetch NAME[:DEVICE]`. Credentials are never part of a package or a binary: a
 backend reads its own when the program starts, from the environment or the user's
 configuration.
@@ -271,9 +262,9 @@ description when it starts, as host functions are checked when it is loaded
 ## 6. The interpreter
 
 `noev run` interprets the IR instead of compiling it. It drives the runtime through the same
-C ABI (§4), which talks to backends through the `Backend` / `Session` interface in
-`noev-runtime`, so a program behaves the same interpreted or compiled. The interpreter is the
-reference implementation: compiled programs are tested against it.
+C ABI (§4), which talks to backends through the `Backend` / `Session` interface, so a
+program behaves the same interpreted or compiled. The interpreter is the reference semantics:
+compiled programs must agree with it.
 
 `main` is a run with one shot, like any other call (§3). On a backend that works gate by gate
 it runs as written. On one that only takes circuits, a `main` that is a circuit is recorded,
@@ -292,13 +283,12 @@ outcome; the repeated runs it starts are computed once, while recording. `noev e
 | `ir`      | Noev IR, for inspecting the compiler                                      |
 | `plan`    | How each repeated run executes ([execution.md](execution.md) §5)          |
 
-`binary` (the default) and `object` are produced by Cranelift (`--codegen=cranelift`, default)
-or LLVM (`--codegen=llvm`, `-O2`), each behind its own optional Cargo feature (both on by
-default). Passing `--qir-runtime` with `--codegen=llvm` emits calls to QIR's runtime symbols
-(`__quantum__qis__*`, `__quantum__rt__*`) for linking against external QIR runtimes. `qir`
-emits QIR 1.0 LLVM IR text (`.ll`) with Base Profile for circuits and Adaptive Profile for
-mid-circuit measurement, reset, and classical control; `noev export --format=qir` saves one
-`.ll` file per circuit.
+`binary` (the default) and `object` are produced by a native code generator (selected with
+`--codegen`). Passing `--qir-runtime` with an LLVM code generator emits calls to QIR's
+runtime symbols (`__quantum__qis__*`, `__quantum__rt__*`) for linking against external QIR
+runtimes. `qir` emits QIR 1.0 LLVM IR text (`.ll`) with Base Profile for circuits and
+Adaptive Profile for mid-circuit measurement, reset, and classical control;
+`noev export --format=qir` saves one `.ll` file per circuit.
 
 ### Saving circuits
 

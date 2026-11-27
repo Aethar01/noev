@@ -30,7 +30,7 @@ Controlled and inverse gates use language constructs rather than separate gate n
 
 - **Controlled:** `ctrl a { b.x() }` (CNOT), `ctrl a, b { c.x() }` (Toffoli), `ctrl a { f(b) }`
 - **Adjoint:** `adj q.s()`, `adj q.t()`, `adj f(r)`
-- **Inline OpenQASM:** `unsafe { qasm("…", q0, q1) }` (irreversible, `N013`)
+- **Inline OpenQASM:** `unsafe { qasm("sx {a}; cx {a}, {b};") }` (irreversible, `N013`)
 
 ## Measurement, reset, and release
 

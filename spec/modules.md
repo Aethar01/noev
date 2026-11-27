@@ -1,7 +1,5 @@
 # Modules and packages
 
-Status: **Implemented**, except where a section says otherwise: naming the prelude itself
-as `std::prelude` (§6).
 `noev check`, `build`, `run`, `test` and `export` take a `.nv` file or a package directory.
 
 ## 1. Files are modules
@@ -149,7 +147,7 @@ The prelude holds what almost every program uses, as Rust's does:
   observables, maths;
 - `discard`, `Basis` and `measure_in`, `print` and `eprint` ([std.md](std.md));
 - the built-in types (`Vec<T>` included) and `Option` and `Result` with their variants ([types.md](types.md));
-- once traits exist, `Copy` and `Measure` ([types.md](types.md) §6).
+- `Copy` and `Measure` ([types.md](types.md) §6).
 
 The other standard-library items live in modules of their own:
 
@@ -167,8 +165,8 @@ The other standard-library items live in modules of their own:
 | `Add`, `Sub`, `Mul`, `Div`, `Rem`, `BitAnd`, `BitOr`, `BitXor`, `Shl`, `Shr`, `Neg`, `BitNot`, and the `…Assign` traits | `std::ops` |
 | `Eq`, `Ord`           | `std::cmp`          |
 
-A name used without its import is an error whose fix-it is the `use` line. (Not implemented
-yet: naming the prelude itself, as in `use std::prelude::print`, and paths through `core`.)
+A name used without its import is an error whose diagnostic suggests the `use` line.
+Naming the prelude directly as `std::prelude` and paths rooted at `core` are reserved.
 
 ## 7. Packages and dependencies
 
@@ -213,7 +211,7 @@ use_leaf    = ( IDENT | "self" ) [ "as" ( IDENT | "_" ) ] ;
 path_prefix = ( IDENT | "pkg" | "super" ) { "::" IDENT } ;
 ```
 
-`pub`, `use` and `as` become reserved keywords; `pkg` and `super` are contextual. After
+`pub`, `use` and `as` are reserved keywords; `pkg` and `super` are contextual. After
 `pub`, a `(` always starts a visibility, as in Rust.
 
 ## 10. Open questions

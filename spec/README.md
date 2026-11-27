@@ -1,8 +1,8 @@
 # Noev Language Specification
 
-Version 0.5, draft. These documents define the Noev language. The Rust compiler in
-`crates/` is one implementation of them. When the compiler and the spec disagree, the
-compiler is wrong, or the spec is changed on purpose.
+Version 0.5. These documents define the Noev language. Any conforming compiler or runtime
+implements them, and when an implementation disagrees with these documents, the
+implementation is wrong unless the specification is intentionally revised.
 
 | Document                       | Covers                                                    |
 | ------------------------------ | --------------------------------------------------------- |
@@ -41,10 +41,3 @@ program in `tests/ui/`.
 6. **Own syntax, Rust's ownership model.** Noev borrows Rust's semantics for ownership and
    references, but its syntax differs wherever there is a reason to, so it is not mistaken
    for Rust.
-
-## Status markers
-
-- **Implemented**: supported by the current compiler.
-- **Reserved**: syntax is specified and parsed, but the compiler rejects it with "not yet
-  supported".
-- **Open**: undecided; listed in the "Open questions" section of the relevant document.

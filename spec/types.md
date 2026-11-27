@@ -55,8 +55,9 @@ when it is `1`). `and`, `or` and `not` work on `Bool`; `&`, `|`, `^` and `~` wor
 and `Int`. Convert between them with `Bool(b)` and `Bit(flag)`.
 
 `String` has value semantics: assigning or passing a string gives an independent copy, which
-the implementation makes cheap by sharing the text. Strings are immutable for now and can be
-compared with `==` and `!=`; operations on them (length, concatenation, slicing) come later.
+an implementation may make cheap by sharing immutable storage. Strings are immutable UTF-8
+text, support `+` concatenation and `==`/`!=` comparison, and provide the methods in
+[std.md](std.md) §6.
 
 A `Qubit` value is not a quantum state that can be inspected. It is the right to act on one
 logical qubit. The compiler and runtime decide which physical qubit that is.
@@ -64,10 +65,11 @@ logical qubit. The compiler and runtime decide which physical qubit that is.
 ## 2. Compound types
 
 - **Tuples** `(T1, T2, …)`, indexed with `.0`, `.1`, …
-- **Arrays** `[T; N]` with `N` a non-negative integer literal. Indexed with `a[i]`, where
-  `i: Int`. For arrays containing qubits, every index must be proven in range at compile time
-  (N018, see [ownership.md](ownership.md) §10). For classical arrays, indices proven in range
-  need no check; others are checked at runtime.
+- **Arrays** `[T; N]` with `N` a non-negative integer literal, a `const` size parameter, or
+  a linear size expression (§6). Indexed with `a[i]`, where `i: Int`. For arrays containing
+  qubits, every index must be proven in range at compile time (N018, see
+  [ownership.md](ownership.md) §10). For classical arrays, indices proven in range need no
+  check; others are checked at runtime.
 - **Structs**, declared with their fields and methods together (see
   [grammar.md](grammar.md) §2). Any field may be of any type, so a struct can mix classical
   and quantum fields freely.
@@ -131,8 +133,7 @@ struct or enum also names its variants, associated functions and literals (`R::n
 `R { … }`). Error messages show the type an alias names. For a type that is new, so that it
 cannot be mixed up with what it holds, declare a struct.
 
-**`Option` and `Result`** are built-in enums until Noev has generics (§6), like
-`Distribution<T>`:
+**`Option` and `Result`** are generic enums in the prelude (§6):
 
 | Type           | Variants              | For                                       |
 | -------------- | --------------------- | ----------------------------------------- |
@@ -293,8 +294,8 @@ what can happen:
 | Lossy     | A method named for its effect | `f.trunc()`, `f.round()`, `f.floor()`, `f.ceil()` |
 | Can fail  | `T::try_from(x)`              | `u8::try_from(n)`, `i32::try_from(x)`: a `Result<T, String>` |
 
-`Float(n)` is shorthand for `Float::from(n)`. Once traits exist, it is the `From` trait, and
-users can define conversions for their own types.
+`Float(n)` is shorthand for `Float::from(n)`. User-defined `From` conversions are reserved
+for a future version.
 
 | Conversion                 | Form              | Rule                                  |
 | -------------------------- | ----------------- | ------------------------------------- |
@@ -334,11 +335,7 @@ where it matters: any place a linear value changes hands has an explicit `mv`.
 
 ## 6. Traits and generics
 
-Status: **Implemented**: type parameters of functions, structs and enums, bounds (`Copy` and
-traits) written or inferred, inference of type arguments, `::<…>`, traits with and without
-type and size parameters, operator traits (`std::ops`), arithmetic in sizes (`N + 1`, `N - 1`), associated types (with `Copy` as their only bound), `impl`s (generic ones too) and monomorphisation, `Trait::f(x)`, `Measure`
-(for qubits, and tuples and arrays of measurable types), and size parameters. The syntax is
-in [grammar.md](grammar.md) §2.
+The syntax for generic parameters, traits and `impl` blocks is in [grammar.md](grammar.md) §2.
 
 ### Generic parameters
 
@@ -645,8 +642,7 @@ A spec that does not apply to the value's type is a compile error.
 ## 8. Open questions
 
 - **Classical values that are expensive to copy** (growable arrays, maps): `String`
-  and `Distribution` use value semantics with shared storage; whether growable collections do
-  the same, as in Swift, is open.
-- **String operations**: length, concatenation, slicing, and how indexing relates to Unicode.
-- **Generic parameter syntax**: see [grammar.md](grammar.md) §4.
+  and `Distribution` use value semantics with shared storage, while `Vec<T>` is affine;
+  whether future collection types follow `Vec<T>` is open.
+- **String indexing and Unicode**: grapheme/scalar-value iteration alongside UTF-8 byte lengths.
 - **Angles.** Whether rotation angles get their own type (with units) or stay `Float`.

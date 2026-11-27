@@ -1,7 +1,5 @@
 # Testing
 
-Status: **Implemented**.
-
 Noev has a built-in test system: tests are written as `test fn` functions in `.nv` files and
 run with `noev test`.
 

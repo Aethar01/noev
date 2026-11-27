@@ -213,7 +213,10 @@ fn_sig      = [ "test" [ "(" "fail" [ "=" STRING ] ")" ] ]
               "(" [ params ] ")" [ "->" type ] [ where_clause ] ;
 impl_def    = "impl" [ generics ] bound "for" type [ where_clause ] "{" { impl_item sep } "}" ;
 impl_item   = fn_def | "type" IDENT "=" type ;
-extern_def  = "extern" fn_sig | "extern" STRING "{" { fn_sig sep } "}" ;   (* Reserved *)
+extern_def  = "extern" fn_sig                                    (* host function *)
+            | "extern" STRING "{" { fn_sig sep } "}"             (* C imports *)
+            | "extern" STRING struct_def                         (* C layout struct *)
+            | "extern" STRING fn_def ;                           (* C callback *)
 ```
 
 A struct holds its fields and its methods together:
@@ -235,8 +238,7 @@ The receiver states how the method takes the value, using the same words as call
 `mv self` takes ownership, `ref self` borrows to read, `mut self` borrows to change.
 
 `extern` declares host and C functions; see [interop.md](interop.md). Generics, traits and
-`impl … for …` blocks are described in [types.md](types.md) §6; they are specified for 0.5
-and not implemented yet.
+`impl … for …` blocks are described in [types.md](types.md) §6.
 
 ### Types
 
@@ -552,16 +554,9 @@ fn main() {
 
 ## 4. Open questions
 
-- **Explicit type arguments in expressions.** Type arguments are written with angle
-  brackets, `Distribution<(Bit, Bit)>`, which is unambiguous in type positions. Writing them
-  inside an expression (calling a generic function with explicit types) would clash with
-  `<`; Rust's `f::<T>()` is the likely answer, decided with generics.
 - **Negative controls.** `ctrl !a { … }` or `ctrl not a { … }` (control on \|0⟩). `!` is
-  reserved for this or similar. Not implemented yet.
-- **`adj` on blocks.** `adj { … }` could invert a whole block. For now `adj` is only allowed
-  on single calls.
+  reserved for this or similar.
+- **`adj` on blocks.** `adj { … }` could invert a whole block; currently `adj` applies to
+  single calls.
 - **Closures.** If added, the `|x| …` form can coexist with kets, because a ket contains
-  only `0 1 + -` and ends in `>`. Not needed so far.
-- **Modules and imports.** Specified in [modules.md](modules.md). A `.nv` file on its own is
-  a package of one module, and `main` in a package's root module is the entry point when one
-  exists.
+  only `0 1 + -`, `(+i)`/`(-i)` or `{…}` and ends in `>`.

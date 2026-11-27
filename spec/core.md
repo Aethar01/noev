@@ -78,10 +78,9 @@ Not reversible, so not allowed in a reversible context.
 
 `discard`, which resets and releases, is in the standard library.
 
-`[Qubit; N]` also has `fn measure(mv self) -> [Bit; N]`, which measures every qubit and
-consumes the array. (This is the `Measure` trait once traits exist; see
-[types.md](types.md) §6.) It is an intrinsic because writing it in Noev needs generics over
-the length `N`, and moving elements out with a loop index is not allowed (N012).
+`[Qubit; N]` also implements `Measure` ([types.md](types.md) §6) with
+`fn measure(mv self) -> [Bit; N]`, which measures every qubit and consumes the array. It is
+an intrinsic because moving elements out of an array with a loop index is not allowed (N012).
 
 Also as free functions: `measure(mv q)`, `reset(q)`.
 
@@ -134,4 +133,3 @@ language, specified there (§3).
 - **Measuring without consuming.** `measure` consumes the qubit. Repeated mid-circuit
   measurement (error-correction syndromes, for example) would prefer something like
   `fn measure_reset(mut self) -> Bit` that leaves the qubit in \|0⟩.
-- **Y-basis bras** (`<i|`, `<-i|`), alongside Y-basis kets.

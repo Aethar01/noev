@@ -1,11 +1,5 @@
 # Interop
 
-Status: **Implemented.** Host `extern fn` declarations, the safe Rust embedding API (`noev`
-crate), the Python bindings (`noev-py` / `python/noev`), `extern "C"` imports,
-`extern "C" struct`, `extern "C" fn` callbacks and function pointers (Cranelift and LLVM),
-the C/C++ embedding API (`include/noev.h`, `noev-c`), and inline OpenQASM (`qasm("…")`) are
-all implemented.
-
 Hybrid programs lean on classical libraries Noev will not reimplement (optimisers, linear
 algebra, machine learning, plotting), and many users will want to call Noev from an existing
 program. Interop works in both directions:
@@ -77,10 +71,9 @@ To call back into Noev from inside a host function, register it with
 `host_fn_with_context`: its first parameter is `&mut noev::HostContext`, which exposes the
 same checked `call` method.
 
-Python bindings (`python/noev`, built from `crates/noev-py` with PyO3/maturin) expose the
-same API (`noev.Program.compile_file`, `noev.Runtime(program).host_fn(...)`,
-`host_fn_with_context(...)`, `runtime.call(...)`, `noev.Observable`, `noev.Struct`,
-`noev.Enum`, `noev.Distribution`).
+Python bindings expose the same API (`noev.Program.compile_file`,
+`noev.Runtime(program).host_fn(...)`, `host_fn_with_context(...)`, `runtime.call(...)`,
+`noev.Observable`, `noev.Struct`, `noev.Enum`, `noev.Distribution`).
 
 A host function may call back into the program while it runs, through the same `call`: a
 Python optimiser can evaluate `energy(θ)` from inside the host function Noev called. The
@@ -150,8 +143,8 @@ fn vqe() -> Float {
 }
 ```
 
-A C API (`include/noev.h`, built from `crates/noev-c` as `libnoev_c.a`) also lets C and
-C++ programs embed Noev, with the same type mapping and re-entrant host callbacks.
+A C API (`noev.h`) also lets C and C++ programs embed Noev, with the same type mapping and
+re-entrant host callbacks.
 
 ## 4. Rules for foreign calls
 
@@ -213,7 +206,7 @@ extern_def  = "extern" fn_sig                                   (* host function
 type        = … | "extern" STRING "fn" "(" [ type { "," type } [ "," ] ] ")" [ "->" type ] ;
 ```
 
-`extern` becomes a reserved keyword. `STRING` is a string literal ([grammar.md](grammar.md)),
+`extern` is a reserved keyword. `STRING` is a string literal ([grammar.md](grammar.md)),
 without interpolation; only `"C"` is accepted.
 
 ## 7. Open questions
