@@ -109,8 +109,8 @@ fn sample_circuit(
     };
     // If nothing needed a measurement result's value, the result is the template with each
     // outcome's bits filled in; otherwise each outcome's classical code is replayed.
-    let replay = builder.needs_values.get();
-    let Mode::Build(recording) = std::mem::take(&mut builder.mode) else {
+    let replay = builder.needs_values();
+    let Mode::Build(recording) = builder.take_mode() else {
         unreachable!("the builder records")
     };
     let circuit = recording.circuit;

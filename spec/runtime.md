@@ -5,8 +5,9 @@ program is native code linked to the **Noev runtime**. The runtime sends quantum
 to a **quantum backend**: a simulator such as ketrs, or a quantum computer's control stack.
 The program does not depend on which backend it runs on.
 
-Status: design, except the backend interface (§3), which the interpreter (`noev run`)
-already uses, with ketrs as its backend (§6).
+Status: the backend interface (§3) and the runtime C ABI (§4) are implemented; the
+interpreter (`noev run`, §6) drives the runtime through the C ABI, with ketrs and export
+as backends. Code generators (§2) and target descriptions (§5) are still design.
 
 ```
 program.nv ─▶ front end ─▶ Noev IR ─┬─▶ code generator ─▶ native object ─┐
@@ -132,26 +133,79 @@ to the runtime with each run, so the runtime never has to discover it by trying.
 
 ## 4. The runtime interface
 
-Compiled code calls the runtime through a C ABI, so code from any code generator can link
-to it, and a runtime or backend can be written in any language.
+Compiled code and the interpreter both call the runtime through a C ABI (`extern "C"`), so
+code from any code generator can link to it, and a runtime or backend can be written in any
+language.
 
-Its shape follows QIR's: qubits and measurement results are opaque handles, and gates are
-functions. The groups of functions:
+Its shape follows QIR's: an opaque runtime handle (`NoevRuntime*`), pointer-sized opaque
+qubit handles (`NoevQubit`), tagged measurement result handles (`NoevResult`: bit 63 clear
+for a concrete `0`/`1` bit, bit 63 set for a recorded circuit classical bit index), and one
+function per core gate. Operations that can fail return `bool` (`true` on success) and store
+their diagnostic on the runtime handle.
 
-- **Program**: start up (parse the backend's options, seed the random numbers), shut down
-  (flush output, report errors).
-- **Qubits**: allocate, release (with the simulator's check, [ownership.md](ownership.md)
-  §11), reset.
-- **Gates**: one function per core gate ([core.md](core.md)), each taking its target qubits,
-  angles, and the qubits controlling it (from `ctrl`).
-- **Measurement**: measure a qubit, giving a *result handle*; read a result as a `Bit`. In
-  recording mode a handle stands for a measurement that has not happened. Using it in a
-  condition records classical control; reading its value outside the circuit rule's
-  allowed uses is an error the compiler has already ruled out for runs it marked as circuits.
-- **Runs**: run a function `n` times (`sample`), given a pointer to the run's code, its
-  captured values, and whether it is a circuit; returns a `Distribution`. Estimate an
-  expectation value of a preparation.
-- **Output and failure**: `print`, `eprint`, `assert` failures and runtime errors.
+### Types
+
+- `NoevRuntime` — opaque execution context holding the backend session or circuit recorder,
+  free qubit pool, `ctrl` stack, `adj` and `with`/`do` recording frames, PRNG, output streams
+  and last error.
+- `NoevQubit` — opaque pointer-sized qubit handle (`usize`).
+- `NoevResult` — `uint64_t` measurement handle (concrete `0`/`1`, or `0x8000_0000_0000_0000 | clbit` while recording a circuit).
+- `NoevComplex` — `struct { double re; double im; }`.
+- `NoevPauliFactor` — `struct { NoevQubit qubit; uint8_t pauli; }` (`0` = X, `1` = Y, `2` = Z).
+- `NoevPauliTerm` — `struct { double coeff; const NoevPauliFactor* factors; size_t len; }`.
+
+### Functions
+
+- **Program and errors**:
+  - `noev_rt_new_ketrs(uint64_t seed) -> NoevRuntime*` (when built with ketrs),
+    `noev_rt_new_export(uint64_t seed) -> NoevRuntime*`, `noev_rt_free(NoevRuntime*)`.
+  - `noev_rt_has_error(const NoevRuntime*) -> bool`,
+    `noev_rt_error_message(const NoevRuntime*, size_t* out_len) -> const uint8_t*`,
+    `noev_rt_error_is_unknown(const NoevRuntime*) -> bool`,
+    `noev_rt_clear_error(NoevRuntime*)`,
+    `noev_rt_set_error(NoevRuntime*, const uint8_t* msg, size_t len)`.
+  - `noev_rt_flush(NoevRuntime*) -> bool`,
+    `noev_rt_next_seed(NoevRuntime*) -> uint64_t`,
+    `noev_rt_measured(const NoevRuntime*) -> bool`.
+- **Qubits**:
+  - `noev_rt_qubit_allocate(NoevRuntime*, NoevQubit* out) -> bool`.
+  - `noev_rt_qubit_release(NoevRuntime*, NoevQubit q) -> bool` (checks `|0⟩` on simulators,
+    [ownership.md](ownership.md) §11).
+  - `noev_rt_qubit_reset(NoevRuntime*, NoevQubit q) -> bool`.
+- **Core gates** (pick up active `ctrl` qubits and record into active `adj` / `with` frames):
+  - `noev_qis_x`, `noev_qis_y`, `noev_qis_z`, `noev_qis_h`, `noev_qis_s`, `noev_qis_s_adj`,
+    `noev_qis_t`, `noev_qis_t_adj`: `(NoevRuntime*, NoevQubit q) -> bool`.
+  - `noev_qis_rx`, `noev_qis_ry`, `noev_qis_rz`, `noev_qis_p`:
+    `(NoevRuntime*, double theta, NoevQubit q) -> bool`.
+  - `noev_qis_u`, `noev_qis_u_adj`:
+    `(NoevRuntime*, double theta, double phi, double lam, NoevQubit q) -> bool`.
+  - `noev_qis_swap(NoevRuntime*, NoevQubit q1, NoevQubit q2) -> bool`.
+  - `noev_qis_unitary(NoevRuntime*, const NoevQubit* targets, size_t n_targets, const double* params, size_t n_params, bool adjoint) -> bool`.
+- **Control, adjoint and `with`/`do`**:
+  - `noev_rt_ctrl_push(NoevRuntime*, const NoevQubit* controls, size_t len)`,
+    `noev_rt_ctrl_pop(NoevRuntime*)`,
+    `noev_rt_ctrl_depth(const NoevRuntime*) -> size_t`,
+    `noev_rt_ctrl_restore(NoevRuntime*, size_t depth)`.
+  - `noev_rt_adj_start(NoevRuntime*)`, `noev_rt_adj_end(NoevRuntime*) -> bool`,
+    `noev_rt_adj_abort(NoevRuntime*)`.
+  - `noev_rt_with_start(NoevRuntime*)`, `noev_rt_with_do(NoevRuntime*)`,
+    `noev_rt_with_end(NoevRuntime*) -> bool`.
+- **Measurement**:
+  - `noev_qis_mz(NoevRuntime*, NoevQubit q, NoevResult* out) -> bool`.
+  - `noev_rt_result_is_clbit(NoevResult) -> bool`,
+    `noev_rt_result_clbit_index(NoevResult) -> size_t`,
+    `noev_rt_result_read(NoevRuntime*, NoevResult) -> uint8_t` (reads a concrete bit, or
+    resolves against the replay outcome when re-running classical code for a recorded circuit).
+- **State inspection and runs**:
+  - `noev_rt_amplitudes(NoevRuntime*, const NoevQubit* qubits, size_t n_qubits, NoevComplex* out, size_t out_len) -> bool`.
+  - `noev_rt_zero_amplitude(NoevRuntime*, NoevComplex* out) -> bool`.
+  - `noev_rt_expectation_exact(NoevRuntime*, const NoevPauliTerm* terms, size_t n_terms, double* out) -> bool`.
+  - `noev_rt_sample_run(NoevRuntime*, size_t shots, bool is_circuit, NoevRunFn body, void* env, NoevSampleCallback on_outcome, void* cb_env) -> bool`
+    runs a compiled or interpreted shot callback `shots` times — recording a circuit once when
+    `is_circuit` and the backend accepts circuits, or running gate by gate otherwise.
+- **Output and failure**:
+  - `noev_rt_write(NoevRuntime*, bool stderr, const uint8_t* bytes, size_t len) -> bool`.
+  - `noev_rt_assert(NoevRuntime*, bool cond, const uint8_t* msg, size_t len) -> bool`.
 
 The runtime implements runs on top of the backend: it records circuits for circuit-level
 backends, and calls the run's code once per shot for gate-level ones.
@@ -210,12 +264,10 @@ description when it starts, as host functions are checked when it is loaded
 
 ## 6. The interpreter
 
-`noev run` interprets the IR instead of compiling it. It drives the same runtime and
-backends through the same interface, so a program behaves the same interpreted or compiled.
-The interpreter is the reference implementation: compiled programs are tested against it.
-
-For now, the interface is a Rust trait in `noev-runtime` (`Backend`, with a `Session` for gate
-level), and ketrs is the only backend.
+`noev run` interprets the IR instead of compiling it. It drives the runtime through the same
+C ABI (§4), which talks to backends through the `Backend` / `Session` interface in
+`noev-runtime`, so a program behaves the same interpreted or compiled. The interpreter is the
+reference implementation: compiled programs are tested against it.
 
 `main` is a run with one shot, like any other call (§3). On a backend that works gate by gate
 it runs as written. On one that only takes circuits, a `main` that is a circuit is recorded,

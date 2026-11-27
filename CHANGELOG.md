@@ -46,6 +46,12 @@ before 1.0.
   (`Window`, `MutWindow`, `Option<ref Qubit>`); and place-based borrow annotations
   (`ref[a, b] String`, `mut[self.state] Qubit`, `Window[r]`), inferred within a package and
   required on a library's `pub` functions and trait signatures where elision does not decide.
+- Runtime C ABI (`spec/runtime.md` §4, §6): added `noev-runtime::cabi` with QIR-shaped
+  `extern "C"` entry points (`NoevRuntime`, `NoevQubit`, tagged `NoevResult`, `noev_qis_*`
+  core gates, `noev_rt_qubit_*`, `noev_rt_ctrl_*`, `noev_rt_adj_*`, `noev_rt_with_*`,
+  `noev_rt_amplitudes`, `noev_rt_zero_amplitude`, `noev_rt_expectation_exact`,
+  `noev_rt_sample_run`, `noev_rt_write`, `noev_rt_assert`), and moved the interpreter
+  (`Machine`) onto this C ABI.
 - Arithmetic in sizes: `[Qubit; N + 1]`, `[Bit; 2 * N]` and `Reg<{N + 1}>`, compared after
   normalising and solved by calls (`[Qubit; 5]` for `[Qubit; N + 1]` makes `N` 4), so a
   quantum integer can be a library type (`tests/run/qint.nv`). A call also infers a parameter

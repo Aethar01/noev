@@ -1,6 +1,7 @@
 //! Executes Noev programs, sending their quantum operations to a backend.
 
 pub mod backend;
+pub mod cabi;
 pub mod format;
 pub mod fourier;
 pub mod int;
@@ -59,11 +60,13 @@ fn main_as_circuit(
     seed: u64,
     output: Rc<RefCell<Output>>,
 ) -> Result<(), RuntimeError> {
-    let mut recording = Recording::default();
-    recording.runs = Some(Default::default());
+    let recording = Recording {
+        runs: Some(Default::default()),
+        ..Recording::default()
+    };
     let mut builder = Machine::new(program, backend, seed).with_mode(Mode::Build(recording));
     builder.call(main, Vec::new())?;
-    let Mode::Build(recording) = std::mem::take(&mut builder.mode) else {
+    let Mode::Build(recording) = builder.take_mode() else {
         unreachable!("the builder records")
     };
     let counts = backend

@@ -27,5 +27,10 @@ default = ["ketrs"]
 name = "run"
 required-features = ["ketrs"]
 
+[[bench]]
+name = "cabi"
+harness = false
+required-features = ["ketrs"]
+
 [lints]
 workspace = true

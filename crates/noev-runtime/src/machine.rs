@@ -1,77 +1,28 @@
-//! Runs IR, sending quantum operations to a [`Backend`].
+//! Runs IR, driving the quantum runtime through its C ABI ([`crate::cabi`]).
 //!
-//! One [`Machine`] runs one shot. Qubits are allocated on demand: the backend adds one
-//! qubit when no released qubit is free, and qubits that are measured, discarded or released
-//! go back on a free list in \|0⟩ for reuse.
-//!
-//! `ctrl` keeps a stack of control qubits that every gate picks up. `adj` records the gates a
-//! reversible call applies, then applies their inverses in reverse order. Reversible code
-//! cannot measure or allocate, and its classical computation is deterministic, so this is
-//! exactly the inverse.
+//! One [`Machine`] runs one shot. All quantum state — qubit allocation and reuse, `ctrl`
+//! stacks, `adj` and `with`/`do` recording, gate dispatch, measurement, state inspection and
+//! output — lives inside [`NoevRuntime`] and is called through the `extern "C"` functions in
+//! [`crate::cabi`], so interpreted and compiled programs share the exact same runtime.
 
 use noev_ir::ir::*;
 use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli as IrPauli};
 use noev_sema::{Ty, TyKind};
-use noev_syntax::Span;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
 use std::cell::RefCell;
-use std::io::Write;
 use std::rc::Rc;
 
-use crate::backend::{Backend, BackendError, Circuit, Condition, Instruction, Op, Session};
+use crate::backend::{Backend, BackendError, Condition, Instruction, Op};
+use crate::cabi::{
+    self, NoevComplex, NoevPauliFactor, NoevPauliTerm, NoevQubit, NoevResult, NoevRuntime,
+};
+pub use crate::cabi::{Mode, Output, Recording, RuntimeError};
 use crate::format;
 use crate::int::Int;
 use crate::sized;
 use crate::value::{Observable, Pauli, Pointer, Value};
-
-/// Where a program's output goes.
-pub struct Output {
-    /// Standard output.
-    pub stdout: Box<dyn Write>,
-    /// Standard error.
-    pub stderr: Box<dyn Write>,
-}
-
-/// A failure while running a program.
-#[derive(Clone, Debug, PartialEq)]
-pub struct RuntimeError {
-    /// What went wrong.
-    pub message: String,
-    /// Where, when known.
-    pub span: Option<Span>,
-    /// Whether, rather than failing, the program needed a result that a backend which only
-    /// records circuits does not have (`spec/runtime.md` §7).
-    pub unknown: bool,
-}
-
-impl RuntimeError {
-    /// A failure.
-    pub fn new(message: impl Into<String>) -> Self {
-        RuntimeError {
-            message: message.into(),
-            span: None,
-            unknown: false,
-        }
-    }
-
-    /// The error, placed at `span` if it has no place yet.
-    pub fn at(mut self, span: Span) -> Self {
-        if self.span.is_none() && span != Span::default() {
-            self.span = Some(span);
-        }
-        self
-    }
-
-    /// The program needs a result that is not known because circuits are only recorded.
-    pub fn unknown(message: impl Into<String>) -> Self {
-        RuntimeError {
-            unknown: true,
-            ..RuntimeError::new(message)
-        }
-    }
-}
 
 type Result<T> = std::result::Result<T, RuntimeError>;
 
@@ -96,58 +47,12 @@ fn runs_for(part: f64, weight: f64, precision: f64) -> Result<usize> {
     Ok(runs as usize)
 }
 
-/// How a machine treats quantum operations.
-#[derive(Clone, Debug, Default)]
-pub enum Mode {
-    /// Send them to the backend, one at a time.
-    #[default]
-    Simulate,
-    /// Record them into a circuit instead, without simulating. Measurement results are the
-    /// circuit's classical bits ([`Value::Clbit`]); where a known value is needed, they are
-    /// taken from the recording's `known` outcome, or are a placeholder `0`. Only used for runs
-    /// that are circuits, where a measurement result cannot affect anything before the last
-    /// quantum operation except through classical control in the circuit.
-    Build(Recording),
-}
-
-/// A circuit being recorded in [`Mode::Build`].
-#[derive(Clone, Debug, Default)]
-pub struct Recording {
-    /// The circuit so far.
-    pub circuit: Circuit,
-    /// Released and measured qubits, and whether each needs a reset before reuse.
-    free: Vec<(usize, bool)>,
-    /// One outcome of the circuit, classical bit `k` at bit `k`, when re-running its classical
-    /// code for that outcome. Recording the same way again keeps the bits numbered the same.
-    pub known: Option<u64>,
-    /// How many recorded loops enclose the current point: a qubit allocated in a loop's body
-    /// may have been used in the previous pass, so it is reset.
-    loops: u32,
-    /// The conditions the enclosing recorded branches decided, and how: inside
-    /// `if (c[0] == 0)`, testing `c[0] == 0` again needs no `if` of its own.
-    decided: Vec<(Condition, bool)>,
-    /// When recording `main` as a one-shot circuit: the results of the repeated runs it
-    /// starts (`sample`, expectation values), in order. They are computed while recording and
-    /// reused when its classical code runs for the outcome, so each runs once.
-    pub runs: Option<std::collections::VecDeque<Value>>,
-}
-
-impl Recording {
-    /// A recording that re-runs a circuit's classical code for one outcome.
-    pub fn knowing(bits: u64) -> Self {
-        Recording {
-            known: Some(bits),
-            ..Recording::default()
-        }
-    }
-}
-
 impl Machine<'_> {
     /// The result of a repeated run: reused when re-running `main`'s classical code for its
     /// outcome, otherwise computed by `compute` (and kept, while recording `main`).
     fn repeated_run(&mut self, compute: impl FnOnce(&mut Self) -> Result<Value>) -> Result<Value> {
         let replaying = matches!(
-            &self.mode,
+            &self.rt.mode,
             Mode::Build(Recording {
                 known: Some(_),
                 runs: Some(_),
@@ -157,7 +62,7 @@ impl Machine<'_> {
         if replaying
             && let Mode::Build(Recording {
                 runs: Some(runs), ..
-            }) = &mut self.mode
+            }) = &mut self.rt.mode
         {
             return runs
                 .pop_front()
@@ -166,7 +71,7 @@ impl Machine<'_> {
         let value = compute(self)?;
         if let Mode::Build(Recording {
             runs: Some(runs), ..
-        }) = &mut self.mode
+        }) = &mut self.rt.mode
         {
             runs.push_back(value.clone());
         }
@@ -174,91 +79,53 @@ impl Machine<'_> {
     }
 }
 
-/// Recorded circuits use fresh qubits up to this many, so their measurements can all come at
-/// the end; beyond it they reuse measured qubits after a reset.
-const FRESH_QUBITS: usize = 24;
-
-/// Recorded operations, ancillas and saved outer controls for one `with`/`do` block.
-struct WithFrame {
-    ops: Vec<Op>,
-    allocs: Vec<usize>,
-    controls: Vec<usize>,
-    control_marks: Vec<usize>,
-}
-
 /// The state of one run of a program.
 pub struct Machine<'p> {
     program: &'p Program,
     backend: &'p dyn Backend,
-    /// The backend's gate-level session; `None` if it only runs circuits.
-    session: Option<Box<dyn Session>>,
-    /// Qubits in \|0⟩ that can be handed out again.
-    free: Vec<usize>,
+    /// The runtime C ABI instance driving quantum operations, recording, PRNG and output.
+    rt: NoevRuntime,
     frames: Vec<Vec<Value>>,
-    /// Control qubits that every gate picks up, from enclosing `ctrl` blocks.
-    controls: Vec<usize>,
-    /// The length of `controls` before each `ctrl` push.
-    control_marks: Vec<usize>,
-    /// Gates recorded by enclosing `adj` calls, innermost last.
-    recording: Vec<Vec<Op>>,
-    /// Qubits released inside enclosing `adj` calls, verified once their ops replay.
-    adj_releases: Vec<Vec<usize>>,
-    /// Currently executing `with` blocks (recording ops and allocations).
-    with_active: Vec<WithFrame>,
-    /// `with` blocks whose `do` block is currently running, waiting to uncompute at `WithEnd`.
-    with_pending: Vec<WithFrame>,
-    rng: SmallRng,
-    /// Whether anything has been measured, which makes an expectation value an estimate.
-    measured: bool,
-    /// Where `print` and `eprint` write; `None` in runs that are repeated, which cannot print.
-    output: Option<Rc<RefCell<Output>>>,
-    /// Simulating, or recording a circuit (possibly for one known outcome).
-    pub mode: Mode,
-    /// Whether, while recording, an operation needed a measurement result's actual value.
-    /// If not, a circuit's results are its classical bits in place, and outcomes need no
-    /// replay.
-    pub needs_values: std::cell::Cell<bool>,
 }
 
 impl<'p> Machine<'p> {
     /// A machine with no qubits, running on `backend`.
     pub fn new(program: &'p Program, backend: &'p dyn Backend, seed: u64) -> Self {
-        let mut seeds = SmallRng::seed_from_u64(seed);
+        // SAFETY: `Machine<'p>` borrows `backend` for `'p` and drops `rt` before `'p` ends.
+        let rt = unsafe { NoevRuntime::new_borrowed(backend, seed) };
         Machine {
             program,
             backend,
-            session: backend.session(seeds.random()),
-            free: Vec::new(),
+            rt,
             frames: Vec::new(),
-            controls: Vec::new(),
-            control_marks: Vec::new(),
-            recording: Vec::new(),
-            adj_releases: Vec::new(),
-            with_active: Vec::new(),
-            with_pending: Vec::new(),
-            rng: seeds,
-            measured: false,
-            output: None,
-            mode: Mode::Simulate,
-            needs_values: std::cell::Cell::new(false),
         }
     }
 
     /// A machine in `mode`.
     pub fn with_mode(mut self, mode: Mode) -> Self {
-        self.mode = mode;
+        self.rt.set_mode(mode);
         self
     }
 
     /// Sends the program's output to `output`.
     pub fn with_output(mut self, output: Rc<RefCell<Output>>) -> Self {
-        self.output = Some(output);
+        self.rt.set_output(output);
         self
+    }
+
+    /// Takes the runtime's mode, replacing it with [`Mode::Simulate`].
+    pub fn take_mode(&mut self) -> Mode {
+        std::mem::take(&mut self.rt.mode)
+    }
+
+    /// Whether, while recording, an operation needed a measurement result's actual value.
+    pub fn needs_values(&self) -> bool {
+        self.rt.needs_values.get()
     }
 
     /// Whether anything has been measured, so later shots could behave differently.
     pub fn measured(&self) -> bool {
-        self.measured
+        unsafe { cabi::noev_rt_measured(&self.rt) }
     }
 
     /// Measures every qubit in `value`, replacing each with its `Bit`. This is how returned
@@ -280,22 +147,7 @@ impl<'p> Machine<'p> {
     /// occurred, with `qubits[k]` at bit `k`. Leaves the state unchanged. `None` if the
     /// backend cannot (only simulators can).
     pub fn sample(&mut self, qubits: &[usize], shots: usize) -> Option<Vec<(u64, usize)>> {
-        self.session.as_mut()?.sample(qubits, shots)
-    }
-
-    /// The backend's gate-level session, for running operations one at a time.
-    fn session(&mut self) -> Result<&mut dyn Session> {
-        let name = self.backend.name();
-        let executes = self.backend.executes();
-        match &mut self.session {
-            Some(session) => Ok(session.as_mut()),
-            None if !executes => Err(RuntimeError::unknown(
-                "the program runs a quantum operation outside a `sample`",
-            )),
-            None => Err(RuntimeError::new(format!(
-                "`{name}` only runs circuits, and this run is not one (see `noev build --emit=plan`)"
-            ))),
-        }
+        self.rt.sample_state(qubits, shots)
     }
 
     /// Calls `func` with `args` and returns its result.
@@ -307,11 +159,10 @@ impl<'p> Machine<'p> {
             locals[i + 1] = arg;
         }
         self.frames.push(locals);
-        let control_depth = (self.controls.len(), self.control_marks.len());
+        let control_depth = unsafe { cabi::noev_rt_ctrl_depth(&self.rt) };
         let result = self.run_blocks(function, 0, None);
         // A `return` from inside a `ctrl` block leaves its controls behind.
-        self.controls.truncate(control_depth.0);
-        self.control_marks.truncate(control_depth.1);
+        unsafe { cabi::noev_rt_ctrl_restore(&mut self.rt, control_depth) };
         let mut frame = self.frames.pop().expect("pushed above");
         result?;
         Ok(std::mem::replace(&mut frame[0], Value::Unit))
@@ -340,7 +191,7 @@ impl<'p> Machine<'p> {
                     then,
                     otherwise,
                     control: Some(control),
-                } if matches!(self.mode, Mode::Build(_)) => {
+                } if matches!(self.rt.mode, Mode::Build(_)) => {
                     match self.record_control(function, block, cond, *then, *otherwise, control)? {
                         Some(next) => next.index(),
                         // Not on a measurement result here: an ordinary branch.
@@ -372,18 +223,17 @@ impl<'p> Machine<'p> {
                         .map(|a| self.operand(a))
                         .collect::<Result<Vec<_>>>()?;
                     let value = if *adjoint {
-                        self.recording.push(Vec::new());
-                        self.adj_releases.push(Vec::new());
+                        unsafe { cabi::noev_rt_adj_start(&mut self.rt) };
                         let value = self.call(*func, args);
-                        let ops = self.recording.pop().expect("pushed above");
-                        let releases = self.adj_releases.pop().expect("pushed above");
-                        let value = value?;
-                        for mut op in ops.into_iter().rev() {
-                            op.adjoint = !op.adjoint;
-                            self.emit(op)?;
-                        }
-                        for qubit in releases {
-                            self.verify_release(qubit)?;
+                        let value = match value {
+                            Ok(v) => v,
+                            Err(err) => {
+                                unsafe { cabi::noev_rt_adj_abort(&mut self.rt) };
+                                return Err(err);
+                            }
+                        };
+                        if !unsafe { cabi::noev_rt_adj_end(&mut self.rt) } {
+                            return Err(self.rt.take_error());
                         }
                         value
                     } else {
@@ -406,18 +256,17 @@ impl<'p> Machine<'p> {
                     next.index()
                 }
                 Terminator::Assert { cond, next, span } => {
-                    if !self.truth(cond)? {
-                        return Err(RuntimeError {
-                            span: Some(*span),
-                            ..RuntimeError::new("assertion failed")
-                        });
+                    let ok = self.truth(cond)?;
+                    let msg = b"assertion failed";
+                    if !unsafe { cabi::noev_rt_assert(&mut self.rt, ok, msg.as_ptr(), msg.len()) } {
+                        return Err(self.rt.take_error().at(*span));
                     }
                     next.index()
                 }
                 Terminator::Return => return Ok(()),
                 // A recorded branch that no shot takes: a `match`'s last test failing.
                 Terminator::Unreachable
-                    if stop.is_some() && matches!(self.mode, Mode::Build(_)) =>
+                    if stop.is_some() && matches!(self.rt.mode, Mode::Build(_)) =>
                 {
                     return Ok(());
                 }
@@ -598,7 +447,7 @@ impl<'p> Machine<'p> {
     }
 
     fn recording(&mut self) -> &mut Recording {
-        match &mut self.mode {
+        match &mut self.rt.mode {
             Mode::Build(recording) => recording,
             Mode::Simulate => unreachable!("only while recording"),
         }
@@ -744,17 +593,17 @@ impl Machine<'_> {
     fn concrete(&self, value: Value) -> Value {
         if let Mode::Build(Recording {
             known: Some(bits), ..
-        }) = self.mode
+        }) = self.rt.mode
         {
             return value.with_clbits(bits);
         }
         match value {
             Value::Clbit(_) | Value::Cond(_, true) => {
-                self.needs_values.set(true);
+                self.rt.needs_values.set(true);
                 Value::Bit(false)
             }
             Value::Cond(_, false) => {
-                self.needs_values.set(true);
+                self.rt.needs_values.set(true);
                 Value::Bool(false)
             }
             Value::Aggregate(items) if items.iter().any(Value::has_clbits) => {
@@ -826,7 +675,7 @@ impl Machine<'_> {
                 if let Value::Variant(index, _) = self.operand(label)? {
                     let label = state_label(index)?;
                     for &(gate, adjoint) in noev_ir::ir::into_z(label) {
-                        self.emit(gate_op(gate, adjoint, qubit))?;
+                        self.apply_gate(gate, adjoint, &[], &[qubit])?;
                     }
                 }
                 Ok(())
@@ -863,14 +712,7 @@ impl Machine<'_> {
                         .map(|p| self.float(p))
                         .collect::<Result<Vec<_>>>()?
                 };
-                let op = Op {
-                    gate: *gate,
-                    adjoint: *adjoint,
-                    params,
-                    controls: self.controls.clone(),
-                    targets,
-                };
-                self.emit(op)
+                self.apply_gate(*gate, *adjoint, &params, &targets)
             }
             Stmt::Measure { dest, qubit } => {
                 let qubit = self.qubit(qubit)?;
@@ -879,15 +721,10 @@ impl Machine<'_> {
             }
             Stmt::Reset(place) => {
                 let qubit = self.qubit(place)?;
-                match &mut self.mode {
-                    Mode::Simulate => self.session()?.reset(qubit).map_err(backend_error),
-                    Mode::Build(recording) => {
-                        recording
-                            .circuit
-                            .instructions
-                            .push(Instruction::Reset(qubit));
-                        Ok(())
-                    }
+                if unsafe { cabi::noev_rt_qubit_reset(&mut self.rt, NoevQubit(qubit)) } {
+                    Ok(())
+                } else {
+                    Err(self.rt.take_error())
                 }
             }
             Stmt::Release(place) => {
@@ -895,57 +732,32 @@ impl Machine<'_> {
                 self.release_qubit(qubit)
             }
             Stmt::CtrlPush(places) => {
-                self.control_marks.push(self.controls.len());
+                let mut qubits = Vec::new();
                 for place in places {
-                    let mut qubits = Vec::new();
                     self.load(place)?.qubits(&mut qubits);
-                    self.controls.extend(qubits);
                 }
+                let handles: Vec<NoevQubit> = qubits.into_iter().map(NoevQubit).collect();
+                unsafe { cabi::noev_rt_ctrl_push(&mut self.rt, handles.as_ptr(), handles.len()) };
                 Ok(())
             }
             Stmt::CtrlPop => {
-                let mark = self.control_marks.pop().unwrap_or(0);
-                self.controls.truncate(mark);
+                unsafe { cabi::noev_rt_ctrl_pop(&mut self.rt) };
                 Ok(())
             }
             Stmt::WithStart => {
-                // Under an enclosing `ctrl`, `U† (ctrl V) U = ctrl(U† V U)`, so `with` and
-                // its inverse run without the outer controls.
-                let controls = std::mem::take(&mut self.controls);
-                let control_marks = std::mem::take(&mut self.control_marks);
-                self.with_active.push(WithFrame {
-                    ops: Vec::new(),
-                    allocs: Vec::new(),
-                    controls,
-                    control_marks,
-                });
+                unsafe { cabi::noev_rt_with_start(&mut self.rt) };
                 Ok(())
             }
             Stmt::WithDo => {
-                let mut frame = self.with_active.pop().expect("matching WithStart");
-                self.controls = std::mem::take(&mut frame.controls);
-                self.control_marks = std::mem::take(&mut frame.control_marks);
-                self.with_pending.push(frame);
+                unsafe { cabi::noev_rt_with_do(&mut self.rt) };
                 Ok(())
             }
             Stmt::WithEnd => {
-                let frame = self.with_pending.pop().expect("matching WithDo");
-                let controls = std::mem::take(&mut self.controls);
-                let control_marks = std::mem::take(&mut self.control_marks);
-                let result = (|| -> Result<()> {
-                    for mut op in frame.ops.into_iter().rev() {
-                        op.adjoint = !op.adjoint;
-                        self.emit(op)?;
-                    }
+                if unsafe { cabi::noev_rt_with_end(&mut self.rt) } {
                     Ok(())
-                })();
-                self.controls = controls;
-                self.control_marks = control_marks;
-                result?;
-                for qubit in frame.allocs.into_iter().rev() {
-                    self.release_qubit(qubit)?;
+                } else {
+                    Err(self.rt.take_error())
                 }
-                Ok(())
             }
             Stmt::Sample {
                 dest,
@@ -962,7 +774,7 @@ impl Machine<'_> {
                     let shots = usize::try_from(m.int(shots)?).map_err(|_| {
                         RuntimeError::new("`sample` needs a positive number of shots")
                     })?;
-                    let seed = m.rng.random();
+                    let seed = unsafe { cabi::noev_rt_next_seed(&mut m.rt) };
                     let program = m.program;
                     let elem = *elem;
                     let dist = crate::sampling::sample(
@@ -987,18 +799,14 @@ impl Machine<'_> {
                     line.push_str(&format::display(self.program, &self.value(op)?, *ty));
                 }
                 line.push('\n');
-                if let Some(output) = &self.output {
-                    let mut output = output.borrow_mut();
-                    let stream = if *stderr {
-                        &mut output.stderr
-                    } else {
-                        &mut output.stdout
-                    };
-                    stream
-                        .write_all(line.as_bytes())
-                        .map_err(|e| RuntimeError::new(format!("cannot write output: {e}")))?;
+                let bytes = line.as_bytes();
+                if unsafe {
+                    cabi::noev_rt_write(&mut self.rt, *stderr, bytes.as_ptr(), bytes.len())
+                } {
+                    Ok(())
+                } else {
+                    Err(self.rt.take_error())
                 }
-                Ok(())
             }
             Stmt::Overlap {
                 dest,
@@ -1018,7 +826,7 @@ impl Machine<'_> {
                 let bra_args = self.prep_args(bra)?;
                 let ket_args = self.prep_args(ket)?;
                 let value = self.repeated_run(|m| {
-                    let seed = m.rng.random();
+                    let seed = unsafe { cabi::noev_rt_next_seed(&mut m.rt) };
                     let sides = Sides {
                         bra,
                         bra_args,
@@ -1063,7 +871,7 @@ impl Machine<'_> {
                         .collect::<Result<Vec<_>>>()?,
                 };
                 let value = self.repeated_run(|m| {
-                    let seed = m.rng.random();
+                    let seed = unsafe { cabi::noev_rt_next_seed(&mut m.rt) };
                     let value = expectation(
                         m.program,
                         m.backend,
@@ -1088,20 +896,28 @@ impl Machine<'_> {
         qubits: &[usize],
         control: Option<usize>,
     ) -> Result<()> {
-        for &(index, pauli) in product {
-            let qubit = *qubits.get(index).ok_or_else(|| {
-                RuntimeError::new(format!("the observable's qubit {index} is not prepared"))
-            })?;
-            let gate = match pauli {
-                Pauli::X => Gate::X,
-                Pauli::Y => Gate::Y,
-                Pauli::Z => Gate::Z,
-            };
-            let mut op = gate_op(gate, false, qubit);
-            op.controls.extend(control);
-            self.emit(op)?;
+        if let Some(c) = control {
+            let h = NoevQubit(c);
+            unsafe { cabi::noev_rt_ctrl_push(&mut self.rt, &h, 1) };
         }
-        Ok(())
+        let result = (|| -> Result<()> {
+            for &(index, pauli) in product {
+                let qubit = *qubits.get(index).ok_or_else(|| {
+                    RuntimeError::new(format!("the observable's qubit {index} is not prepared"))
+                })?;
+                let gate = match pauli {
+                    Pauli::X => Gate::X,
+                    Pauli::Y => Gate::Y,
+                    Pauli::Z => Gate::Z,
+                };
+                self.apply_gate(gate, false, &[], &[qubit])?;
+            }
+            Ok(())
+        })();
+        if control.is_some() {
+            unsafe { cabi::noev_rt_ctrl_pop(&mut self.rt) };
+        }
+        result
     }
 
     /// A `within` precision, or the default; it must be positive.
@@ -1132,7 +948,7 @@ impl Machine<'_> {
         let gates = match label {
             Value::Bit(bit) => {
                 if *bit {
-                    self.emit(gate_op(Gate::X, false, qubit))?;
+                    self.apply_gate(Gate::X, false, &[], &[qubit])?;
                 }
                 return Ok(());
             }
@@ -1143,7 +959,7 @@ impl Machine<'_> {
                         "expected a Bit or State label, found {other:?}"
                     )));
                 };
-                let Mode::Build(recording) = &mut self.mode else {
+                let Mode::Build(recording) = &mut self.rt.mode else {
                     unreachable!("measurement results are only unknown while recording")
                 };
                 recording.circuit.instructions.push(Instruction::If {
@@ -1155,7 +971,7 @@ impl Machine<'_> {
             }
         };
         for &gate in gates {
-            self.emit(gate_op(gate, false, qubit))?;
+            self.apply_gate(gate, false, &[], &[qubit])?;
         }
         Ok(())
     }
@@ -1167,78 +983,109 @@ impl Machine<'_> {
             Value::Ref(ptr) => self.get(&ptr)?.qubits(&mut qubits),
             other => other.qubits(&mut qubits),
         }
-        if matches!(self.mode, Mode::Build(_)) {
-            return Err(RuntimeError::new(
-                "amplitudes can be read only while a simulator runs gate by gate",
-            ));
-        }
-        let Some(amplitudes) = self.session()?.amplitudes(&qubits) else {
-            return Err(RuntimeError::new(format!(
-                "`{}` cannot show amplitudes: it does not hold the state",
-                self.backend.name()
-            )));
+        let handles: Vec<NoevQubit> = qubits.into_iter().map(NoevQubit).collect();
+        let mut buf = vec![NoevComplex::default(); 1usize << handles.len()];
+        let ok = unsafe {
+            cabi::noev_rt_amplitudes(
+                &mut self.rt,
+                handles.as_ptr(),
+                handles.len(),
+                buf.as_mut_ptr(),
+                buf.len(),
+            )
         };
-        let amplitudes = amplitudes.map_err(backend_error)?;
+        if !ok {
+            return Err(self.rt.take_error());
+        }
         Ok(Value::Aggregate(
-            amplitudes
-                .into_iter()
-                .map(|(re, im)| Value::Complex(re, im))
+            buf.into_iter()
+                .map(|c| Value::Complex(c.re, c.im))
                 .collect(),
         ))
     }
 
-    /// Releases `qubit`, which must be in \|0⟩ (`spec/ownership.md` §9, §11). While recording
-    /// for `adj`, defers the simulator's \|0⟩ check until the inverted ops replay.
+    /// Releases `qubit`, which must be in \|0⟩ (`spec/ownership.md` §9, §11).
     fn release_qubit(&mut self, qubit: usize) -> Result<()> {
-        if let Some(pending) = self.adj_releases.last_mut() {
-            if !pending.contains(&qubit) {
-                pending.push(qubit);
-            }
-            match &mut self.mode {
-                Mode::Simulate => self.free.push(qubit),
-                Mode::Build(recording) => recording.free.push((qubit, false)),
-            }
-            return Ok(());
+        if unsafe { cabi::noev_rt_qubit_release(&mut self.rt, NoevQubit(qubit)) } {
+            Ok(())
+        } else {
+            Err(self.rt.take_error())
         }
-        match &mut self.mode {
-            Mode::Simulate => {}
-            Mode::Build(recording) => {
-                recording.free.push((qubit, false));
-                return Ok(());
-            }
-        }
-        // Simulators check `release`'s claim (spec/ownership.md §11).
-        self.session()?.release(qubit).map_err(backend_error)?;
-        self.free.push(qubit);
-        Ok(())
     }
 
-    /// Checks a deferred `release` after an `adj` call replays its inverted ops.
-    fn verify_release(&mut self, qubit: usize) -> Result<()> {
-        if let Some(outer) = self.adj_releases.last_mut() {
-            if !outer.contains(&qubit) {
-                outer.push(qubit);
+    /// Dispatches a core gate through the QIR-shaped Runtime C ABI (`spec/runtime.md` §4).
+    fn apply_gate(
+        &mut self,
+        gate: Gate,
+        adjoint: bool,
+        params: &[f64],
+        targets: &[usize],
+    ) -> Result<()> {
+        let rt: *mut NoevRuntime = &mut self.rt;
+        let ok = match gate {
+            Gate::Unitary => {
+                let qs: Vec<NoevQubit> = targets.iter().map(|&q| NoevQubit(q)).collect();
+                unsafe {
+                    cabi::noev_qis_unitary(
+                        rt,
+                        qs.as_ptr(),
+                        qs.len(),
+                        params.as_ptr(),
+                        params.len(),
+                        adjoint,
+                    )
+                }
             }
-            return Ok(());
-        }
-        if matches!(self.mode, Mode::Simulate) {
-            self.session()?.release(qubit).map_err(backend_error)?;
-        }
-        Ok(())
-    }
-
-    /// Applies a gate, or records it when a function's gates are being collected (`adj`, a
-    /// bra's preparation), also recording into any enclosing active `with` blocks.
-    fn emit(&mut self, op: Op) -> Result<()> {
-        for frame in &mut self.with_active {
-            frame.ops.push(op.clone());
-        }
-        match self.recording.last_mut() {
-            Some(recording) => {
-                recording.push(op);
-                Ok(())
+            Gate::Swap => {
+                if targets.len() != 2 {
+                    return Err(RuntimeError::new("a gate with the wrong number of qubits"));
+                }
+                unsafe { cabi::noev_qis_swap(rt, NoevQubit(targets[0]), NoevQubit(targets[1])) }
             }
-            None => self.execute(op),
+            _ => {
+                if targets.len() != 1 {
+                    return Err(RuntimeError::new("a gate with the wrong number of qubits"));
+                }
+                let q = NoevQubit(targets[0]);
+                unsafe {
+                    match gate {
+                        Gate::X => cabi::noev_qis_x(rt, q),
+                        Gate::Y => cabi::noev_qis_y(rt, q),
+                        Gate::Z => cabi::noev_qis_z(rt, q),
+                        Gate::H => cabi::noev_qis_h(rt, q),
+                        Gate::S if adjoint => cabi::noev_qis_s_adj(rt, q),
+                        Gate::S => cabi::noev_qis_s(rt, q),
+                        Gate::T if adjoint => cabi::noev_qis_t_adj(rt, q),
+                        Gate::T => cabi::noev_qis_t(rt, q),
+                        Gate::Rx => {
+                            let theta = if adjoint { -params[0] } else { params[0] };
+                            cabi::noev_qis_rx(rt, theta, q)
+                        }
+                        Gate::Ry => {
+                            let theta = if adjoint { -params[0] } else { params[0] };
+                            cabi::noev_qis_ry(rt, theta, q)
+                        }
+                        Gate::Rz => {
+                            let theta = if adjoint { -params[0] } else { params[0] };
+                            cabi::noev_qis_rz(rt, theta, q)
+                        }
+                        Gate::P => {
+                            let theta = if adjoint { -params[0] } else { params[0] };
+                            cabi::noev_qis_p(rt, theta, q)
+                        }
+                        Gate::U if adjoint => {
+                            cabi::noev_qis_u_adj(rt, params[0], params[1], params[2], q)
+                        }
+                        Gate::U => cabi::noev_qis_u(rt, params[0], params[1], params[2], q),
+                        Gate::Swap | Gate::Unitary => unreachable!(),
+                    }
+                }
+            }
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(self.rt.take_error())
         }
     }
 
@@ -1253,22 +1100,18 @@ impl Machine<'_> {
     /// The gates a preparation would apply to the qubits it creates, without applying them;
     /// the qubits, still \|0⟩, are freed. Returns the qubits it made, in order, and the gates.
     fn record_prep(&mut self, prep: &Prep, args: Vec<Value>) -> Result<(Vec<usize>, Vec<Op>)> {
-        self.recording.push(Vec::new());
-        self.adj_releases.push(Vec::new());
+        self.rt.record_ops_start();
         let made = self.prepare(prep, args);
-        let ops = self.recording.pop().expect("pushed above");
-        self.adj_releases.pop();
+        let (ops, _) = self.rt.record_ops_end();
         let made = made?;
         for &qubit in &made {
-            self.free_unused(qubit)?;
+            self.release_qubit(qubit)?;
         }
         Ok((made, ops))
     }
 
     /// Applies `ops`, recorded on the qubits `from`, to the qubits `onto` instead: in reverse
-    /// and inverted when `inverse`, and each also controlled by `control` if given. Temporary
-    /// ancillas (allocated and released inside `with`/`do`) get fresh qubits that are released
-    /// afterwards.
+    /// and inverted when `inverse`, and each also controlled by `control` if given.
     fn replay(
         &mut self,
         ops: Vec<Op>,
@@ -1277,53 +1120,7 @@ impl Machine<'_> {
         inverse: bool,
         control: Option<usize>,
     ) -> Result<()> {
-        if from.len() != onto.len() {
-            return Err(RuntimeError::new(format!(
-                "the preparation makes {} qubits, but there are {}",
-                from.len(),
-                onto.len()
-            )));
-        }
-        let mut temps: Vec<(usize, usize)> = Vec::new();
-        let ops: Vec<Op> = if inverse {
-            ops.into_iter().rev().collect()
-        } else {
-            ops
-        };
-        let result = (|| -> Result<()> {
-            for mut op in ops {
-                op.adjoint ^= inverse;
-                let mut map = |q: usize| -> Result<usize> {
-                    if let Some(k) = from.iter().position(|&f| f == q) {
-                        return Ok(onto[k]);
-                    }
-                    if let Some(&(_, mapped)) = temps.iter().find(|&&(src, _)| src == q) {
-                        return Ok(mapped);
-                    }
-                    let fresh = self.allocate()?;
-                    temps.push((q, fresh));
-                    Ok(fresh)
-                };
-                let mut targets = Vec::with_capacity(op.targets.len());
-                for q in op.targets {
-                    targets.push(map(q)?);
-                }
-                let mut controls =
-                    Vec::with_capacity(op.controls.len() + usize::from(control.is_some()));
-                for q in op.controls {
-                    controls.push(map(q)?);
-                }
-                controls.extend(control);
-                op.targets = targets;
-                op.controls = controls;
-                self.emit(op)?;
-            }
-            Ok(())
-        })();
-        for (_, fresh) in temps.into_iter().rev() {
-            self.release_qubit(fresh)?;
-        }
-        result
+        self.rt.replay_ops(ops, from, onto, inverse, control)
     }
 
     /// Undoes `prep` on the qubits `onto`, controlled by `control` if given.
@@ -1338,131 +1135,27 @@ impl Machine<'_> {
         self.replay(ops, &made, onto, true, control)
     }
 
-    /// Frees a qubit known to be in \|0⟩ because nothing has acted on it.
-    fn free_unused(&mut self, qubit: usize) -> Result<()> {
-        match &mut self.mode {
-            Mode::Build(recording) => recording.free.push((qubit, false)),
-            Mode::Simulate => {
-                self.session()?.release(qubit).map_err(backend_error)?;
-                self.free.push(qubit);
-            }
-        }
-        Ok(())
-    }
-
-    /// A qubit in \|0⟩: a released one, or a new one added to the state.
+    /// A qubit in \|0⟩: allocated through the Runtime C ABI.
     fn allocate(&mut self) -> Result<usize> {
-        let qubit = match &mut self.mode {
-            Mode::Simulate => {
-                if let Some(qubit) = self.free.pop() {
-                    qubit
-                } else {
-                    self.session()?.add_qubit().map_err(backend_error)?
-                }
-            }
-            Mode::Build(recording) => {
-                let circuit = &mut recording.circuit;
-                let clean = (recording.loops == 0)
-                    .then(|| recording.free.iter().rposition(|&(_, dirty)| !dirty))
-                    .flatten();
-                let (qubit, needs_reset) = if let Some(i) = clean {
-                    recording.free.remove(i)
-                } else if circuit.qubits < FRESH_QUBITS || recording.free.is_empty() {
-                    circuit.qubits += 1;
-                    (circuit.qubits - 1, false)
-                } else {
-                    recording.free.pop().expect("checked above")
-                };
-                if needs_reset || recording.loops > 0 {
-                    circuit.instructions.push(Instruction::Reset(qubit));
-                }
-                qubit
-            }
-        };
-        if let Some(frame) = self.with_active.last_mut() {
-            frame.allocs.push(qubit);
+        let mut q = NoevQubit(0);
+        if unsafe { cabi::noev_rt_qubit_allocate(&mut self.rt, &mut q) } {
+            Ok(q.0)
+        } else {
+            Err(self.rt.take_error())
         }
-        Ok(qubit)
     }
 
-    /// Measures a qubit: its `Bit`, or while recording, the classical bit it was measured into.
+    /// Measures a qubit through the Runtime C ABI: its `Bit`, or while recording, the
+    /// classical bit it was measured into.
     fn measurement(&mut self, qubit: usize) -> Result<Value> {
-        if let Mode::Build(recording) = &self.mode {
-            let clbit = recording.circuit.clbits;
-            self.measure(qubit)?;
-            return Ok(Value::Clbit(clbit));
+        let mut res = NoevResult(0);
+        if !unsafe { cabi::noev_qis_mz(&mut self.rt, NoevQubit(qubit), &mut res) } {
+            return Err(self.rt.take_error());
         }
-        Ok(Value::Bit(self.measure(qubit)?))
-    }
-
-    /// Measures a qubit, consuming it: it is returned to \|0⟩ and freed.
-    fn measure(&mut self, qubit: usize) -> Result<bool> {
-        self.measured = true;
-        match &mut self.mode {
-            Mode::Simulate => {}
-            Mode::Build(recording) => {
-                let circuit = &mut recording.circuit;
-                let clbit = circuit.clbits;
-                circuit
-                    .instructions
-                    .push(Instruction::Measure { qubit, clbit });
-                circuit.clbits += 1;
-                recording.free.push((qubit, true));
-                return Ok(false);
-            }
-        }
-        let session = self.session()?;
-        let bit = session.measure(qubit).map_err(backend_error)?;
-        if bit {
-            // Back to |0⟩ for reuse: the qubit is known to be in |1⟩.
-            session
-                .apply(&Op {
-                    gate: Gate::X,
-                    adjoint: false,
-                    params: Vec::new(),
-                    controls: Vec::new(),
-                    targets: vec![qubit],
-                })
-                .map_err(backend_error)?;
-        }
-        self.free.push(qubit);
-        Ok(bit)
-    }
-
-    /// Applies a gate with its controls.
-    fn execute(&mut self, op: Op) -> Result<()> {
-        // A two-qubit matrix under `ctrl`, or in a circuit for any backend or OpenQASM: as
-        // controlled one-qubit matrices and phases, each also under the outer controls.
-        if op.gate == Gate::Unitary
-            && op.targets.len() == 2
-            && (!op.controls.is_empty() || matches!(self.mode, Mode::Build(_)))
-        {
-            let (first, second) = (op.targets[0], op.targets[1]);
-            for mut part in crate::unitary::decompose(&op.params, op.adjoint, first, second) {
-                part.controls.extend(&op.controls);
-                self.execute(part)?;
-            }
-            return Ok(());
-        }
-        if op.controls.iter().any(|c| op.targets.contains(c)) {
-            return Err(RuntimeError::new(
-                "a gate's target is also one of its controls",
-            ));
-        }
-        let wanted = match op.gate {
-            Gate::Swap => 2,
-            Gate::Unitary => crate::unitary::size(&op.params) / 2,
-            _ => 1,
-        };
-        if op.targets.len() != wanted {
-            return Err(RuntimeError::new("a gate with the wrong number of qubits"));
-        }
-        match &mut self.mode {
-            Mode::Simulate => self.session()?.apply(&op).map_err(backend_error),
-            Mode::Build(recording) => {
-                recording.circuit.instructions.push(Instruction::Gate(op));
-                Ok(())
-            }
+        if cabi::noev_rt_result_is_clbit(res) {
+            Ok(Value::Clbit(cabi::noev_rt_result_clbit_index(res)))
+        } else {
+            Ok(Value::Bit(res.as_bit()))
         }
     }
 }
@@ -2028,7 +1721,7 @@ fn expectation(
     let mut machine = Machine::new(program, backend, seeds.random());
     let qubits = machine.prepare(prep, args.clone())?;
     let first = machine.exact_expectation(observable, &qubits)?;
-    if !machine.measured {
+    if !machine.measured() {
         return Ok(first);
     }
     // Each run's exact value lies within ± the sum of the coefficients of non-identity terms.
@@ -2078,9 +1771,11 @@ fn overlap(
             let qubits = machine.prepare(sides.ket, sides.ket_args.clone())?;
             machine.paulis(product, &qubits, None)?;
             machine.unprepare(sides.bra, sides.bra_args.clone(), &qubits, None)?;
-            match machine.session()?.zero_amplitude() {
-                Some(amplitude) => amplitude.map_err(backend_error)?,
-                None => return Err(RuntimeError::new("the simulator cannot read amplitudes")),
+            let mut amp = NoevComplex::default();
+            if unsafe { cabi::noev_rt_zero_amplitude(&mut machine.rt, &mut amp) } {
+                (amp.re, amp.im)
+            } else {
+                return Err(machine.rt.take_error());
             }
         } else {
             let shots = runs_for(coeff.abs(), weight, precision)?;
@@ -2112,9 +1807,9 @@ fn hadamard_test(
     let mut builder =
         Machine::new(program, backend, seeds.random()).with_mode(Mode::Build(Recording::default()));
     let control = builder.allocate()?;
-    builder.emit(gate_op(Gate::H, false, control))?;
+    builder.apply_gate(Gate::H, false, &[], &[control])?;
     if imaginary {
-        builder.emit(gate_op(Gate::S, true, control))?;
+        builder.apply_gate(Gate::S, true, &[], &[control])?;
     }
     let (made, ops) = builder.record_prep(sides.ket, sides.ket_args.clone())?;
     let qubits: Vec<usize> = made
@@ -2124,11 +1819,11 @@ fn hadamard_test(
     builder.replay(ops, &made, &qubits, false, Some(control))?;
     builder.paulis(product, &qubits, Some(control))?;
     builder.unprepare(sides.bra, sides.bra_args.clone(), &qubits, Some(control))?;
-    builder.emit(gate_op(Gate::H, false, control))?;
+    builder.apply_gate(Gate::H, false, &[], &[control])?;
     let Value::Clbit(clbit) = builder.measurement(control)? else {
         unreachable!("measurements are recorded")
     };
-    let Mode::Build(recording) = std::mem::take(&mut builder.mode) else {
+    let Mode::Build(recording) = builder.take_mode() else {
         unreachable!("the builder records")
     };
     let Some(counts) = backend.run_circuit(&recording.circuit, shots, seeds.random()) else {
@@ -2299,10 +1994,10 @@ fn measure_as_circuit(
             _ => unreachable!("measurements are recorded"),
         })
         .collect();
-    if builder.needs_values.get() {
+    if builder.needs_values() {
         return Ok(None);
     }
-    let Mode::Build(recording) = std::mem::take(&mut builder.mode) else {
+    let Mode::Build(recording) = builder.take_mode() else {
         unreachable!("the builder records")
     };
     if recording.circuit.clbits > 64 {
@@ -2345,13 +2040,7 @@ impl Machine<'_> {
                 Pauli::Z => &[],
             };
             for &(gate, adjoint) in gates {
-                self.execute(Op {
-                    gate,
-                    adjoint,
-                    params: Vec::new(),
-                    controls: Vec::new(),
-                    targets: vec![qubit],
-                })?;
+                self.apply_gate(gate, adjoint, &[], &[qubit])?;
             }
             values.push(self.measurement(qubit)?);
         }
@@ -2366,7 +2055,7 @@ impl Machine<'_> {
                 for label in noev_syntax::state::labels(state) {
                     let qubit = self.allocate()?;
                     for &gate in noev_ir::ir::label_gates(label) {
-                        self.emit(gate_op(gate, false, qubit))?;
+                        self.apply_gate(gate, false, &[], &[qubit])?;
                     }
                     qubits.push(Value::Qubit(qubit));
                 }
@@ -2379,7 +2068,7 @@ impl Machine<'_> {
         Ok(qubits)
     }
 
-    fn exact_expectation(&self, observable: &Observable, qubits: &[usize]) -> Result<f64> {
+    fn exact_expectation(&mut self, observable: &Observable, qubits: &[usize]) -> Result<f64> {
         if observable.width() > qubits.len() {
             return Err(RuntimeError::new(format!(
                 "the observable acts on qubit {}, but the preparation has {} qubit{}",
@@ -2388,25 +2077,44 @@ impl Machine<'_> {
                 if qubits.len() == 1 { "" } else { "s" }
             )));
         }
-        let terms: Vec<_> = observable
+        let factor_vecs: Vec<Vec<NoevPauliFactor>> = observable
             .terms
             .iter()
-            .map(|(coeff, product)| {
-                (
-                    *coeff,
-                    product.iter().map(|&(i, p)| (qubits[i], p)).collect(),
-                )
+            .map(|(_, product)| {
+                product
+                    .iter()
+                    .map(|&(i, p)| NoevPauliFactor {
+                        qubit: NoevQubit(qubits[i]),
+                        pauli: match p {
+                            Pauli::X => 0,
+                            Pauli::Y => 1,
+                            Pauli::Z => 2,
+                        },
+                    })
+                    .collect()
             })
             .collect();
-        let name = self.backend.name();
-        let session = self.session.as_ref().ok_or_else(|| {
-            RuntimeError::new(format!("`{name}` cannot compute expectation values yet"))
-        })?;
-        match session.expectation(&terms) {
-            Some(value) => value.map_err(backend_error),
-            None => Err(RuntimeError::new(format!(
-                "`{name}` cannot compute expectation values yet"
-            ))),
+        let terms: Vec<NoevPauliTerm> = observable
+            .terms
+            .iter()
+            .zip(&factor_vecs)
+            .map(|((coeff, _), factors)| NoevPauliTerm {
+                coeff: *coeff,
+                factors: if factors.is_empty() {
+                    std::ptr::null()
+                } else {
+                    factors.as_ptr()
+                },
+                len: factors.len(),
+            })
+            .collect();
+        let mut out = 0.0;
+        if unsafe {
+            cabi::noev_rt_expectation_exact(&mut self.rt, terms.as_ptr(), terms.len(), &mut out)
+        } {
+            Ok(out)
+        } else {
+            Err(self.rt.take_error())
         }
     }
 }
