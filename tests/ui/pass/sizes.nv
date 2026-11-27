@@ -1,0 +1,27 @@
+// Size parameters: indices proven against `N` (spec/ownership.md §10).
+
+fn ladder<const N: Int>(r: mut [Qubit; N]) {
+    for i in 0..N - 1 {
+        ctrl r[i] { r[i + 1].x() }
+    }
+}
+
+fn ends<const N: Int>(r: mut [Qubit; N]) {
+    assert 0 < N
+    r[0].h()
+    r[N - 1].h()
+}
+
+fn reversed<const N: Int>(r: mut [Qubit; N]) {
+    for i in 0..N {
+        r[N - 1 - i].z()
+    }
+}
+
+fn main() {
+    let r = |0000>
+    ladder(mut r)
+    ends(mut r)
+    reversed(mut r)
+    let bits = mv r.measure()
+}

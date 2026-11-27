@@ -128,7 +128,7 @@ fn quantum_rules() {
 #[test]
 fn observables() {
     ok("fn f() -> Observable { -1.0 * Z(0) * Z(1) + 0.5 * (X(0) + X(1)) - I() }");
-    ok("fn f() -> Observable { P(0, 1) * PX(1, 0) }");
+    ok("use std::observables::{P, PX}\nfn f() -> Observable { P(0, 1) * PX(1, 0) }");
 }
 
 #[test]
@@ -205,14 +205,15 @@ fn main_takes_nothing_and_returns_unit() {
 }
 
 #[test]
-fn reserved_items() {
+fn with_do_typing() {
+    ok("fn f() { with { let a = |0> } do { let _ = ref a } }");
     assert_eq!(
-        one_error("trait T { fn m(ref self) }"),
-        "traits are not supported yet"
+        one_error("fn f() -> Int { with { let a = |0> } do { return 1 } }"),
+        "`return` cannot leave a `with`/`do` block"
     );
     assert_eq!(
-        one_error("fn f() { with { } do { } }"),
-        "`with`/`do` is not supported yet"
+        one_error("fn f() { for i in 0..2 { with {} do { break } } }"),
+        "`break` outside a loop"
     );
 }
 
@@ -339,7 +340,7 @@ fn sized_numbers() {
 #[test]
 fn computed_labels() {
     ok("fn f(b: Bit, bits: [Bit; 3]) -> [Qubit; 5] { |{b}0{bits}> }");
-    ok("fn f(s: State) -> Qubit { |{s}> }");
+    ok("use std::state::State\nfn f(s: State) -> Qubit { |{s}> }");
     ok("fn f(r: [Qubit; 2]) -> Bool { <{[0, 1]}| mv r }");
     assert_eq!(
         one_error("fn f(n: Int) -> Qubit { |{n}> }"),
@@ -389,23 +390,30 @@ fn amplitudes() {
 #[test]
 fn matrix_gates() {
     ok("fn f(q: mut Qubit, m: [[Complex; 2]; 2]) { q.unitary(m).h() }");
+    ok("fn f(r: mut [Qubit; 1], m: [[Complex; 2]; 2]) { r.unitary(m) }");
     ok("fn f(r: mut [Qubit; 2], m: [[Complex; 4]; 4]) { r.unitary(m) }");
+    ok("fn f(r: mut [Qubit; 3], m: [[Complex; 8]; 8]) { r.unitary(m) }");
+    ok("fn f(r: mut [Qubit; 4], m: [[Complex; 16]; 16]) { r.unitary(m) }");
     assert_eq!(
         one_error("fn f(q: mut Qubit, m: [[Complex; 4]; 4]) { q.unitary(m) }"),
         "mismatched types: expected `[[Complex; 2]; 2]`, found `[[Complex; 4]; 4]`"
+    );
+    assert_eq!(
+        one_error("fn f(r: mut [Qubit; 3], m: [[Complex; 4]; 4]) { r.unitary(m) }"),
+        "mismatched types: expected `[[Complex; 8]; 8]`, found `[[Complex; 4]; 4]`"
     );
 }
 
 #[test]
 fn state_inspection() {
-    ok("fn f(r: ref [Qubit; 3]) -> [Complex; 8] { amplitudes(r) }");
-    ok("fn f(q: ref Qubit) -> Complex { amplitudes(q)[1] }");
+    ok("use std::debug::amplitudes\nfn f(r: ref [Qubit; 3]) -> [Complex; 8] { amplitudes(r) }");
+    ok("use std::debug::amplitudes\nfn f(q: ref Qubit) -> Complex { amplitudes(q)[1] }");
     assert_eq!(
-        one_error("fn f(b: Bit) -> [Complex; 2] { amplitudes(b) }"),
+        one_error("use std::debug::amplitudes\nfn f(b: Bit) -> [Complex; 2] { amplitudes(b) }"),
         "`amplitudes` takes a qubit or an array of qubits, but this is `Bit`"
     );
     assert_eq!(
-        one_error("fn f(r: ref [Qubit; 21]) { let a = amplitudes(r) }"),
+        one_error("use std::debug::amplitudes\nfn f(r: ref [Qubit; 21]) { let a = amplitudes(r) }"),
         "`amplitudes` shows at most 20 qubits: 2^20 amplitudes"
     );
 }
@@ -422,11 +430,11 @@ fn arrays_and_tuples_compare() {
 
 #[test]
 fn fourier_transforms() {
-    ok("fn f(x: [Complex; 8]) -> [Complex; 8] { ifft(fft(x)) }");
-    ok("fn f(x: [c32; 3]) -> [c32; 3] { fft(x) }");
-    ok("fn f() -> [Complex; 2] { fft([1.0, 0.0]) }");
+    ok("use std::fourier::{fft, ifft}\nfn f(x: [Complex; 8]) -> [Complex; 8] { ifft(fft(x)) }");
+    ok("use std::fourier::{fft, ifft}\nfn f(x: [c32; 3]) -> [c32; 3] { fft(x) }");
+    ok("use std::fourier::{fft, ifft}\nfn f() -> [Complex; 2] { fft([1.0, 0.0]) }");
     assert_eq!(
-        one_error("fn f(x: [Float; 2]) -> [Float; 2] { fft(x) }"),
+        one_error("use std::fourier::{fft, ifft}\nfn f(x: [Float; 2]) -> [Float; 2] { fft(x) }"),
         "`fft` takes a non-empty `[Complex; N]` or `[c32; N]`, but this is `[Float; 2]`"
     );
 }
@@ -447,6 +455,58 @@ fn type_aliases() {
     assert_eq!(
         one_error("type P = Int\nstruct P { x: Int }\nfn f() {}"),
         "the type `P` is defined twice"
+    );
+}
+
+#[test]
+fn borrow_annotations_checked() {
+    // Library (no `fn main`): `pub fn` with multiple ref params requires `[…]`.
+    ok(
+        "pub fn pick(a: ref Int, b: ref Int, flag: Bool) -> ref[a, b] Int { if flag { a } else { b } }",
+    );
+    // Private fn inside a package infers without `[…]`.
+    ok("fn pick(a: ref Int, b: ref Int, flag: Bool) -> ref Int { if flag { a } else { b } }");
+    // Library `pub fn` with single ref param uses elision without `[…]`.
+    ok("pub fn id(a: ref Int) -> ref Int { a }");
+    // Library `pub fn` with multiple ref params and no `[…]` is rejected.
+    assert_eq!(
+        one_error(
+            "pub fn pick(a: ref Int, b: ref Int, flag: Bool) -> ref Int { if flag { a } else { b } }"
+        ),
+        "`pick` returns a reference, and more than one parameter could be its source"
+    );
+    // Borrow annotation on a type that holds no reference.
+    assert_eq!(
+        one_error("fn f(a: ref Int) -> Int[a] { 1 }"),
+        "`Int` does not hold a reference, so it cannot have a borrow annotation"
+    );
+    // Unknown parameter name in `[…]`.
+    assert_eq!(
+        one_error("fn f(a: ref Int) -> ref[missing] Int { a }"),
+        "`missing` is not a parameter of `f`"
+    );
+    // Parameter holding no reference in `[…]`.
+    assert_eq!(
+        one_error("fn f(a: Int, b: ref Int) -> ref[a] Int { b }"),
+        "`a` holds no reference, so the return value cannot borrow from it"
+    );
+    // Borrow annotation outside a function return type.
+    assert_eq!(
+        one_error("struct S { x: ref[a] Int }"),
+        "borrow annotations are only allowed in function return types"
+    );
+    // Trait method requiring `[…]` when ambiguous; `impl` cannot widen borrow sources.
+    assert_eq!(
+        one_error("trait Picker { fn pick(a: ref Int, b: ref Int) -> ref Int }"),
+        "`pick` returns a reference, and more than one parameter could be its source"
+    );
+    assert_eq!(
+        one_error(
+            "trait Picker { fn pick(ref self, a: ref Int, b: ref Int) -> ref[a] Int }\n\
+             struct P {}\n\
+             impl Picker for P { fn pick(ref self, a: ref Int, b: ref Int) -> ref[b] Int { b } }"
+        ),
+        "`pick` borrows from a parameter that `Picker` does not allow"
     );
 }
 

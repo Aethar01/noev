@@ -1,0 +1,13 @@
+// N015: mutating a `Vec` requires `let mut` (`spec/std.md` §6).
+
+fn push_immut() {
+    let v = Vec::<Int>::new()
+    v.push(1)                       //~ N015
+}
+
+fn index_assign_immut() {
+    let mut v = Vec::<Int>::new()
+    v.push(1)
+    let r = mv v
+    r[0] = 2                        //~ N015
+}

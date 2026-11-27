@@ -53,6 +53,34 @@ ids! {
     ItemId;
     /// A function or method.
     FnId;
+    /// A module.
+    ModuleId;
+    /// A package.
+    PackageId;
+}
+
+/// A module: one file of a package, or a directory of them (`spec/modules.md` §1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Module {
+    /// Its name: the file's or directory's, or the package's for its root module.
+    pub name: Symbol,
+    /// The module it is in; `None` for a package's root module.
+    pub parent: Option<ModuleId>,
+    /// The package it belongs to.
+    pub package: PackageId,
+    /// Its items, in order.
+    pub items: List<ItemId>,
+}
+
+/// A package: the main one, or a dependency (`spec/modules.md` §7).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Package {
+    /// Its name.
+    pub name: Symbol,
+    /// Its root module.
+    pub root: ModuleId,
+    /// The packages it depends on, by the name it uses for each.
+    pub deps: Vec<(Symbol, PackageId)>,
 }
 
 /// A contiguous run of `T` in one of the [`Ast`]'s pools.
@@ -189,6 +217,13 @@ pools! {
     arms: Arm,
     field_pats: FieldPat,
     ket_parts: KetPart,
+    imports: Import,
+    generic_params: GenericParam,
+    bounds: Bound,
+    bound_args: BoundArg,
+    where_preds: WherePred,
+    assoc_types: AssocType,
+    borrow_places: BorrowPlace,
 }
 
 /// The variants of `Option` and `Result`, named without their enum: alone, each is a path
@@ -203,13 +238,216 @@ pub const STD_NAMES: [&str; 17] = [
     "One", "Plus", "Minus", "PlusI", "MinusI",
 ];
 
-/// A parsed file.
+/// The modules of the standard library's package, `std`, whose items are built in
+/// (`spec/modules.md` §6). What is in the prelude is in no module of its own yet.
+pub const STD_MODULES: [&str; 8] = [
+    "debug",
+    "env",
+    "fourier",
+    "fs",
+    "io",
+    "net",
+    "observables",
+    "state",
+];
+
+/// The standard library's `std::ops` module (`spec/types.md` §6), parsed when a program names
+/// `ops`: the traits behind `+`, `-`, `*`, `/` and `%`, and their compound assignments, on
+/// a program's own types.
+const STD_OPS: &str = "
+pub trait Add<Rhs = Self> {
+    type Output
+    fn add(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Sub<Rhs = Self> {
+    type Output
+    fn sub(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Mul<Rhs = Self> {
+    type Output
+    fn mul(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Div<Rhs = Self> {
+    type Output
+    fn div(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Rem<Rhs = Self> {
+    type Output
+    fn rem(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait BitAnd<Rhs = Self> {
+    type Output
+    fn bitand(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait BitOr<Rhs = Self> {
+    type Output
+    fn bitor(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait BitXor<Rhs = Self> {
+    type Output
+    fn bitxor(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Shl<Rhs = Self> {
+    type Output
+    fn shl(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Shr<Rhs = Self> {
+    type Output
+    fn shr(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Neg {
+    type Output
+    fn neg(mv self) -> Self::Output
+}
+pub trait BitNot {
+    type Output
+    fn bitnot(mv self) -> Self::Output
+}
+pub trait AddAssign<Rhs = Self> {
+    fn add_assign(mut self, rhs: Rhs)
+}
+pub trait SubAssign<Rhs = Self> {
+    fn sub_assign(mut self, rhs: Rhs)
+}
+pub trait MulAssign<Rhs = Self> {
+    fn mul_assign(mut self, rhs: Rhs)
+}
+pub trait DivAssign<Rhs = Self> {
+    fn div_assign(mut self, rhs: Rhs)
+}
+pub trait RemAssign<Rhs = Self> {
+    fn rem_assign(mut self, rhs: Rhs)
+}
+pub trait BitAndAssign<Rhs = Self> {
+    fn bitand_assign(mut self, rhs: Rhs)
+}
+pub trait BitOrAssign<Rhs = Self> {
+    fn bitor_assign(mut self, rhs: Rhs)
+}
+pub trait BitXorAssign<Rhs = Self> {
+    fn bitxor_assign(mut self, rhs: Rhs)
+}
+pub trait ShlAssign<Rhs = Self> {
+    fn shl_assign(mut self, rhs: Rhs)
+}
+pub trait ShrAssign<Rhs = Self> {
+    fn shr_assign(mut self, rhs: Rhs)
+}
+";
+
+/// The standard library's `std::backend` module (`spec/runtime.md` §3, §5), parsed when a
+/// program names `backend`: the `Backend` trait, `Target`, `Circuit`, and related classical
+/// types for writing quantum backends in Noev.
+const STD_BACKEND: &str = "
+pub enum Level {
+    Circuit,
+    Gate,
+    Both,
+}
+
+pub struct Capabilities {
+    pub read_state: Bool
+    pub check_release: Bool
+    pub exact_expectations: Bool
+    pub sample_state: Bool
+    pub foreign_while_live: Bool
+}
+
+pub struct Target {
+    pub name: String
+    pub level: Level
+    pub qubits: Int
+    pub gates: Vec<String>
+    pub coupling: Vec<(Int, Int)>
+    pub capabilities: Capabilities
+}
+
+pub enum GateKind {
+    X,
+    Y,
+    Z,
+    H,
+    S,
+    T,
+    Rx,
+    Ry,
+    Rz,
+    P,
+    U,
+    Swap,
+    Unitary,
+}
+
+pub struct Op {
+    pub gate: GateKind
+    pub adjoint: Bool
+    pub params: Vec<Float>
+    pub controls: Vec<Int>
+    pub targets: Vec<Int>
+}
+
+pub enum Instruction {
+    Gate(Op),
+    Measure { qubit: Int, clbit: Int },
+    Reset(Int),
+    Qasm(String),
+}
+
+pub struct Circuit {
+    pub qubits: Int
+    pub clbits: Int
+    pub instructions: Vec<Instruction>
+}
+
+pub struct ShotCount {
+    pub bits: u64
+    pub count: Int
+}
+
+pub struct Shots {
+    pub counts: Vec<ShotCount>
+}
+
+pub struct BackendError {
+    pub message: String
+}
+
+pub trait Backend {
+    fn target(ref self) -> Target
+    fn run(mut self, circuit: ref Circuit, shots: Int) -> Result<Shots, BackendError>
+}
+";
+
+/// The standard library's `std::cmp` module (`spec/types.md` §6), parsed when a program names
+/// `cmp`: the traits behind `==`, `!=`, `<`, `<=`, `>` and `>=` on a program's own types.
+const STD_CMP: &str = "
+pub trait Eq<Rhs = Self> {
+    fn eq(ref self, rhs: ref Rhs) -> Bool
+    fn ne(ref self, rhs: ref Rhs) -> Bool { not self.eq(rhs) }
+}
+pub trait Ord<Rhs = Self> {
+    fn lt(ref self, rhs: ref Rhs) -> Bool
+    fn le(ref self, rhs: ref Rhs) -> Bool
+    fn gt(ref self, rhs: ref Rhs) -> Bool { not self.le(rhs) }
+    fn ge(ref self, rhs: ref Rhs) -> Bool { not self.lt(rhs) }
+}
+";
+
+/// A parsed package and its dependencies: every module of each, in one syntax tree.
 #[derive(Debug, Default)]
 pub struct Ast {
-    /// The file's top-level items, in order.
+    /// Every module's top-level items, in order, module by module.
     pub root: List<ItemId>,
     /// Identifier names.
     pub symbols: Interner,
+    /// Every module. Each package's root comes before its other modules.
+    modules: Vec<Module>,
+    /// Every package; the first is the one being compiled.
+    packages: Vec<Package>,
+    /// The standard library's package, added with [`Ast::collect_root`] when it is used.
+    std: Option<PackageId>,
+    /// The type and size arguments a path is given with `::<…>`, by the path's expression.
+    path_args: crate::FxHashMap<ExprId, List<TypeId>>,
     exprs: Vec<Expr>,
     stmts: Vec<Stmt>,
     blocks: Vec<Block>,
@@ -249,6 +487,12 @@ macro_rules! arena {
     };
 }
 
+impl Ast {
+    pub(crate) fn function_mut(&mut self, id: FnId) -> &mut FnDecl {
+        &mut self.fns[id.index()]
+    }
+}
+
 arena! {
     push_expr, expr, all_exprs: ExprId => Expr in exprs;
     push_stmt, stmt, all_stmts: StmtId => Stmt in stmts;
@@ -281,6 +525,288 @@ impl Ast {
     pub fn name(&self, symbol: Symbol) -> &str {
         self.symbols.name(symbol)
     }
+
+    /// An empty syntax tree, with the standard library's names interned, so its types can be
+    /// named in messages even when a program never mentions them.
+    pub fn new() -> Self {
+        let mut ast = Ast::default();
+        for name in STD_NAMES {
+            ast.symbols.intern(name);
+        }
+        ast
+    }
+
+    /// Adds a package named `name`, with an empty root module, and returns it.
+    pub fn add_package(&mut self, name: &str) -> PackageId {
+        let id = PackageId::new(self.packages.len());
+        let name = self.symbols.intern(name);
+        let root = ModuleId::new(self.modules.len());
+        self.modules.push(Module {
+            name,
+            parent: None,
+            package: id,
+            items: List::EMPTY,
+        });
+        self.packages.push(Package {
+            name,
+            root,
+            deps: Vec::new(),
+        });
+        id
+    }
+
+    /// Adds an empty module named `name` inside `parent`, and returns it.
+    pub fn add_module(&mut self, parent: ModuleId, name: &str) -> ModuleId {
+        let id = ModuleId::new(self.modules.len());
+        let name = self.symbols.intern(name);
+        let package = self.module(parent).package;
+        self.modules.push(Module {
+            name,
+            parent: Some(parent),
+            package,
+            items: List::EMPTY,
+        });
+        id
+    }
+
+    /// Records that `package` depends on `dep`, which it calls `name`.
+    pub fn add_dependency(&mut self, package: PackageId, name: &str, dep: PackageId) {
+        let name = self.symbols.intern(name);
+        self.packages[package.index()].deps.push((name, dep));
+    }
+
+    /// The type and size arguments the path `expr` is given with `::<…>`, if any.
+    pub fn path_args(&self, expr: ExprId) -> List<TypeId> {
+        self.path_args.get(&expr).copied().unwrap_or_default()
+    }
+
+    /// Every path given arguments with `::<…>`, with its arguments.
+    pub fn all_path_args(&self) -> impl Iterator<Item = (ExprId, List<TypeId>)> + '_ {
+        self.path_args.iter().map(|(&e, &a)| (e, a))
+    }
+
+    pub(crate) fn set_path_args(&mut self, expr: ExprId, args: List<TypeId>) {
+        self.path_args.insert(expr, args);
+    }
+
+    /// The module with this id.
+    pub fn module(&self, id: ModuleId) -> &Module {
+        &self.modules[id.index()]
+    }
+
+    /// Every module.
+    pub fn modules(&self) -> &[Module] {
+        &self.modules
+    }
+
+    /// The package with this id.
+    pub fn package(&self, id: PackageId) -> &Package {
+        &self.packages[id.index()]
+    }
+
+    /// Every package; the first is the one being compiled.
+    pub fn packages(&self) -> &[Package] {
+        &self.packages
+    }
+
+    /// The module's path from its package's root, such as `circuits::ladder`; empty for a
+    /// root module.
+    pub fn module_path(&self, id: ModuleId) -> String {
+        let mut names = Vec::new();
+        let mut module = self.module(id);
+        while let Some(parent) = module.parent {
+            names.push(self.name(module.name));
+            module = self.module(parent);
+        }
+        names.reverse();
+        names.join("::")
+    }
+
+    /// The standard library's package, once [`Ast::collect_root`] has added it.
+    pub fn std_package(&self) -> Option<PackageId> {
+        self.std
+    }
+
+    /// Makes [`Ast::root`] every module's items, after the modules are parsed, and adds the
+    /// standard library's package, whose modules have no items of their own, if any module
+    /// names `std`: none can reach it otherwise. Its `Measure` trait is added when a module
+    /// names it, or when a generic function may infer it as a bound by calling `measure`
+    /// (`spec/types.md` §6).
+    pub fn collect_root(&mut self) {
+        let named = |text| self.symbols.get(text).is_some();
+        let generic = self.all_fns().iter().any(|f| !f.generics.is_empty());
+        let measure = named("Measure") || (generic && named("measure"));
+        let ops = named("ops");
+        let cmp = named("cmp");
+        let backend = named("backend");
+        if self.std.is_none() && (named("std") || measure) {
+            let std = self.add_package("std");
+            let root = self.package(std).root;
+            for name in STD_MODULES {
+                self.add_module(root, name);
+            }
+            if ops {
+                let module = self.add_module(root, "ops");
+                self.std_module(module, STD_OPS);
+            }
+            if cmp {
+                let module = self.add_module(root, "cmp");
+                self.std_module(module, STD_CMP);
+            }
+            if backend {
+                let module = self.add_module(root, "backend");
+                self.std_module(module, STD_BACKEND);
+            }
+            if measure {
+                let item = self.measure_trait();
+                let mark = self.mark::<ItemId>();
+                self.push_to(item);
+                let items = self.finish(mark);
+                self.set_items(root, items);
+            }
+            self.std = Some(std);
+        }
+        let mark = self.mark::<ItemId>();
+        for index in 0..self.modules.len() {
+            let items = self.modules[index].items;
+            for i in 0..items.len() {
+                let item = self.list(items)[i];
+                self.push_to(item);
+            }
+        }
+        self.root = self.finish(mark);
+    }
+
+    /// Parses `source`, part of the standard library, as `module`'s items. It has no file of
+    /// its own, so its spans are made empty, as built-in parts' are, and notes on it show
+    /// nothing.
+    fn std_module(&mut self, module: ModuleId, source: &str) {
+        let (items, fns, types) = (self.items.len(), self.fns.len(), self.types.len());
+        let (blocks, stmts, exprs) = (self.blocks.len(), self.stmts.len(), self.exprs.len());
+        let params = self.pools.params.items.len();
+        let generic_params = self.pools.generic_params.items.len();
+        let bounds = self.pools.bounds.items.len();
+        let diagnostics = crate::parser::parse_module(self, module, source, 0);
+        debug_assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let none = Span::default();
+        for item in &mut self.items[items..] {
+            item.span = none;
+            if let ItemKind::Trait { name_span, .. } = &mut item.kind {
+                *name_span = none;
+            }
+        }
+        for f in &mut self.fns[fns..] {
+            f.span = none;
+            f.name_span = none;
+            if let Some(r) = &mut f.receiver {
+                r.span = none;
+            }
+        }
+        for t in &mut self.types[types..] {
+            t.span = none;
+        }
+        for b in &mut self.blocks[blocks..] {
+            b.span = none;
+        }
+        for s in &mut self.stmts[stmts..] {
+            s.span = none;
+        }
+        for e in &mut self.exprs[exprs..] {
+            e.span = none;
+        }
+        for p in &mut self.pools.params.items[params..] {
+            p.span = none;
+        }
+        for p in &mut self.pools.generic_params.items[generic_params..] {
+            p.span = none;
+        }
+        for b in &mut self.pools.bounds.items[bounds..] {
+            b.span = none;
+        }
+    }
+
+    /// The standard library's `Measure` trait (`spec/types.md` §6), built as if parsed from
+    ///
+    /// ```noev
+    /// pub trait Measure {
+    ///     type Result: Copy
+    ///     fn measure(mv self) -> Self::Result
+    /// }
+    /// ```
+    ///
+    /// Its parts have no source text, so their spans are empty.
+    fn measure_trait(&mut self) -> ItemId {
+        let at = Span::default();
+        let symbol = |ast: &mut Ast, text: &str| ast.symbols.intern(text);
+        let (measure_trait, result, measure, self_name, copy) = (
+            symbol(self, "Measure"),
+            symbol(self, "Result"),
+            symbol(self, "measure"),
+            symbol(self, "Self"),
+            symbol(self, "Copy"),
+        );
+        let mark = self.mark::<Symbol>();
+        self.push_to(copy);
+        let copy_path = self.finish(mark);
+        let mark = self.mark::<Bound>();
+        self.push_to(Bound {
+            path: copy_path,
+            args: List::EMPTY,
+            span: at,
+        });
+        let bounds = self.finish(mark);
+        let mark = self.mark::<AssocType>();
+        self.push_to(AssocType {
+            name: result,
+            bounds,
+        });
+        let types = self.finish(mark);
+        let mark = self.mark::<Symbol>();
+        self.push_to(self_name);
+        self.push_to(result);
+        let ret_path = self.finish(mark);
+        let ret = self.push_type(TypeExpr {
+            kind: TypeKind::Path(ret_path),
+            span: at,
+        });
+        let f = self.push_fn(FnDecl {
+            name: measure,
+            name_span: at,
+            generics: Generics::default(),
+            vis: Vis::Pub,
+            is_unsafe: false,
+            is_rev: false,
+            is_circuit: false,
+            test: TestKind::None,
+            extern_kind: ExternKind::None,
+            receiver: Some(Receiver {
+                kind: OwnKind::Mv,
+                span: at,
+            }),
+            params: List::EMPTY,
+            ret: Some(ret),
+            body: None,
+            span: at,
+        });
+        let mark = self.mark::<FnId>();
+        self.push_to(f);
+        let fns = self.finish(mark);
+        self.push_item(Item {
+            kind: ItemKind::Trait {
+                name: measure_trait,
+                name_span: at,
+                generics: Generics::default(),
+                fns,
+                types,
+            },
+            vis: Vis::Pub,
+            span: at,
+        })
+    }
+
+    pub(crate) fn set_items(&mut self, module: ModuleId, items: List<ItemId>) {
+        self.modules[module.index()].items = items;
+    }
 }
 
 /// An expression and where it is.
@@ -311,6 +837,8 @@ pub enum ExprKind {
     Ket {
         /// How many fixed labels it has: one qubit each.
         qubits: u32,
+        /// Whether every label is `0` (`|0>`, `|00>`, …), with no computed labels.
+        zero: bool,
         /// Its labels in order, when some are computed (`|0{b}>`); empty when all are fixed.
         parts: List<KetPart>,
     },
@@ -726,8 +1254,13 @@ pub enum StmtKind {
     Break,
     /// `continue`.
     Continue,
-    /// `assert cond`.
-    Assert(ExprId),
+    /// `assert cond [, msg]`.
+    Assert {
+        /// The condition, which must be `Bool`.
+        cond: ExprId,
+        /// Optional failure message, which must be `String`.
+        msg: Option<ExprId>,
+    },
     /// An expression used as a statement.
     Expr {
         /// The expression.
@@ -850,6 +1383,17 @@ pub struct TypeExpr {
     pub span: Span,
 }
 
+/// A place named in a type's borrow annotation: `a`, `self`, or `self.state`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BorrowPlace {
+    /// The starting parameter name, or `self`.
+    pub root: Symbol,
+    /// Any field names after it, in order (`state` in `self.state`).
+    pub fields: List<Symbol>,
+    /// Where it is.
+    pub span: Span,
+}
+
 /// The kinds of type annotation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TypeKind {
@@ -864,10 +1408,19 @@ pub enum TypeKind {
         /// The type arguments.
         args: List<TypeId>,
     },
-    /// `ref T` or `mut T`.
+    /// A named or generic type with a borrow annotation, such as `Window[r]`.
+    Borrowed {
+        /// The underlying type.
+        inner: TypeId,
+        /// The places it may borrow from.
+        borrows: List<BorrowPlace>,
+    },
+    /// `ref T`, `mut T`, `ref[a, b] T` or `mut[self.state] T`.
     Ref {
         /// Whether it is `mut T`.
         mutable: bool,
+        /// Any places named in `[…]`; empty when elided or inferred.
+        borrows: List<BorrowPlace>,
         /// The referenced type.
         inner: TypeId,
     },
@@ -880,8 +1433,30 @@ pub enum TypeKind {
         /// The element type.
         elem: TypeId,
         /// The length.
-        len: u64,
+        len: Len,
     },
+    /// A size given as a type argument, as in `Register<8>`.
+    Size(u64),
+    /// A size computed from size parameters, as a type argument: `Register<{N + 1}>`.
+    SizeExpr(ExprId),
+    /// `extern "C" fn(A, B) -> R`: a C function pointer type (`spec/interop.md` §3).
+    ExternCFn {
+        /// The parameter types, in order.
+        params: List<TypeId>,
+        /// The return type, if not `()`.
+        ret: Option<TypeId>,
+    },
+}
+
+/// An array's length: a number, a size parameter, or a sum of them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Len {
+    /// A fixed length.
+    Int(u64),
+    /// A size parameter: `N` in `[Qubit; N]`.
+    Param(Symbol),
+    /// A size computed from size parameters: `N + 1` in `[Qubit; N + 1]`.
+    Expr(ExprId),
 }
 
 /// A top-level item and where it is.
@@ -889,6 +1464,45 @@ pub enum TypeKind {
 pub struct Item {
     /// What kind of item.
     pub kind: ItemKind,
+    /// Where it can be used from.
+    pub vis: Vis,
+    /// Where it is.
+    pub span: Span,
+}
+
+/// Where an item, field or method can be used from (`spec/modules.md` §4).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Vis {
+    /// No marker, or `pub(self)`: its own module and the modules inside it.
+    #[default]
+    Private,
+    /// `pub(super)`: its parent module and the modules inside it.
+    Super,
+    /// `pub(in path)`: the named module, which contains this one, and the modules inside it.
+    In {
+        /// The module's path.
+        path: List<Symbol>,
+        /// Where the path is.
+        span: Span,
+    },
+    /// `pub(pkg)`: the whole package.
+    Pkg,
+    /// `pub`: everywhere.
+    Pub,
+}
+
+/// One name a `use` declaration imports, with its braces flattened: `use a::{b, c as d}` is
+/// two imports, `a::b` and `a::c as d`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Import {
+    /// The item's path, ending with its name. For `self` in braces, the module's path; for a
+    /// glob import, the module whose items it imports.
+    pub path: List<Symbol>,
+    /// The name it is imported as, from `as`: `_` imports a trait's methods without its name.
+    /// Without `as`, the path's last name.
+    pub alias: Option<Symbol>,
+    /// Whether it is a glob import, `use m::*`.
+    pub glob: bool,
     /// Where it is.
     pub span: Span,
 }
@@ -900,16 +1514,24 @@ pub enum ItemKind {
     Error,
     /// A function.
     Fn(FnId),
+    /// `extern "C" { fn … }`: imported C functions (`spec/interop.md` §3).
+    ExternBlock(List<FnId>),
+    /// `use …`: the names it imports.
+    Use(List<Import>),
     /// A struct with its fields and methods.
     Struct {
         /// The struct's name.
         name: Symbol,
         /// Where the name is.
         name_span: Span,
+        /// Its generic parameters.
+        generics: Generics,
         /// The fields, in declaration order.
         fields: List<FieldDecl>,
         /// Methods and associated functions.
         methods: List<FnId>,
+        /// Whether declared `extern "C" struct` with C layout (`spec/interop.md` §3).
+        is_extern_c: bool,
     },
     /// An enum with its variants and methods.
     Enum {
@@ -917,6 +1539,8 @@ pub enum ItemKind {
         name: Symbol,
         /// Where the name is.
         name_span: Span,
+        /// Its generic parameters.
+        generics: Generics,
         /// The variants, in declaration order.
         variants: List<VariantDecl>,
         /// Methods and associated functions.
@@ -931,19 +1555,25 @@ pub enum ItemKind {
         /// The type it names.
         ty: TypeId,
     },
-    /// `trait Name { … }` (Reserved).
+    /// `trait Name { … }`.
     Trait {
         /// The trait's name.
         name: Symbol,
+        /// Where the name is.
+        name_span: Span,
+        /// Its generic parameters.
+        generics: Generics,
         /// Required and provided functions.
         fns: List<FnId>,
-        /// Associated type names.
-        types: List<Symbol>,
+        /// Associated types.
+        types: List<AssocType>,
     },
-    /// `impl Trait for Type { … }` (Reserved).
+    /// `impl Trait for Type { … }`.
     Impl {
-        /// The trait's path.
-        trait_path: List<Symbol>,
+        /// Its generic parameters: `impl<T: Measure> Measure for Pair<T, T>`.
+        generics: Generics,
+        /// The trait, with its arguments.
+        bound: Bound,
         /// The type it is implemented for.
         ty: TypeId,
         /// The functions.
@@ -953,6 +1583,124 @@ pub enum ItemKind {
     },
 }
 
+/// Generic parameters and `where` bounds (`spec/types.md` §6).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Generics {
+    /// The parameters, in order.
+    pub params: List<GenericParam>,
+    /// `where T: Bound, …`: more bounds on parameters, by name.
+    pub wheres: List<WherePred>,
+}
+
+impl Generics {
+    /// Whether there are no parameters.
+    pub fn is_empty(&self) -> bool {
+        self.params.is_empty()
+    }
+}
+
+/// A generic parameter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GenericParam {
+    /// Its name.
+    pub name: Symbol,
+    /// A type or a size.
+    pub kind: GenericKind,
+    /// Where it is.
+    pub span: Span,
+}
+
+/// What a generic parameter stands for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GenericKind {
+    /// A type, with the bounds written on it: `T: Measure`, or `Rhs = Self` on a trait.
+    Type {
+        /// Its bounds.
+        bounds: List<Bound>,
+        /// Its default type, if written (`= Self`), allowed on traits.
+        default: Option<TypeId>,
+    },
+    /// A size: `const N: Int`, or `const N: Int = 1` on a trait.
+    Size {
+        /// Its type, `Int`.
+        ty: TypeId,
+        /// Its default size, if written (`= 1`), allowed on traits.
+        default: Option<TypeId>,
+    },
+}
+
+/// A bound: a trait, with its arguments, such as `Measure<Result = Bit>` or `Oracle<4>`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bound {
+    /// The trait's path.
+    pub path: List<Symbol>,
+    /// Its arguments.
+    pub args: List<BoundArg>,
+    /// Where it is.
+    pub span: Span,
+}
+
+/// An argument of a bound.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BoundArg {
+    /// A type or a size, by position.
+    Type(TypeId),
+    /// `Name = Type`: an associated type, fixed.
+    Assoc {
+        /// The associated type's name.
+        name: Symbol,
+        /// The type it must be.
+        ty: TypeId,
+    },
+}
+
+/// `T: Bound + …` in a `where` clause.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WherePred {
+    /// The parameter.
+    pub name: Symbol,
+    /// Its bounds.
+    pub bounds: List<Bound>,
+    /// Where it is.
+    pub span: Span,
+}
+
+/// `type Name: Bound` in a trait.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AssocType {
+    /// Its name.
+    pub name: Symbol,
+    /// What every `impl`'s type must satisfy.
+    pub bounds: List<Bound>,
+}
+
+/// What kind of `extern` declaration a function is (`spec/interop.md` §2–3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExternKind {
+    /// An ordinary Noev function.
+    #[default]
+    None,
+    /// `extern fn name(…) -> R`: a host function provided by an embedding host.
+    Host,
+    /// `extern "C" { fn name(…) -> R }`: an imported C function (unsafe to call).
+    CImport,
+    /// `extern "C" fn name(…) -> R { … }`: a Noev function callable from C.
+    CExport,
+}
+
+/// Whether a function is a test (`spec/testing.md`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TestKind {
+    /// An ordinary function.
+    #[default]
+    None,
+    /// `test fn name()`: must succeed without runtime error.
+    Pass,
+    /// `test(fail)` or `test(fail = "substring")`: must fail with a runtime error (matching the
+    /// optional substring).
+    Fail(Option<Symbol>),
+}
+
 /// A function or method declaration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FnDecl {
@@ -960,22 +1708,37 @@ pub struct FnDecl {
     pub name: Symbol,
     /// Where the name is.
     pub name_span: Span,
+    /// Its generic parameters and `where` bounds.
+    pub generics: Generics,
+    /// Where it can be used from. For a function item, the item's visibility.
+    pub vis: Vis,
     /// Whether it is `unsafe fn`.
     pub is_unsafe: bool,
     /// Whether it is `rev fn`.
     pub is_rev: bool,
     /// Whether it is `circuit fn`.
     pub is_circuit: bool,
+    /// Whether this is a `test fn` (`spec/testing.md`).
+    pub test: TestKind,
+    /// Whether this is a host `extern fn`, an `extern "C"` import, or an `extern "C" fn` export.
+    pub extern_kind: ExternKind,
     /// `mv self`, `ref self` or `mut self`, for methods.
     pub receiver: Option<Receiver>,
     /// The other parameters.
     pub params: List<Param>,
     /// The return type, if not `()`.
     pub ret: Option<TypeId>,
-    /// The body. Only trait declarations may omit it.
+    /// The body. Only trait, host `extern fn`, and `extern "C"` import declarations may omit it.
     pub body: Option<BlockId>,
     /// The whole declaration.
     pub span: Span,
+}
+
+impl FnDecl {
+    /// Whether this function is declared without a Noev body (`extern fn` or `extern "C"` import).
+    pub fn is_foreign_import(self) -> bool {
+        matches!(self.extern_kind, ExternKind::Host | ExternKind::CImport)
+    }
 }
 
 /// A method's receiver.
@@ -1003,6 +1766,8 @@ pub struct Param {
 pub struct FieldDecl {
     /// The field's name.
     pub name: Symbol,
+    /// Where it can be used from. Fields of enum variants are as visible as their enum.
+    pub vis: Vis,
     /// Its type.
     pub ty: TypeId,
     /// Where it is.

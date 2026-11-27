@@ -1,0 +1,32 @@
+// Arithmetic in sizes (spec/types.md §6): `N + 1` and `2 * N` in array lengths and, in braces,
+// in type arguments; inferred from arguments, and indices proven against them.
+
+struct Reg<const N: Int> { qs: [Qubit; N] }
+
+fn widen<const N: Int>(r: [Qubit; N]) -> [Qubit; N + 1] {
+    let out: [Qubit; N + 1] = [|0>; N + 1]
+    for i in 0..N {
+        ctrl r[i] { out[i].x() }
+    }
+    mv r.measure()
+    mv out
+}
+
+fn last<const N: Int>(r: mut [Qubit; N + 1]) {
+    r[N].x()
+}
+
+fn pairs<const N: Int>(r: ref [Qubit; 2 * N]) -> Int { N }
+
+fn grow<const N: Int>(r: Reg<N>) -> Reg<{N + 1}> {
+    Reg { qs: widen(mv r.qs) }
+}
+
+fn main() {
+    let r: [Qubit; 3] = |101>
+    let w = widen(mv r)
+    last(mut w)
+    print(pairs(ref w))
+    let g = grow(Reg { qs: mv w })
+    print(mv g.qs.measure())
+}

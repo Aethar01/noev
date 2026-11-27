@@ -1,0 +1,76 @@
+// Pure-Noev implementation of `std::backend::Backend` (`spec/runtime.md` §3).
+use std::backend::{
+    Backend, BackendError, Capabilities, Circuit, GateKind, Instruction, Level, Op, ShotCount,
+    Shots, Target,
+}
+
+struct MockBackend {
+    label: String
+    max_qubits: Int
+}
+
+impl Backend for MockBackend {
+    fn target(ref self) -> Target {
+        let mut gates = Vec::<String>::new()
+        gates.push("x")
+        gates.push("h")
+        Target {
+            name: self.label,
+            level: Level::Circuit,
+            qubits: self.max_qubits,
+            gates: mv gates,
+            coupling: Vec::<(Int, Int)>::new(),
+            capabilities: Capabilities {
+                read_state: false,
+                check_release: false,
+                exact_expectations: false,
+                sample_state: false,
+                foreign_while_live: true,
+            },
+        }
+    }
+
+    fn run(mut self, circuit: ref Circuit, shots: Int) -> Result<Shots, BackendError> {
+        if circuit.qubits > self.max_qubits {
+            return Err(BackendError {
+                message: "too many qubits",
+            })
+        }
+        let mut counts = Vec::<ShotCount>::new()
+        counts.push(ShotCount { bits: 0, count: shots })
+        Ok(Shots { counts: mv counts })
+    }
+}
+
+fn check_backend<B: Backend>(b: mut B, c: ref Circuit) -> Int {
+    let t = b.target()
+    let q = t.qubits
+    match b.run(c, 10) {
+        Ok(s) => q + s.counts.len(),
+        Err(_) => 0,
+    }
+}
+
+fn main() {
+    let mut ops = Vec::<Instruction>::new()
+    let mut targets = Vec::<Int>::new()
+    targets.push(0)
+    ops.push(Instruction::Gate(Op {
+        gate: GateKind::H,
+        adjoint: false,
+        params: Vec::<Float>::new(),
+        controls: Vec::<Int>::new(),
+        targets: mv targets,
+    }))
+    ops.push(Instruction::Measure { qubit: 0, clbit: 0 })
+    let circuit = Circuit {
+        qubits: 1,
+        clbits: 1,
+        instructions: mv ops,
+    }
+    let mut mock = MockBackend {
+        label: "mock",
+        max_qubits: 4,
+    }
+    let _ = check_backend(mut mock, ref circuit)
+}

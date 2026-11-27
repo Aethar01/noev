@@ -39,16 +39,22 @@ functions, `ctrl` blocks and under `adj`.
 | `fn unitary(mut self, m: [[Complex; 2]; 2]) -> mut Self` | The matrix `m`      |
 
 **Gates from matrices.** `q.unitary(m)` applies any one-qubit unitary given as a matrix of
-`Complex` values, rows first, and `r.unitary(m)` on `r: [Qubit; 2]` a two-qubit one given as
-a `[[Complex; 4]; 4]`. Rows and columns follow the basis states as kets read: \|00⟩, \|01⟩,
-\|10⟩, \|11⟩, with `r[0]` the left label. The matrix is checked to be unitary, to within
+`Complex` values, rows first, and `r.unitary(m)` on `r: [Qubit; N]` ($N \ge 1$) applies an
+$N$-qubit unitary given as a `[[Complex; 2^N]; 2^N]` (for example `[[Complex; 4]; 4]` on
+`[Qubit; 2]`, `[[Complex; 8]; 8]` on `[Qubit; 3]`, `[[Complex; 16]; 16]` on `[Qubit; 4]`).
+Rows and columns follow the basis states as kets read — \|00…0⟩ through \|11…1⟩, with
+`r[0]` the left (most significant) label. The matrix is checked to be unitary, to within
 10⁻⁹ in each entry of `m·m†`, where the gate runs. Like every gate it is reversible: `adj`
 applies `m†`, and `ctrl` controls it. A one-qubit matrix exports to OpenQASM as
 `U(θ, φ, λ)`, with its global phase under control, where it becomes a relative one. A
 two-qubit matrix is decomposed for circuits and under `ctrl` into one-qubit matrices and
 the fewest CNOTs it needs: none for a product of one-qubit gates, one for a gate equivalent
 to a CNOT, two when one of its interaction coefficients is zero (iSWAP), and three otherwise
-(SWAP).
+(SWAP). A matrix on three or more qubits is decomposed recursively via Quantum Shannon
+Decomposition (Cosine–Sine Decomposition and uniformly controlled rotations, bottoming out
+in the optimal two-qubit KAK decomposition) into single-qubit gates and CNOTs with exact
+global phase, so `adj`, `ctrl`, circuits, OpenQASM 3 export, QIR export, and simulation all
+work uniformly.
 
 Every gate is also a free function with the qubits first: `x(q)`, `ry(q, theta)`,
 `swap(a, b)`. The free functions return `()`. Qubit arguments are lent implicitly, so no

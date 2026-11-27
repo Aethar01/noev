@@ -1,7 +1,6 @@
-// fails: `255 + 1` overflows `u8`
 // Sized integers never wrap silently.
 
-fn main() {
+test(fail = "`255 + 1` overflows `u8`") fn u8_overflow() {
     let x: u8 = 255
-    print(x + 1)
+    let _ = x + 1
 }

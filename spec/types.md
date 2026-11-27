@@ -76,9 +76,8 @@ logical qubit. The compiler and runtime decide which physical qubit that is.
   everywhere (below).
 - **Distributions** `Distribution<T>`: how often each value of a classical type `T` occurred
   in repeated runs, made by `sample` ([execution.md](execution.md) §3). Copyable.
-- **References** `ref T` (shared) and `mut T` (exclusive). See
-  [ownership.md](ownership.md) §4–5. Only elided lifetimes are supported so far; references stored
-  in struct fields are Reserved.
+- **References** `ref T` (shared) and `mut T` (exclusive), and structs or enums holding
+  references (`Window[r]`). See [ownership.md](ownership.md) §4–5.
 
 ### Enums
 
@@ -234,15 +233,16 @@ pure quantum. Pauli indices refer to the qubits of `ψ`'s value in order: for a 
 fields in declaration order; for arrays and tuples, their elements. An index outside that
 range is a compile error.
 
-The value is ⟨ψ|H|ψ⟩. A simulator computes it exactly when `ψ` contains no measurement;
-otherwise, and on hardware, it is estimated by averaging over repeated runs of `ψ`.
+The value is ⟨ψ|H|ψ⟩. A backend that can compute it exactly, such as a simulator
+([runtime.md](runtime.md) §3), does so when `ψ` contains no measurement; otherwise it is
+estimated by averaging over repeated runs of `ψ`.
 
 `<ψ| H |ψ> within ε` says how precise an estimate must be: its standard error is at most `ε`,
 a positive `Float`. Without `within`, `ε` is 0.01. The precision says what is wanted, not how:
 the runtime chooses the runs. When `H = Σ cᵢ Pᵢ`, terms whose Pauli products agree on every
 qubit's basis are measured together, and a group whose coefficients sum to `S_g` (in absolute
 value) gets `S_g · S / ε²` runs, where `S` sums them over all groups; then the variances add up
-to at most `ε²`. An exact value is within any precision, so a simulator ignores `ε` when it
+to at most `ε²`. An exact value is within any precision, so a backend ignores `ε` when it
 computes the value exactly.
 
 ### How the two forms relate
@@ -274,7 +274,8 @@ fixed labels, or calls to functions that are reversible apart from creating thei
 for a bra of a preparation ([ownership.md](ownership.md) §12, N023). If φ = U_φ\|0…0⟩ and
 ψ = U_ψ\|0…0⟩, the amplitude is ⟨0…0\|U_φ†U_ψ\|0…0⟩, so it depends on the gates the
 preparations apply, global phases included, as Noev's gates define them
-([core.md](core.md)). A simulator computes it exactly. Elsewhere it is estimated with
+([core.md](core.md)). A backend that can, such as a simulator, computes it exactly.
+Elsewhere it is estimated with
 Hadamard tests: one circuit for the real part and one for the imaginary part, each running
 the preparations controlled by an extra qubit, and `within ε` bounds each part's standard
 error. A transition value sums its terms' amplitudes ⟨φ\|Pᵢ\|ψ⟩, with each term's runs in
@@ -331,37 +332,277 @@ can be lent for changing without writing `mut` (see [ownership.md](ownership.md)
 Linearity is a property of the type, not something the programmer declares. Readers see it
 where it matters: any place a linear value changes hands has an explicit `mv`.
 
-## 6. Traits and generics (Reserved)
+## 6. Traits and generics
 
-Traits and generics are not implemented yet, but two decisions are made now because they shape the
-type checker.
+Status: **Implemented**: type parameters of functions, structs and enums, bounds (`Copy` and
+traits) written or inferred, inference of type arguments, `::<…>`, traits with and without
+type and size parameters, operator traits (`std::ops`), arithmetic in sizes (`N + 1`, `N - 1`), associated types (with `Copy` as their only bound), `impl`s (generic ones too) and monomorphisation, `Trait::f(x)`, `Measure`
+(for qubits, and tuples and arrays of measurable types), and size parameters. The syntax is
+in [grammar.md](grammar.md) §2.
 
-**Generic code assumes values may be linear.** Rust assumes every value can be dropped, and
-cannot change that without breaking existing code; it is why a Rust `Vec` of qubits would
-break the must-consume guarantee. Noev takes the opposite default: a generic `T` must be
-consumed like a qubit unless the code requires a trait that says otherwise:
+### Generic parameters
 
-- `T: Copy`: values can be copied (and dropped).
-- `T: Discard`: values can be dropped without being consumed.
+Functions, structs, enums and traits can take **type parameters** and **size parameters**:
 
-Containers and generic algorithms therefore work with qubits from the start, and generic
-code that would silently drop a value is rejected where it is written, not where it is used.
+```noev
+fn swap<T>(pair: (T, T)) -> (T, T) {
+    let (a, b) = mv pair
+    (mv b, mv a)
+}
 
-**Measurement is a trait.** `Measure` pairs a quantum type with its classical result type:
+fn qft<const N: Int>(r: mut [Qubit; N]) { … }      // a register of any size
+
+struct Pair<T, U> {
+    first: T
+    second: U
+}
+```
+
+- A size parameter, `const N: Int`, is a non-negative `Int` known when the program is
+  compiled, so `[T; N]` is an array of fixed length. In the body, `N` is also an `Int`
+  value (`for i in 0..N`), and `[|0>; N]` makes an array of that length. Indices into a
+  qubit array of length `N` are proven against `N` ([ownership.md](ownership.md) §10), and
+  a size parameter is never negative.
+- A size can be computed from size parameters and numbers with `+`, and `*` with a number
+  on one side: `[Qubit; N + 1]`, `[Bit; 2 * N]`, `[Int; N + M]`. As a type argument it goes in
+  braces, so its `+` is not read as part of a type: `Reg<{N + 1}>`. Sizes are compared after
+  normalising, so `1 + N` and `N + 1` are the same, as are `N + N` and `2 * N`.
+- A size can subtract a number, or sizes it adds: `[Qubit; N - 1]`, `N + M - M`, but not
+  `N - M`. Such a size must be at least 0: a signature that has one states it as a
+  requirement, which the function may assume and each call must prove from the sizes it
+  gives and what is known where it is, such as an `assert` (N024,
+  [ownership.md](ownership.md) §10).
+- A call infers a size parameter from a sum when it is the only one unknown: given
+  `[Qubit; 5]` for `[Qubit; N + 1]`, `N` is 4; given `[Bit; 6]` for `[Bit; 2 * N]`, `N` is 3.
+  When none fits (`[Bit; 5]` for `2 * N`), the types do not match.
+- Type and size arguments are inferred where the function is called, from its arguments
+  and then from the type expected of the call (`let r: [Qubit; 4] = fresh()`), or given
+  after `::`: `swap::<Int>((1, 2))`, `qft::<8>(mut r)`. A struct's are given or inferred
+  the same way: `Reg<4>`, or `Reg { qs: |0110> }`.
+
+### What generic code can do with a value
+
+A type parameter whose body needs nothing of it accepts **any** type, classical or quantum:
+`swap((1, 2))` and `swap((|0>, |1>))` both work. Such a body treats a value of type `T` as it
+would a qubit: it moves it with `mv` and consumes it. For a classical value, that costs
+nothing. A body that copies or drops a `T` needs `T: Copy`, written or inferred (below).
+
+**`T: Copy`** is the one bound about values themselves: `T` is copyable (§5), so the body can
+copy and drop its values:
+
+```noev
+fn twice<T: Copy>(x: T) -> (T, T) { (x, x) }
+```
+
+No function can copy "a classical value or a qubit", since an unknown quantum state cannot be
+copied, so the bound marks exactly what a body cannot do for qubits. `Copy` is decided by the
+compiler from a type's structure (§5), never written in an `impl`: classical values are
+`Copy`, and so is a shared reference `ref T`, even to a qubit. An exclusive reference `mut T`
+can be dropped but not copied, so it is not `Copy`; given as a `T`, it is treated like a
+qubit: passed on or returned, never dropped. There is no bound for "can be dropped but not
+copied" yet; one can be added without breaking anything.
+
+There is no bound saying a type holds qubits: it would let a body do nothing new. What a
+body does with a quantum value is a trait of its own, such as `Measure`.
+
+### Bounds
+
+A bound is any trait, the standard library's or the program's: `T: Measure`, `T: Oracle`.
+Several are joined with `+` (`T: Copy + Add`), and long ones move to `where`:
+
+```noev
+fn zip<T, U, const N: Int>(a: [T; N], b: [U; N]) -> [(T, U); N]
+where
+    T: Copy,
+    U: Copy,
+{ … }
+```
+
+A bound can fix a trait's associated type: `T: Measure<Result = Bit>` is something that
+measures to one bit.
+
+### Bounds are inferred within a package
+
+As with reversibility ([modules.md](modules.md) §5), the compiler works out what a generic
+function needs from its body, within its package: a body that copies or drops a `T`, or
+otherwise uses one as only a copyable value can be (moving it on every turn of a loop, or in
+reversible code), needs `T: Copy`, and one that calls `x.measure()` on a `T` needs
+`T: Measure`. A call that
+gives a type without what the function needs is an error at the call, naming the line that
+needs it:
+
+```noev
+fn twice<T>(x: T) -> (T, T) { (x, x) }     // needs `T: Copy`
+
+twice(1)                                    // fine
+twice(|0>)      // error: `twice` needs `T: Copy`, but here `T` is `Qubit`
+                //   line 1, at the second `x`: `T: Copy` is needed here
+```
+
+- What a body needs comes from what it does with its own values, and from the functions it
+  calls: passing a `T` to `twice` needs what `twice` needs, so needs follow calls through
+  any number of functions, recursion included.
+- A method called on a `T` (`x.f()`) needs the one trait with a function `f`; when several
+  traits have one, the bound must be written. Traits with parameters are not inferred.
+- Writing a bound is always allowed; it turns the inference into a promise, checked in the
+  body: a parameter with any bound written, inline or in `where`, has exactly the bounds
+  written, so copying a `T: Measure` is N001. A struct's or enum's parameters, and those of
+  traits and `impl`s, are always written.
+- An associated type in a signature (`T::Result`) needs its trait written as a bound, since
+  signatures are read before bodies; so do `Distribution<T>` and `sample` returning a `T`,
+  which need `T: Copy` written.
+
+A generic function visible to other packages (`pub` in a library) states its bounds: they
+are part of its signature, so a library's update cannot break a program by changing a body,
+and a compiled library's signatures are fixed. Its body is checked against the bounds
+written, as if each were a promise.
+
+### Traits
+
+```noev
+trait Oracle<const N: Int> {
+    rev fn apply(ref self, r: mut [Qubit; N])
+    fn name(ref self) -> String { "oracle" }        // a default
+}
+
+impl Oracle<4> for Parity {
+    rev fn apply(ref self, r: mut [Qubit; 4]) { … }
+}
+```
+
+- A trait declares functions, with or without default bodies, and associated types
+  (`type Result`). An `impl` provides them for a type, and can itself be generic:
+  `impl<T: Measure> Measure for Pair<T, T>`.
+- A trait can take type and size parameters, which its functions see after `Self`. A
+  trait's trailing parameters can have defaults (`trait Add<Rhs = Self>`,
+  `trait Pad<const N: Int = 1>`), which can name `Self` and earlier parameters; leaving an
+  argument out in an `impl` or bound uses the default, so `impl Add for V` means
+  `impl Add<V> for V` and `T: Add<Output = T>` means `T: Add<T, Output = T>`. A type
+  can implement one trait several times with different arguments (`Oracle<2>` and
+  `Oracle<4>`), and a call picks the `impl` by them: they are inferred from the call's
+  arguments, as a function's are; if that leaves one open, it is the trait's only arguments
+  for the type (from its bounds, for a type parameter); otherwise the call is an error.
+- A generic trait's associated types depend on its arguments: `Scale<Int>` and
+  `Scale<Float>` can each give `Twice` a different `Out`. `S::Out` takes the arguments of
+  `S`'s bound (`S: Scale<Int>`), or of the type's only `impl`s of the trait; when a type
+  implements it with several, `Twice::Out` is an error. A bound can fix one as for any
+  trait: `S: Scale<Int, Out = Int>`.
+- Methods are written inside structs and enums, so `impl` is only for traits.
+- **Coherence**, as in Rust: an `impl` must be in the package of the trait or of the type, so
+  two packages can never provide the same one.
+- A trait function declared `rev fn` is reversible in every `impl`, which is checked there.
+  Generic code cannot see an `impl`'s body, so this is how `adj oracle.apply(r)` and
+  `ctrl c { oracle.apply(r) }` work on any `T: Oracle<N>`.
+- A call on a known type reaches its `impl`'s function, which is analysed like any other:
+  its reversibility is inferred within a package, and a call of a function not declared
+  `rev fn` on a concrete type can still be part of a circuit.
+- When two traits a type implements both have a function `f`, `x.f()` is an error; say
+  which with `Trait::f(x)`. `Trait::f(x)` also works when only one has it.
+- There are no trait objects (`dyn Trait`): generic code is compiled for each type it is
+  used with, so qubit counts are always known.
+
+### `Measure`
+
+Measurement is a trait, pairing a quantum type with its classical result type:
 
 ```noev
 trait Measure {
-    type Result
+    type Result: Copy
     fn measure(mv self) -> Self::Result
 }
 ```
 
-`Qubit` measures to `Bit` and `[Qubit; N]` to `[Bit; N]`, and a user's struct can measure to
-a classical struct of its own, such as `Experiment` to `ExperimentResult`. Until then,
-`measure` is a built-in overload on `Qubit` and `[Qubit; N]`.
+`Qubit` measures to `Bit`, `[T; N]` to `[T::Result; N]` and a tuple to the tuple of its
+elements' results. A struct measures by an `impl` of its own, such as `Experiment` to a
+classical `ExperimentResult`. The free function `measure(x)` is `measure<T: Measure>(x: T)
+-> T::Result`.
 
-Other planned traits: `From` (conversions), `Copy`, `Discard`, and quantum interfaces such
-as `Oracle`, `Ansatz` and `Observable`.
+### Operator traits
+
+`+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `<<`, `>>`, unary `-` and `~`, and their compound
+assignments (`+=`, … `>>=`) on a type of the program's own call the function of a trait in
+`std::ops`; `==`, `!=`, `<`, `<=`, `>`, `>=` call `Eq` and `Ord` in `std::cmp`:
+
+```noev
+use std::ops::{Add, Mul}
+
+impl Add for V {
+    type Output = V
+    fn add(mv self, rhs: V) -> V { V { x: self.x + rhs.x } }
+}
+
+impl Mul<Int> for V {                  // `v * 2`
+    type Output = V
+    fn mul(mv self, k: Int) -> V { V { x: self.x * k } }
+}
+```
+
+| Operator | Trait | Function |
+| -------- | ----- | -------- |
+| `a + b` | `std::ops::Add<Rhs = Self>` | `fn add(mv self, rhs: Rhs) -> Self::Output` |
+| `a - b` | `std::ops::Sub<Rhs = Self>` | `fn sub(mv self, rhs: Rhs) -> Self::Output` |
+| `a * b` | `std::ops::Mul<Rhs = Self>` | `fn mul(mv self, rhs: Rhs) -> Self::Output` |
+| `a / b` | `std::ops::Div<Rhs = Self>` | `fn div(mv self, rhs: Rhs) -> Self::Output` |
+| `a % b` | `std::ops::Rem<Rhs = Self>` | `fn rem(mv self, rhs: Rhs) -> Self::Output` |
+| `a & b` | `std::ops::BitAnd<Rhs = Self>` | `fn bitand(mv self, rhs: Rhs) -> Self::Output` |
+| `a \| b` | `std::ops::BitOr<Rhs = Self>` | `fn bitor(mv self, rhs: Rhs) -> Self::Output` |
+| `a ^ b` | `std::ops::BitXor<Rhs = Self>` | `fn bitxor(mv self, rhs: Rhs) -> Self::Output` |
+| `a << b` | `std::ops::Shl<Rhs = Self>` | `fn shl(mv self, rhs: Rhs) -> Self::Output` |
+| `a >> b` | `std::ops::Shr<Rhs = Self>` | `fn shr(mv self, rhs: Rhs) -> Self::Output` |
+| `-a` | `std::ops::Neg` | `fn neg(mv self) -> Self::Output` |
+| `~a` | `std::ops::BitNot` | `fn bitnot(mv self) -> Self::Output` |
+| `a += b`, … `a >>= b` | `AddAssign<Rhs = Self>`, `SubAssign`, `MulAssign`, `DivAssign`, `RemAssign`, `BitAndAssign`, `BitOrAssign`, `BitXorAssign`, `ShlAssign`, `ShrAssign` | `fn …_assign(mut self, rhs: Rhs)` |
+| `a == b`, `a != b` | `std::cmp::Eq<Rhs = Self>` | `fn eq(ref self, rhs: ref Rhs) -> Bool`, default `ne` |
+| `a < b`, `a <= b`, `a > b`, `a >= b` | `std::cmp::Ord<Rhs = Self>` | `fn lt(ref self, rhs: ref Rhs) -> Bool`, `fn le(ref self, rhs: ref Rhs) -> Bool`, defaults `gt`, `ge` |
+
+- `a + b` is `Add::add(a, b)`: the `impl` is picked by the right side's type, as for any
+  generic trait, so `v * 2` and `v * w` can be different `impl`s with different `Output`s.
+  `Rhs` defaults to `Self`, so `impl Add for V` and `T: Add<Output = T>` omit it when both
+  sides have the same type.
+- Both sides of arithmetic and bit operators are given by value, so they follow the rules
+  for arguments: a side holding qubits is moved with `mv` (`mv a + mv b`, N001 otherwise),
+  and a copyable one is copied. Comparisons lend both sides (`ref`), so `a == b` and `a < b`
+  never move or copy.
+- `a += b` lends `a` for changing, as a `mut self` method does, once `b` is evaluated, so a
+  classical `a` must be `let mut` (N015), and changes a value in place: on qubits, an `impl`
+  of gates only is reversible, so `a += b` can run in a `rev fn` and under `adj`. When the
+  type has one `impl` of the trait, the right side is expected as it takes it, so
+  `impl AddAssign<ref Reg> for Reg` makes `a += b` lend `b`.
+- In generic code the bound is written: `T: Add<Output = T>`, `T: Eq`, `T: Ord`. Operators
+  do not infer bounds, since their traits have parameters.
+- Built-in types implement the traits by their built-in operators, with the same rules:
+  `Int: Add<Output = Int>`, `Float: Mul<Observable, Output = Observable>`,
+  `Int: AddAssign`, `Int: BitAnd<Output = Int>`, `String: Eq`, `Float: Ord`, but no
+  `Int: Add<Float>`. So `fn sum<T: Add<Output = T>>` takes numbers and types of the
+  program's own alike, and each copy for a built-in type runs the built-in operator. An
+  operator on two values of built-in types is always the built-in one; enums whose variant
+  data are comparable keep built-in `==` and `!=` unless they implement `Eq`.
+- The traits are not in the prelude: `use std::ops::Add` or `use std::cmp::Eq` to implement
+  or bound one.
+
+### Built-in generic types
+
+`Option<T>` and `Result<T, E>` are ordinary generic enums in the prelude, with their variants
+also usable bare (`Some`, `None`, `Ok`, `Err`). They can hold qubits: an `Option<Qubit>` must be
+consumed, with `match mv`. `Distribution<T>` is built in, with `T: Copy`: it holds the
+results of many runs.
+
+### Compilation
+
+Generic code is **monomorphised**: compiled once for each combination of type and size
+arguments it is used with. Circuits need concrete sizes, a target's checks need exact qubit
+counts, and native code needs concrete types. Types and ownership are checked once, on the
+generic body; circuits are found, and code is generated, for each copy. (For now circuits are
+found once, on the generic body, and a run that calls a trait's function not declared
+`rev fn` through a bound runs shot by shot, since what its `impl`s do is not looked at
+there; a `rev` one cannot measure, so it keeps a run a circuit.)
+
+### Not yet
+
+Arithmetic in sizes beyond `+`, `*` by a number and subtracting what is added (`N - M`,
+`N * M`, `N / 2`); `From` beyond the
+built-in conversions; `impl Trait` arguments;
+closures; the quantum interfaces `Oracle`, `Ansatz` and `Observable` in the standard library.
 
 ## 7. Printing and formatting
 

@@ -1,0 +1,16 @@
+// N002: `Vec<T>` and `TcpStream` are affine; use after move or `close` is rejected.
+
+use std::net::TcpStream
+
+fn moved_vec() {
+    let mut v = Vec::<Int>::new()
+    v.push(1)
+    let v2 = mv v
+    let _ = v.len()                 //~ N002
+    let _ = v2.len()
+}
+
+fn closed_stream(s: TcpStream) {
+    mv s.close()
+    let _ = s.flush()               //~ N002
+}

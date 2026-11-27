@@ -16,7 +16,7 @@ use noev_syntax::ast::*;
 use noev_syntax::{Diagnostic, FxHashMap, Severity, Span};
 
 use crate::check::{Adjust, Callee, LocalId, Res, Typed};
-use crate::prelude::Builtin;
+use crate::prelude::{Builtin, Reversible};
 use crate::ty::{Kind, Ty, TyKind};
 
 /// What the rule says about every function and `sample` run.
@@ -51,8 +51,8 @@ pub struct CircuitInfo {
     pub quantum: bool,
     /// Whether its parameters and result contain no qubits or references (a closed run).
     pub closed: bool,
-    /// The first use of a measurement result that stops it being a circuit, and what the use
-    /// was ("used in arithmetic"); `None` when it is a circuit.
+    /// The first thing that stops it being a circuit, as a clause ("a measurement result is
+    /// used in arithmetic before its last quantum operation"); `None` when it is a circuit.
     pub not_circuit: Option<(Span, String)>,
     /// Whether a condition depends on a measurement result before its last quantum operation.
     pub feedback: bool,
@@ -188,7 +188,7 @@ pub fn check_circuits(ast: &Ast, typed: &Typed) -> (Circuits, Vec<Diagnostic>) {
             );
         } else if let Some((span, what)) = &info.not_circuit {
             diagnostics.push(
-                Diagnostic::error(*span, format!("`{name}` is declared `circuit fn`, but a measurement result is {what} before its last quantum operation"))
+                Diagnostic::error(*span, format!("`{name}` is declared `circuit fn`, but {what}"))
                     .with_code("N021")
                     .with_label(decl.name_span, "declared `circuit fn` here")
                     .with_help("use measurement results only in `if`/`while` conditions or the result until the last quantum operation"),
@@ -243,7 +243,7 @@ fn repeated_run_warnings(ast: &Ast, typed: &Typed, circuits: &Circuits, out: &mu
             continue;
         }
         let warning = match &info.not_circuit {
-            Some((at, what)) => Diagnostic::error(span, format!("{subject} shot by shot: a measurement result is {what} before its last quantum operation"))
+            Some((at, what)) => Diagnostic::error(span, format!("{subject} shot by shot: {what}"))
                 .with_label(*at, "here")
                 .with_help("use measurement results only in `if`/`while` conditions or the result until the last quantum operation, and the run is sampled from one simulation"),
             None if info.feedback_unsupported.is_some() => {
@@ -266,14 +266,25 @@ fn repeated_run_warnings(ast: &Ast, typed: &Typed, circuits: &Circuits, out: &mu
 
 fn holds_quantum_or_ref(typed: &Typed, ty: Ty) -> bool {
     let types = &typed.types;
+    if types.has_ref(ty) {
+        return true;
+    }
     match types.kind(ty) {
-        TyKind::Qubit | TyKind::Ref { .. } => true,
+        TyKind::Qubit => true,
         TyKind::Tuple(elems) => elems.iter().any(|&t| holds_quantum_or_ref(typed, t)),
-        &TyKind::Array(elem, _) => holds_quantum_or_ref(typed, elem),
-        &TyKind::Struct(s) => types.structs[s.index()]
-            .fields
-            .iter()
-            .any(|&(_, t)| holds_quantum_or_ref(typed, t)),
+        &TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _) => holds_quantum_or_ref(typed, elem),
+        &TyKind::Struct(s) => {
+            let def = &types.structs[s.index()];
+            def.fields
+                .iter()
+                .any(|&(_, t)| holds_quantum_or_ref(typed, t))
+                || def
+                    .variants
+                    .iter()
+                    .flatten()
+                    .flat_map(|v| v.data.iter())
+                    .any(|&t| holds_quantum_or_ref(typed, t))
+        }
         _ => false,
     }
 }
@@ -347,7 +358,7 @@ fn holds_logic(typed: &Typed, ty: Ty) -> bool {
     match types.kind(ty) {
         _ if matches!(types.deref(ty), Ty::BIT | Ty::BOOL) => true,
         TyKind::Tuple(elems) => elems.iter().any(|&t| holds_logic(typed, t)),
-        &TyKind::Array(elem, _) => holds_logic(typed, elem),
+        &TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _) => holds_logic(typed, elem),
         &TyKind::Struct(s) => types.structs[s.index()]
             .fields
             .iter()
@@ -361,7 +372,7 @@ fn holds_logic(typed: &Typed, ty: Ty) -> bool {
 fn all_logic(types: &crate::ty::Types, ty: Ty) -> bool {
     match types.kind(ty) {
         TyKind::Bit | TyKind::Bool => true,
-        &TyKind::Array(elem, _) => all_logic(types, elem),
+        &TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _) => all_logic(types, elem),
         TyKind::Tuple(elems) => elems.iter().all(|&t| all_logic(types, t)),
         _ => false,
     }
@@ -450,6 +461,9 @@ fn infer_recordable(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<bool> {
                     | ExprKind::Overlap { .. } => false,
                     _ => match typed.callees[e.index()] {
                         Some(Callee::Builtin(Builtin::Print { .. })) => false,
+                        Some(Callee::Builtin(Builtin::Std(op))) if op.is_effectful() => false,
+                        // A trait's function may print in an `impl`, unless it is `rev`.
+                        Some(Callee::Fn(f)) if unknown_body(typed, f) => false,
                         Some(Callee::Fn(f)) => result[f.index()],
                         _ => true,
                     },
@@ -553,20 +567,23 @@ fn is_quantum_op(ast: &Ast, typed: &Typed, quantum: &[bool], e: ExprId) -> bool 
         ExprKind::Ket { .. }
         | ExprKind::BraTest { .. }
         | ExprKind::PrepTest { .. }
-        | ExprKind::Ctrl { .. } => true,
-        ExprKind::Call { .. } | ExprKind::MethodCall { .. } => match typed.callees[e.index()] {
+        | ExprKind::Ctrl { .. }
+        | ExprKind::With { .. } => true,
+        // Calls, and operators and compound assignments that call `std::ops` traits.
+        _ => match typed.callees[e.index()] {
             Some(Callee::Builtin(
                 Builtin::Gate(_)
                 | Builtin::Measure
                 | Builtin::MeasureIn
                 | Builtin::Reset
                 | Builtin::Discard
-                | Builtin::Release,
+                | Builtin::Release
+                | Builtin::Qasm,
             )) => true,
-            Some(Callee::Fn(f)) => quantum[f.index()],
+            // A trait's function stands for `impl`s not known here.
+            Some(Callee::Fn(f)) => quantum[f.index()] || typed.fn_traits.contains_key(&f),
             _ => false,
         },
-        _ => false,
     }
 }
 
@@ -601,9 +618,13 @@ fn children(ast: &Ast, node: Node, out: &mut Vec<Node>) {
             StmtKind::Assign { place, value, .. } => {
                 out.extend([Node::Expr(place), Node::Expr(value)])
             }
-            StmtKind::Return(Some(e)) | StmtKind::Assert(e) | StmtKind::Expr { expr: e, .. } => {
-                out.push(Node::Expr(e))
+            StmtKind::Assert { cond, msg } => {
+                out.push(Node::Expr(cond));
+                if let Some(m) = msg {
+                    out.push(Node::Expr(m));
+                }
             }
+            StmtKind::Return(Some(e)) | StmtKind::Expr { expr: e, .. } => out.push(Node::Expr(e)),
             _ => {}
         },
         Node::Expr(e) => {
@@ -833,6 +854,11 @@ impl<'a> Walker<'a> {
                         self.mark_block(body, later || loops);
                         stack.push(Node::Expr(cond));
                     }
+                    ExprKind::With { with, body } => {
+                        let uncomputes = self.contains_quantum(Node::Block(with));
+                        let in_body = self.mark_block(body, later || uncomputes);
+                        self.mark_block(with, later || uncomputes || in_body);
+                    }
                     _ => children(self.cx.ast, child, &mut stack),
                 },
                 Node::Stmt(_) => children(self.cx.ast, child, &mut stack),
@@ -938,15 +964,16 @@ impl<'a> Walker<'a> {
                         ExprKind::Sample { .. }
                         | ExprKind::Expectation { .. }
                         | ExprKind::Overlap { .. } => Some("starts a repeated run"),
-                        ExprKind::Call { .. } | ExprKind::MethodCall { .. } => {
-                            match typed.callees[e.index()] {
-                                Some(Callee::Builtin(Builtin::Print { .. })) => Some("prints"),
-                                Some(Callee::Fn(f)) if !self.cx.recordable[f.index()] => {
-                                    Some("calls a function that prints or starts repeated runs")
-                                }
-                                _ => None,
+                        _ if typed.callees[e.index()].is_some() => match typed.callees[e.index()] {
+                            Some(Callee::Builtin(Builtin::Print { .. })) => Some("prints"),
+                            Some(Callee::Builtin(Builtin::Std(op))) if op.is_effectful() => {
+                                Some("performs I/O")
                             }
-                        }
+                            Some(Callee::Fn(f)) if !self.cx.recordable[f.index()] => {
+                                Some("calls a function that prints or starts repeated runs")
+                            }
+                            _ => None,
+                        },
                         _ => None,
                     };
                     if let Some(why) = why {
@@ -994,9 +1021,20 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// A measurement result is `what` (say, "printed") before the last quantum operation.
     fn violate(&mut self, span: Span, what: &str) {
         if self.info.not_circuit.is_none() {
-            self.info.not_circuit = Some((span, what.to_string()));
+            self.not_circuit(
+                span,
+                format!("a measurement result is {what} before its last quantum operation"),
+            );
+        }
+    }
+
+    /// Why the run is not a circuit, as a clause.
+    fn not_circuit(&mut self, span: Span, why: String) {
+        if self.info.not_circuit.is_none() {
+            self.info.not_circuit = Some((span, why));
         }
     }
 
@@ -1014,6 +1052,15 @@ impl<'a> Walker<'a> {
                 let tainted = self.expr(init, before) || self.control > 0;
                 self.taint_pattern(pat, tainted);
             }
+            // `a += b` calling `AddAssign`: a call that changes `a`.
+            StmtKind::Assign { place, .. } if self.cx.typed.callees[place.index()].is_some() => {
+                let tainted = self.call(place, before) || self.control > 0;
+                if let Some(local) = root(self.cx.ast, self.cx.typed, place)
+                    && tainted
+                {
+                    self.tainted[local.index()] = true;
+                }
+            }
             StmtKind::Assign { place, value, .. } => {
                 let tainted = self.expr(value, before) || self.control > 0;
                 self.place_indices(place, before);
@@ -1026,9 +1073,16 @@ impl<'a> Walker<'a> {
             StmtKind::Return(Some(e)) | StmtKind::Expr { expr: e, .. } => {
                 self.expr(e, before);
             }
-            StmtKind::Assert(e) => {
-                if self.expr(e, before) && before {
-                    let span = self.cx.ast.expr(e).span;
+            StmtKind::Assert { cond, msg } => {
+                if self.expr(cond, before) && before {
+                    let span = self.cx.ast.expr(cond).span;
+                    self.violate(span, "used in `assert`");
+                }
+                if let Some(m) = msg
+                    && self.expr(m, before)
+                    && before
+                {
+                    let span = self.cx.ast.expr(m).span;
                     self.violate(span, "used in `assert`");
                 }
             }
@@ -1171,6 +1225,12 @@ impl<'a> Walker<'a> {
                 }
                 self.expr(operand, before);
                 true
+            }
+            // `a + b` on a type of the program's own calls `Add::add`.
+            ExprKind::Unary { .. } | ExprKind::Binary { .. }
+                if self.cx.typed.is_operator_call(self.cx.ast, id) =>
+            {
+                self.call(id, before)
             }
             ExprKind::Unary { op, operand } => {
                 let tainted = self.expr(operand, before);
@@ -1318,6 +1378,10 @@ impl<'a> Walker<'a> {
                 self.block(body);
                 false
             }
+            ExprKind::With { with, body } => {
+                self.block(with);
+                self.value_block(body)
+            }
             ExprKind::Error
             | ExprKind::Int(_)
             | ExprKind::BigInt
@@ -1325,8 +1389,7 @@ impl<'a> Walker<'a> {
             | ExprKind::Imag(_)
             | ExprKind::Bool(_)
             | ExprKind::Path(_)
-            | ExprKind::Unit
-            | ExprKind::With { .. } => false,
+            | ExprKind::Unit => false,
         }
     }
 
@@ -1347,21 +1410,35 @@ impl<'a> Walker<'a> {
 
     fn call(&mut self, id: ExprId, before: bool) -> bool {
         let ast = self.cx.ast;
-        let (receiver, args) = match ast.expr(id).kind {
-            ExprKind::Call { args, .. } => (None, ast.list(args)),
-            ExprKind::MethodCall { receiver, args, .. } => (Some(receiver), ast.list(args)),
-            _ => return false,
+        let Some((receiver, args)) = self.cx.typed.call_parts(ast, id) else {
+            return false;
         };
         let callee = self.cx.typed.callees[id.index()];
         // Qubits are never measurement results, even ones created under a condition on one.
         let typed = self.cx.typed;
         let classical = |e: ExprId| typed.types.linearity(typed.ty(e)) != Kind::Linear;
+        if callee == Some(Callee::Builtin(Builtin::Qasm)) {
+            if let Some(&arg) = args.first()
+                && let ExprKind::Str(parts) = ast.expr(arg).kind
+            {
+                for part in ast.list(parts) {
+                    if let StrPart::Value { expr, .. } = *part
+                        && self.expr(expr, before)
+                        && classical(expr)
+                        && before
+                    {
+                        self.violate(ast.expr(expr).span, "used in inline OpenQASM");
+                    }
+                }
+            }
+            return false;
+        }
         let mut tainted_args = Vec::new();
         if let Some(r) = receiver {
             let tainted = self.expr(r, before) && classical(r);
             tainted_args.push((r, tainted));
         }
-        for &a in args {
+        for &a in args.iter() {
             let tainted = self.expr(a, before) && classical(a);
             tainted_args.push((a, tainted));
         }
@@ -1397,6 +1474,32 @@ impl<'a> Walker<'a> {
                 }
                 false
             }
+            Some(Callee::Fn(f)) if ast.function(f).is_foreign_import() => {
+                if let Some(&(arg, _)) = tainted_args.iter().find(|&&(_, t)| t)
+                    && before
+                {
+                    let name = ast.name(ast.function(f).name);
+                    let what = format!("passed to foreign function `{name}`");
+                    self.violate(ast.expr(arg).span, &what);
+                }
+                any
+            }
+            Some(Callee::FnPtr) => {
+                if let Some(&(arg, _)) = tainted_args.iter().find(|&&(_, t)| t)
+                    && before
+                {
+                    self.violate(ast.expr(arg).span, "passed to a foreign function pointer");
+                }
+                any
+            }
+            Some(Callee::Fn(f)) if unknown_body(typed, f) => {
+                let name = ast.name(ast.function(f).name);
+                let why = format!(
+                    "it calls `{name}`, a trait's function not declared `rev fn` whose `impl`s are not known here, so it may measure"
+                );
+                self.not_circuit(ast.expr(id).span, why);
+                any
+            }
             Some(Callee::Fn(f)) => {
                 // Given measurement results, the function is checked as if they were its own.
                 let given = self.cx.given[f.index()].as_ref().filter(|_| any);
@@ -1410,14 +1513,14 @@ impl<'a> Walker<'a> {
                 }
                 // What happens inside the call is part of this run.
                 let inner = given.unwrap_or(&self.cx.fns[f.index()]);
-                if let Some((span, what)) = &inner.not_circuit {
+                if let Some((span, why)) = &inner.not_circuit {
                     // Name the function where it happens, once.
-                    let what = if what.contains(" in `") {
-                        what.clone()
+                    let why = if why.starts_with("in `") {
+                        why.clone()
                     } else {
-                        format!("{what} in `{}`", ast.name(ast.function(f).name))
+                        format!("in `{}`, {why}", ast.name(ast.function(f).name))
                     };
-                    self.violate(*span, &what);
+                    self.not_circuit(*span, why);
                 }
                 self.info.feedback |= inner.feedback;
                 if let Some((span, why)) = &inner.feedback_unsupported {
@@ -1434,6 +1537,14 @@ impl<'a> Walker<'a> {
                     self.violate(ast.expr(arg).span, "printed");
                 }
                 false
+            }
+            Some(Callee::Builtin(Builtin::Std(op))) if op.is_effectful() => {
+                if let Some(&(arg, _)) = tainted_args.iter().find(|&&(_, t)| t)
+                    && before
+                {
+                    self.violate(ast.expr(arg).span, "passed to an I/O call");
+                }
+                any
             }
             _ => {
                 if let Some(&(arg, _)) = tainted_args.iter().find(|&&(_, t)| t)
@@ -1462,4 +1573,10 @@ fn root(ast: &Ast, typed: &Typed, mut id: ExprId) -> Option<LocalId> {
             _ => return None,
         }
     }
+}
+
+/// Whether a call of `f` runs code the analysis cannot see: a trait's function not declared
+/// `rev fn`, whose `impl`s may measure, print or start runs. A `rev` one can do none of these.
+fn unknown_body(typed: &Typed, f: FnId) -> bool {
+    typed.fn_traits.contains_key(&f) && typed.fns[f.index()].sig.reversible != Reversible::Yes
 }

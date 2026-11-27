@@ -1,0 +1,27 @@
+// N013: `std::io`, `std::env`, `std::fs`, and `std::net` are not reversible.
+
+use std::env::var
+use std::fs::exists
+use std::io::stdout
+use std::net::TcpListener
+
+rev fn bad_io(q: mut Qubit) {
+    let out = stdout()              //~ N013
+    let _ = out.flush()             //~ N013
+    q.x()
+}
+
+rev fn bad_env(q: mut Qubit) {
+    let _ = var("PATH")             //~ N013
+    q.x()
+}
+
+rev fn bad_fs(q: mut Qubit) {
+    let _ = exists("/tmp")          //~ N013
+    q.x()
+}
+
+rev fn bad_net(q: mut Qubit) {
+    let _ = TcpListener::bind("127.0.0.1:0")    //~ N013
+    q.x()
+}

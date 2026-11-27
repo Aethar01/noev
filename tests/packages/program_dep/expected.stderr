@@ -1,0 +1,1 @@
+program_dep/noev.toml:5:1: error: the dependency `vqe` is a program (`src/main.nv`), not a library (`src/lib.nv`)

@@ -1,0 +1,28 @@
+[package]
+name = "noev-py"
+description = "Python bindings for the Noev hybrid classical-quantum language."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+name = "_noev"
+crate-type = ["cdylib"]
+
+[dependencies]
+noev = { path = "../noev", default-features = false }
+noev-ir = { path = "../noev-ir" }
+noev-runtime = { path = "../noev-runtime", default-features = false }
+noev-sema = { path = "../noev-sema" }
+num-bigint = "0.4"
+pyo3 = "0.30"
+
+[features]
+default = ["ketrs"]
+ketrs = ["noev/ketrs", "noev-runtime/ketrs"]
+
+[lints]
+workspace = true

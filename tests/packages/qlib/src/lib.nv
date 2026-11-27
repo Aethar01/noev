@@ -1,0 +1,5 @@
+pub fn version() -> String {
+    "0.{minor()}"
+}
+
+fn minor() -> Int { 1 }

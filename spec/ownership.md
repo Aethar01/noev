@@ -110,17 +110,61 @@ measurement. "No operation is applied *through* this reference" is what `ref` gu
 
 ## 5. How long a lend lasts
 
-**Lifetimes are lexical for now:** a lend stored in a variable lasts until the end of the
-block that declares the variable; a lend that is only used within one statement (a call
-argument, a method receiver, a chain) lasts until the end of that statement.
+**Non-lexical, path-sensitive lifetimes.** A lend held by a variable lasts only on execution
+paths that use the variable again (before it is overwritten or leaves scope). Once a reference
+variable has no remaining uses on a path, the place it borrowed from is free again — including
+after a conditional early return of a borrow:
 
-This is stricter than Rust's non-lexical lifetimes, which end a lend at its last use. Moving
-to non-lexical lifetimes later only accepts more programs, so it breaks nothing.
+```noev
+fn pick(a: mut Qubit, b: mut Qubit, flag: Bool) -> mut Qubit {
+    let r = mut a
+    if flag {
+        return r            // `r` is used on this path
+    }
+    a.h()                   // ok: `r` is not used on this path, so `a` is free again
+    mut b
+}
+```
 
-References in function signatures follow Rust's elision rules: a returned reference borrows
-from the receiver if there is one, otherwise from the single reference parameter. Signatures
-that need anything else, and references stored in struct fields, need explicit lifetimes,
-which are Reserved.
+**Two-phase receiver lends.** When a method takes `mut self` on a place, its call arguments
+are evaluated before the receiver's `mut` lend starts, so `c.add(c.get())` and
+`e.rotate_by(e.angle)` are allowed when the argument does not keep lending `c` or `e`.
+
+**Field-level method lends.** Within a package, the compiler infers which fields of `self`
+each method reads or mutates, so calling a method only lends the fields it actually uses
+(`ctrl p.a { p.flip_b() }`, or holding `p.a_mut()` and `p.b_mut()` at the same time). Across
+packages, a method lends `self` as a whole unless its return type names a field
+(`mut[self.a] Qubit`).
+
+**References in structs and place-based borrow annotations.** Structs and enums may store
+references (`struct Window { q: ref Qubit }`) without lifetime parameters. When a function
+returns a reference or a value containing references, it can name the parameter places it
+borrows from in brackets — `ref[a, b] String`, `mut[self.state] Qubit`, `Window[r]`:
+
+```noev
+struct Window {
+    q: ref Qubit
+    tag: Int
+}
+
+pub fn view(r: ref [Qubit; 4]) -> Window[r] {
+    Window { q: ref r[0], tag: 0 }
+}
+
+pub fn longer(a: ref String, b: ref String, pick_a: Bool) -> ref[a, b] String {
+    if pick_a { a } else { b }
+}
+```
+
+- **Within a package**, what a function's return value borrows from is inferred from its body
+  (following calls), so `[…]` only needs to be written to make a promise checked against the
+  body (returning a borrow from a place not listed is N008).
+- **Elision** still applies when `[…]` is omitted on a library's `pub` function or a trait
+  function: a returned borrow borrows from `self` if there is a receiver, otherwise from the
+  single parameter whose type holds a reference. Where elision does not decide (such as two
+  reference parameters and no `self`), a library's `pub` function or trait signature must name
+  the sources in `[…]`.
+- Self-referential structs are out of scope.
 
 ## 6. Rules
 
@@ -132,7 +176,11 @@ let b = a               // error[N001]: qubits cannot be copied
                         //   help: write `let b = mv a` to move it
 ```
 
-Applies to every move point in §3.
+Applies to every move point in §3. A value of a generic type `T` is treated like a qubit
+unless `T: Copy`; within a package, a function whose bounds are not written infers `T: Copy`
+from a copy instead, and the error moves to a call that gives it a type that is not
+copyable ([types.md](types.md) §6). The same goes for any rule a `Copy` value would meet,
+such as N010 and N013.
 
 ### N002: use after move
 
@@ -156,10 +204,12 @@ fn f() {
 ```
 
 At the end of every scope, and at every `return` and `break`, each linear place owned by
-that scope must have been moved. A qubit is consumed by `measure`, `discard`, moving it into
+that scope must have been moved, unless it is proven to be in \|0⟩ (§9), in which case it
+is released automatically. A qubit is consumed by `measure`, `discard`, moving it into
 something that is itself consumed, or returning it. Discarding a linear value as a block's
-unused final expression is also N003, and so is binding one to `_`, alone or inside a tuple
-or array pattern (`let [a, _] = mv pair`).
+unused final expression is also N003 unless it is proven \|0⟩, and so is binding one to `_`,
+alone or inside a tuple or array pattern (`let [a, _] = mv pair`). Dropping a value of a
+generic type `T` infers `T: Copy` where a copy would (N001).
 
 There is never an implicit measure or discard. If `q` is entangled with a qubit the program
 keeps, discarding `q` acts as a measurement and collapses the kept qubit. The programmer has
@@ -284,8 +334,8 @@ control it, invert it with `adj`, and uncompute it.
 **A function is reversible if its body satisfies the rules below.** The compiler infers this;
 nothing needs to be written. Declaring `rev fn` turns the inference into a promise: the
 compiler reports N013 inside the function if its body stops being reversible, rather than at
-some distant caller. Once Noev has modules, functions visible outside their module must state
-`rev` explicitly to be usable as reversible ([modules.md](modules.md) §5).
+some distant caller. A function is reversible by inference anywhere in its own package; other
+packages can use it as reversible only if it states `rev` ([modules.md](modules.md) §5).
 
 ### N013: irreversible operation in a reversible context
 
@@ -303,12 +353,13 @@ In a reversible context, these are not allowed:
 
 - calls to `measure`, `reset`, `discard`, or any function that is not reversible;
 - ket literals (allocating qubits), except in a `with` block;
-- moving a linear value;
+- moving a linear value, except a local declared inside the same `with` block;
 - assignment to a variable declared outside the context.
 
 Allowed: gates, calls to reversible functions (including purely classical ones, which are
-trivially reversible), nested `ctrl`, `adj`, `let` bindings and assignments of variables
-declared inside the context, `if` and `while`, and `for` loops over classical ranges.
+trivially reversible), nested `ctrl`, `adj`, `with`/`do` (when its `do` block is also
+reversible), `let` bindings and assignments of variables declared inside the context, `if`
+and `while`, and `for` loops over classical ranges.
 
 Classical control flow is safe here because nothing in a reversible context can depend on a
 measurement: every classical value is determined by the inputs, so undoing the code can
@@ -342,29 +393,45 @@ pure quantum value (a qubit, an array or tuple of qubits, a struct of qubits) or
 to one; every qubit in it is a control. So `ctrl r { t.x() }` with `r: [Qubit; 3]` is a
 multi-controlled X. The body is a reversible context (§7).
 
-### `with` / `do` (Reserved)
+### `with` / `do`
 
 ```noev
 with { majority(a, b, c) }
 do   { ctrl c { out.x() } }
 ```
 
-Runs the `with` block, then the `do` block, then the inverse of the `with` block. Qubits
-allocated in `with` are back in \|0⟩ at the end and are released automatically. During
-`do`, every qubit the `with` block allocated or acted on is `ref`-lent (usable only as a
-control). This guarantees the inverse restores them.
+Runs the `with` block, then the `do` block, then the inverse of the `with` block.
 
-Parsed, but rejected with "not yet supported".
+- The `with` block is a reversible context (§7) that may allocate qubits (ancillas) and move
+  locals declared inside it. Its variables stay in scope in the `do` block.
+- During `do`, every linear place that `with` allocated, acted on, or read (`ref`/`ctrl`) is
+  `ref`-lent (usable only as a control): mutating one in `do` is N005 and moving one is N006.
+  This guarantees the inverse sees the same inputs and restores the state.
+- `return`, `break` and `continue` cannot leave `with` or `do`.
+- The value of `with { … } do { … }` is the value of the `do` block; it cannot return a
+  reference to a local declared in `with` (N008).
+- After `do`, the inverse of `with` runs and every qubit allocated in `with` is released
+  automatically. On simulators, `release` checks that each released qubit really returned to
+  \|0⟩ (§11).
+- `with`/`do` is itself reversible when its `do` block is, so it can appear in a `rev fn`,
+  under `ctrl`, or inside `adj`. Under an enclosing `ctrl`, only the `do` block needs the
+  enclosing controls, since $U^\dagger (\text{ctrl } V) U = \text{ctrl}(U^\dagger V U)$.
 
-## 9. Toward automatic release (goal, not implemented yet)
+## 9. Automatic release
 
-For now, every qubit must be consumed explicitly (N003). The goal is to release a qubit
-automatically when the compiler can **prove** it is back in \|0⟩: for example, a qubit never
-acted on since its `|0>` literal, or one restored by `with`/`do`. Accepting those programs
-later breaks no existing code. `discard` stays available for saying it explicitly.
+A linear value whose remaining qubits are **proven to be in \|0⟩** is released automatically
+when it goes out of scope (at the end of a block, `return`, or `break`), when bound to `_`,
+or when discarded as an unused expression, without triggering N003:
 
-So the checker records more than "owned / moved / lent" per place from the start: at least
-whether a qubit has been acted on since it was created, and its literal state if not.
+- a freshly created `|0>` (or `|00…>`, `[|0>; N]`, or a tuple, array, struct or enum built
+  solely from proven-\|0⟩ qubits) that has not been acted on (`mut`-lent);
+- a `Qubit` immediately after `q.reset()`, before any further gate acts on it;
+- qubits allocated in a `with` block, restored by its inverse (§8).
+
+Any `mut` lend other than `reset` on a whole `Qubit` clears the proof; `ref` lends (including
+`ctrl`) preserve it, since a \|0⟩ control is left unchanged. Values not proven to be in \|0⟩
+(such as `|+>`, `|1>`, or any qubit acted on by a gate) still require explicit consumption
+(N003). `discard` and `unsafe { mv q.release() }` stay available.
 
 ## 10. Array indices
 
@@ -376,8 +443,10 @@ time, with no runtime checks.
 ### Index facts
 
 Each index is put in linear form: a sum of integer variables times constants, plus a
-constant (`2*i + 1`, `j - 1`, `n - 1 - i`). Indices outside this form (`r[f(i)]`, `r[i * j]`)
-cannot be compared, except with an identical expression.
+constant (`2*i + 1`, `j - 1`, `n - 1 - i`). A size parameter `N` (`const N: Int`, see
+[types.md](types.md) §6) is a variable too, whose value each copy of the function fixes.
+Indices outside this form (`r[f(i)]`, `r[i * j]`, `r[N / 2]`) cannot be compared, except
+with an identical expression.
 
 The compiler knows these facts at each point in the program:
 
@@ -439,7 +508,11 @@ This analysis only concerns lending. Moving an element still requires a constant
 The same facts prove that indices are in range. Each variable's range comes from the facts,
 and the index's range follows from its linear form by interval arithmetic: with `i` in
 `0..3`, `2*i + 1` lies between 1 and 5. Indexing a qubit array (or any array
-containing qubits) must be proven in range at compile time; otherwise it is N018. Indexing a
+containing qubits) must be proven in range at compile time; otherwise it is N018. In an
+array of length `N`, a size parameter, an index is in range when the facts prove it at
+least 0 and less than `N`, as differences: `for i in 0..N - 1` proves `i + 1 < N`, and
+`r[0]` needs `assert 0 < N`, since `N` can be 0. A size is never negative, and a length that
+is a sum of sizes is used as its sum: in `[Qubit; N + 1]`, `r[N]` is in range. Indexing a
 purely classical array that cannot be proven in range gets a runtime check instead (see
 [types.md](types.md) §2).
 
@@ -454,6 +527,27 @@ for i in 0..4 { ctrl r[i] { r[i + 1].x() } }
 
 A runtime out-of-range failure halfway through a circuit, with qubits entangled, is as bad
 as an ownership failure, so it is ruled out at compile time.
+
+### N024: size not proven at least 0
+
+A size that subtracts, such as `N - 1` in `[Qubit; N - 1]`, exists only when it is at least
+0 ([types.md](types.md) §6). A function whose signature has one may assume it, as a fact for
+its indices and calls; each call must prove it for the sizes it gives, from the facts where it
+is (an `assert`, a loop, or its own signature), and so must `[x; N - 1]`:
+
+```noev
+fn drop_top<const N: Int>(r: [Qubit; N]) -> [Qubit; N - 1] { … }
+
+fn f(r: [Qubit; 0]) { drop_top(mv r) }      // error[N024]: `drop_top` needs `N - 1` to be at
+                                            //   least 0, but here it is -1
+fn g<const N: Int>(r: [Qubit; N]) {
+    drop_top(mv r)                          // error[N024]: … which is not proven here
+}
+fn h<const N: Int>(r: [Qubit; N]) {
+    assert 1 <= N
+    drop_top(mv r)                          // fine
+}
+```
 
 ### Later
 
@@ -478,16 +572,16 @@ memory sense. What it risks is a wrong quantum computation.
 | `q.release()`                | `q` is in \|0⟩, so it can be released without a reset | Implemented |
 | Calling an `unsafe fn`       | Whatever that function documents  | Implemented |
 | Reversible functions the checker cannot verify, such as measurement-based uncomputation, with hand-written inverse and controlled versions | They act as the stated unitary | Reserved |
-| Calling C functions and inline OpenQASM ([interop.md](interop.md)) | They behave as declared | Reserved |
+| Calling C functions and inline OpenQASM ([interop.md](interop.md)) | They behave as declared | Implemented |
 | Choosing physical qubits     | The chosen qubits are valid on the target | Reserved |
 
 `release` exists because a reset costs time and adds errors on hardware. Once the compiler
 can prove a qubit is back in \|0⟩ (§9), it releases it without being asked; `release` covers
 the cases it cannot prove yet.
 
-**Simulators check unsafe claims.** When running on a simulator, `release` checks that the
-qubit really is in \|0⟩ and reports an error if not. On hardware the claim is trusted. So
-unsafe code can be tested.
+**Backends that can, check unsafe claims.** On a backend that can check it, such as a simulator
+([runtime.md](runtime.md) §3), `release` checks that the qubit really is in \|0⟩ and reports
+an error if not. Other backends trust the claim. So unsafe code can be tested.
 
 ### What `unsafe` never allows
 
@@ -640,3 +734,4 @@ linear value's every case is handled, and its qubits consumed, on every path.
 | N021 | A `circuit fn` is not a circuit ([execution.md](execution.md) §4) |
 | N022 | A repeated run prints ([execution.md](execution.md) §3) |
 | N023 | A bra's preparation is not reversible (§12)        |
+| N024 | A size that subtracts is not proven at least 0 (§10) |

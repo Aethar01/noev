@@ -1,0 +1,56 @@
+// `with`/`do` blocks and automatic release of qubits proven to be in |0⟩ (spec/ownership.md §8–9).
+
+fn untouched_zeros() {
+    let q = |0>
+    let pair = |00>
+    let reg: [Qubit; 3] = [|0>; 3]
+    let opt = Some(|0>)
+    let _ = |0>
+    |0>
+}
+
+fn reset_auto_releases() {
+    let q = |+>
+    q.reset()
+}
+
+fn majority(a: mut Qubit, b: mut Qubit, c: mut Qubit) {
+    ctrl c { b.x(); a.x() }
+    ctrl a, b { c.x() }
+}
+
+rev fn compute_use_uncompute(a: mut Qubit, b: mut Qubit, c: mut Qubit, out: mut Qubit) {
+    with {
+        majority(a, b, c)
+    } do {
+        ctrl c { out.x() }
+    }
+}
+
+rev fn with_ancilla(a: ref Qubit, b: ref Qubit, c: ref Qubit, out: mut Qubit) {
+    with {
+        let tmp = |0>
+        let moved = mv tmp
+        ctrl a, b { moved.x() }
+    } do {
+        ctrl moved, c { out.x() }
+    }
+}
+
+fn nested_and_ctrl(flag: ref Qubit, a: ref Qubit, b: ref Qubit, c: ref Qubit, out: mut Qubit) {
+    ctrl flag {
+        with_ancilla(a, b, c, out)
+    }
+    adj with_ancilla(a, b, c, out)
+}
+
+fn with_do_value(a: ref Qubit) -> Bit {
+    let out = |0>
+    with {
+        let anc = |0>
+        ctrl a { anc.x() }
+    } do {
+        ctrl anc { out.x() }
+        mv out.measure()
+    }
+}

@@ -1,5 +1,7 @@
 // N013: an irreversible operation in a reversible context.
 
+use std::debug::amplitudes
+
 rev fn declared_reversible(q: mut Qubit) {
     q.h()
     q.reset()                       //~ N013
@@ -39,4 +41,15 @@ fn amplitudes_in_ctrl() {
     ctrl a { let s = amplitudes(b) }    //~ N013
     mv a.discard()
     mv b.discard()
+}
+
+// An `impl` of a `rev` trait function is checked as `rev`.
+trait Toggle {
+    rev fn toggle(mut self)
+}
+
+impl Toggle for Qubit {
+    rev fn toggle(mut self) {
+        self.reset()                //~ N013
+    }
 }

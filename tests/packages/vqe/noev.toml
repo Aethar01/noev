@@ -1,0 +1,6 @@
+[package]
+name = "vqe"
+version = "0.1.0"
+
+[dependencies]
+qlib = { path = "../qlib" }

@@ -60,6 +60,23 @@ fn instructions(out: &mut String, list: &[Instruction], depth: usize) {
             Instruction::Assign { clbit, value } => {
                 let _ = writeln!(out, "c[{clbit}] = {};", condition_text(value));
             }
+            Instruction::Qasm { code, .. } => {
+                let mut first = true;
+                for line in code.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if !first {
+                        out.push_str(&indent);
+                    }
+                    first = false;
+                    let _ = writeln!(out, "{trimmed}");
+                }
+                if first {
+                    let _ = writeln!(out);
+                }
+            }
         }
     }
 }
@@ -234,6 +251,34 @@ mod tests {
                 "p(1.0) q[0];",
                 "reset q[2];",
             ]
+        );
+    }
+
+    #[test]
+    fn inline_qasm_emitted_verbatim() {
+        let circuit = Circuit {
+            qubits: 2,
+            clbits: 1,
+            instructions: vec![
+                Instruction::Qasm {
+                    code: "sx q[0];\necr q[0], q[1];".into(),
+                    qubits: vec![0, 1],
+                },
+                Instruction::Measure { qubit: 0, clbit: 0 },
+                Instruction::If {
+                    condition: Condition::Clbit(0),
+                    then: vec![Instruction::Qasm {
+                        code: "delay[50ns] q[1];".into(),
+                        qubits: vec![1],
+                    }],
+                    otherwise: vec![],
+                },
+            ],
+        };
+        assert_eq!(
+            to_qasm3(&circuit, &[]),
+            "OPENQASM 3.0;\ninclude \"stdgates.inc\";\n\nqubit[2] q;\nbit[1] c;\n\n\
+             sx q[0];\necr q[0], q[1];\nc[0] = measure q[0];\nif (c[0] == 1) {\n    delay[50ns] q[1];\n}\n"
         );
     }
 }

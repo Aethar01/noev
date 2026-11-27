@@ -2,9 +2,11 @@
 //!
 //! It runs the compiler's checks on every change and reports their diagnostics, and answers
 //! hover (types and signatures), go to definition and document symbols from the checked
-//! program. Documents are synced whole; programs are one file, and checking is fast.
+//! program. Documents are synced whole, and checking is fast. A file in a package is checked
+//! with the rest of its package, open documents read from the editor instead of from disk.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::notification::{
@@ -24,7 +26,7 @@ use noev_sema::{Circuits, Ty, TyKind, Typed};
 
 mod docs;
 use noev_syntax::ast::{ExprId, ExprKind, FnId, ItemKind, PatData, PatKind, TypeKind, VariantData};
-use noev_syntax::{Ast, Severity, Span};
+use noev_syntax::{Ast, Severity, SourceMap, Span};
 
 /// Runs the server until the editor shuts it down.
 pub fn serve() -> Result<(), String> {
@@ -60,6 +62,7 @@ pub fn serve() -> Result<(), String> {
     let mut server = Server {
         connection: &connection,
         documents: HashMap::new(),
+        open: HashMap::new(),
         utf8,
     };
     server.run()?;
@@ -70,7 +73,10 @@ pub fn serve() -> Result<(), String> {
 struct Server<'c> {
     connection: &'c Connection,
     /// Open documents by URI, with their latest analysis.
-    documents: HashMap<String, Document>,
+    documents: HashMap<String, (Uri, Document)>,
+    /// The text of every open document that is a file, by path: a package's files are read
+    /// from here when they are open.
+    open: HashMap<PathBuf, String>,
     /// Whether positions are counted in UTF-8 bytes rather than UTF-16 units.
     utf8: bool,
 }
@@ -124,18 +130,54 @@ impl Server<'_> {
                 ) else {
                     return;
                 };
-                self.documents.remove(params.text_document.uri.as_str());
-                self.publish(params.text_document.uri, Vec::new());
+                let uri = params.text_document.uri;
+                if let Some((_, document)) = self.documents.remove(uri.as_str()) {
+                    if let Some(path) = uri_path(&uri) {
+                        self.open.remove(&path);
+                    }
+                    // Files of its package see it on disk again.
+                    self.recheck(document.package.as_deref(), uri.as_str());
+                }
+                self.publish(uri, Vec::new());
             }
             _ => {}
         }
     }
 
     fn update(&mut self, uri: Uri, text: String) {
-        let document = Document::new(text, self.utf8);
+        let path = uri_path(&uri);
+        if let Some(path) = &path {
+            self.open.insert(path.clone(), text.clone());
+        }
+        let document = Document::new(path.as_deref(), text, self.utf8, &self.open);
         let diagnostics = document.diagnostics(&uri);
-        self.documents.insert(uri.as_str().to_string(), document);
-        self.publish(uri, diagnostics);
+        let package = document.package.clone();
+        self.documents
+            .insert(uri.as_str().to_string(), (uri.clone(), document));
+        self.publish(uri.clone(), diagnostics);
+        self.recheck(package.as_deref(), uri.as_str());
+    }
+
+    /// Checks again every open document of `package` but `except`, since a change to one file
+    /// can change what the others mean.
+    fn recheck(&mut self, package: Option<&Path>, except: &str) {
+        let Some(package) = package else { return };
+        let others: Vec<String> = self
+            .documents
+            .iter()
+            .filter(|(key, (_, doc))| {
+                key.as_str() != except && doc.package.as_deref() == Some(package)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in others {
+            let (uri, old) = self.documents.remove(&key).expect("listed");
+            let path = uri_path(&uri);
+            let document = Document::new(path.as_deref(), old.text, self.utf8, &self.open);
+            let diagnostics = document.diagnostics(&uri);
+            self.documents.insert(key, (uri.clone(), document));
+            self.publish(uri, diagnostics);
+        }
     }
 
     fn publish(&self, uri: Uri, diagnostics: Vec<Diagnostic>) {
@@ -157,17 +199,16 @@ impl Server<'_> {
                 serde_json::to_value(doc.hover(offset)).ok()
             }),
             GotoDefinition::METHOD => self.position_request(request, |doc, offset, uri| {
-                let location = doc.definition(offset).map(|span| Location {
-                    uri: uri.clone(),
-                    range: doc.range(span),
-                });
+                let location = doc
+                    .definition(offset)
+                    .and_then(|span| doc.location(span, uri));
                 serde_json::to_value(location.map(GotoDefinitionResponse::Scalar)).ok()
             }),
             DocumentSymbolRequest::METHOD => {
                 let params =
                     serde_json::from_value::<lsp_types::DocumentSymbolParams>(request.params);
                 params.ok().and_then(|p| {
-                    let doc = self.documents.get(p.text_document.uri.as_str())?;
+                    let (_, doc) = self.documents.get(p.text_document.uri.as_str())?;
                     serde_json::to_value(DocumentSymbolResponse::Nested(doc.symbols())).ok()
                 })
             }
@@ -195,7 +236,7 @@ impl Server<'_> {
         let params =
             serde_json::from_value::<lsp_types::TextDocumentPositionParams>(request.params).ok()?;
         let uri = params.text_document.uri;
-        let doc = self.documents.get(uri.as_str())?;
+        let (_, doc) = self.documents.get(uri.as_str())?;
         let offset = doc.offset(params.position)?;
         answer(doc, offset, &uri)
     }
@@ -213,10 +254,16 @@ impl Server<'_> {
 /// An open document and what the compiler found in it.
 struct Document {
     text: String,
-    /// The byte offset of the start of each line.
+    /// The byte offset of the start of each line, in `text`.
     lines: Vec<u32>,
     utf8: bool,
-    parsed: noev_syntax::Parsed,
+    /// Every file checked with this one: its package's, or just this one.
+    sources: SourceMap,
+    /// The offset of this file's first byte in `sources`: spans are offsets there.
+    base: u32,
+    /// The package this file is in, if it is in one.
+    package: Option<PathBuf>,
+    ast: Ast,
     tokens: Vec<noev_syntax::Token>,
     typed: Typed,
     found: Vec<noev_syntax::Diagnostic>,
@@ -227,19 +274,55 @@ struct Document {
 }
 
 impl Document {
-    /// Checks `text` as `noev check` does.
-    fn new(text: String, utf8: bool) -> Self {
-        let parsed = noev_syntax::parse(&text);
-        let tokens = noev_syntax::lex(&text).tokens;
-        let (typed, type_errors) = noev_sema::check(&parsed.ast);
-        let mut found = parsed.diagnostics.clone();
+    /// Checks `text`, the file at `path`, as `noev check` does: with the rest of its
+    /// package, if it is in one, reading the files in `open` from there instead of from disk.
+    fn new(path: Option<&Path>, text: String, utf8: bool, open: &HashMap<PathBuf, String>) -> Self {
+        let package = path.and_then(crate::package::package_of);
+        let loaded = package
+            .as_deref()
+            .and_then(|dir| crate::package::load_with(dir, open).ok())
+            .filter(|loaded| {
+                let name = path.map(|p| p.display().to_string());
+                loaded
+                    .sources
+                    .files()
+                    .iter()
+                    .any(|f| Some(&f.name) == name.as_ref())
+            });
+        let package = loaded.as_ref().and(package);
+        let crate::package::Loaded {
+            sources,
+            ast,
+            diagnostics: mut found,
+            ..
+        } = loaded.unwrap_or_else(|| {
+            let sources = SourceMap::single("document.nv", text.clone());
+            let parsed = noev_syntax::parse(&text);
+            crate::package::Loaded {
+                sources,
+                ast: parsed.ast,
+                diagnostics: parsed.diagnostics,
+                default_backend: None,
+            }
+        });
+        let name = path.map(|p| p.display().to_string());
+        let base = sources
+            .files()
+            .iter()
+            .find(|f| package.is_some() && Some(&f.name) == name.as_ref())
+            .map_or(0, |f| f.start);
+        let tokens = noev_syntax::lex_at(&text, base).tokens;
+        let (typed, type_errors) = noev_sema::check(&ast);
         let mut circuits = None;
         let mut reversible = None;
-        if found.is_empty() && type_errors.is_empty() {
-            reversible = Some(noev_sema::reversibility(&parsed.ast, &typed));
-            found.extend(noev_sema::check_ownership(&parsed.ast, &typed));
-            if found.is_empty() {
-                let (info, warnings) = noev_sema::check_circuits(&parsed.ast, &typed);
+        let errors = |d: &[noev_syntax::Diagnostic]| {
+            d.iter().any(|d| d.severity == noev_syntax::Severity::Error)
+        };
+        if !errors(&found) && !errors(&type_errors) {
+            reversible = Some(noev_sema::reversibility(&ast, &typed));
+            found.extend(noev_sema::check_ownership(&ast, &typed));
+            if !errors(&found) {
+                let (info, warnings) = noev_sema::check_circuits(&ast, &typed);
                 found.extend(warnings);
                 circuits = Some(info);
             }
@@ -248,27 +331,38 @@ impl Document {
         let lines = std::iter::once(0)
             .chain(text.match_indices('\n').map(|(i, _)| i as u32 + 1))
             .collect();
-        Document {
+        let mut document = Document {
             text,
             lines,
             utf8,
-            parsed,
+            sources,
+            base,
+            package,
+            ast,
             tokens,
             typed,
             found,
             circuits,
             reversible,
-        }
+        };
+        // This document shows only its own file's diagnostics; the others' are shown in theirs.
+        let found = std::mem::take(&mut document.found);
+        document.found = found
+            .into_iter()
+            .filter(|d| document.in_file(d.span))
+            .collect();
+        document
     }
 
     fn ast(&self) -> &Ast {
-        &self.parsed.ast
+        &self.ast
     }
 
     // Positions
 
+    /// The position of `offset`, an offset in this document's file.
     fn position(&self, offset: u32) -> Position {
-        let offset = offset.min(self.text.len() as u32);
+        let offset = offset.saturating_sub(self.base).min(self.text.len() as u32);
         let line = self.lines.partition_point(|&start| start <= offset) - 1;
         let start = self.lines[line] as usize;
         let before = &self.text[start..offset as usize];
@@ -294,7 +388,7 @@ impl Document {
         let mut units = 0;
         for (i, c) in line.char_indices() {
             if units >= position.character as usize {
-                return Some((start + i) as u32);
+                return Some(self.base + (start + i) as u32);
             }
             units += if self.utf8 {
                 c.len_utf8()
@@ -302,7 +396,7 @@ impl Document {
                 c.len_utf16()
             };
         }
-        Some(end as u32)
+        Some(self.base + end as u32)
     }
 
     // Diagnostics
@@ -319,12 +413,13 @@ impl Document {
                 let related = d
                     .labels
                     .iter()
-                    .map(|(span, text)| DiagnosticRelatedInformation {
-                        location: Location {
-                            uri: uri.clone(),
-                            range: self.range(*span),
-                        },
-                        message: text.clone(),
+                    // A note on something with no source text, such as a built-in trait.
+                    .filter(|(span, _)| *span != Span::default())
+                    .filter_map(|(span, text)| {
+                        Some(DiagnosticRelatedInformation {
+                            location: self.location(*span, uri)?,
+                            message: text.clone(),
+                        })
                     })
                     .collect::<Vec<_>>();
                 Diagnostic {
@@ -485,7 +580,7 @@ impl Document {
                     }
                     Callee::TryConvert(ty) => return Some(docs::try_convert(&self.show(ty))),
                     Callee::Variant(s, index) => return self.describe_variant(s, index),
-                    Callee::Fn(_) => {}
+                    Callee::Fn(_) | Callee::FnPtr => {}
                 }
             }
         }
@@ -518,7 +613,7 @@ impl Document {
             .tokens
             .iter()
             .find(|t| t.span.start <= offset && offset < t.span.end)?;
-        let text = &self.text[token.span.start as usize..token.span.end as usize];
+        let text = self.span_text(token.span);
         match token.kind {
             TokenKind::Ket => Some(docs::ket(text)),
             TokenKind::Bra => Some(docs::bra(text)),
@@ -560,10 +655,7 @@ impl Document {
         {
             let line = |span: Span| self.position(span.start).line + 1;
             let how = if let Some((span, what)) = &info.not_circuit {
-                format!(
-                    "not a circuit: a measurement result is {what} (line {})",
-                    line(*span)
-                )
+                format!("not a circuit: {what} (line {})", line(*span))
             } else if let Some((span, why)) = &info.feedback_unsupported {
                 format!(
                     "a circuit, but run shot by shot: {why} (line {})",
@@ -657,8 +749,7 @@ impl Document {
                 } if n == name => {
                     let mut code = format!("enum {} {{\n", ast.name(name));
                     for variant in ast.list(variants) {
-                        let text =
-                            &self.text[variant.span.start as usize..variant.span.end as usize];
+                        let text = self.span_text(variant.span);
                         code.push_str(&format!("    {text}\n"));
                     }
                     for &m in ast.list(methods) {
@@ -669,7 +760,7 @@ impl Document {
                 }
                 ItemKind::Type { name: n, ty, .. } if n == name => {
                     let span = ast.ty(ty).span;
-                    let named = &self.text[span.start as usize..span.end as usize];
+                    let named = self.span_text(span);
                     let code = format!("type {} = {named}", ast.name(name));
                     Some((code, self.doc_comment(item.span).unwrap_or_default()))
                 }
@@ -725,7 +816,7 @@ impl Document {
                 docs::std_variant(ast.name(def.name), ast.name(variant.name)),
             ));
         }
-        let text = &self.text[variant.span.start as usize..variant.span.end as usize];
+        let text = self.span_text(variant.span);
         let code = format!("{}::{text}", ast.name(def.name));
         let doc = self.doc_comment(variant.span).unwrap_or_default();
         Some((code, doc))
@@ -895,8 +986,9 @@ impl Document {
         // Only a field on a line of its own has a doc comment of its own; above
         // `Retry { attempts: Int }` is the variant's.
         let own_line = |span: Span| {
-            let line_start = self.lines[self.position(span.start).line as usize] as usize;
-            self.text[line_start..span.start as usize].trim().is_empty()
+            let file = self.sources.lookup(span.start);
+            let before = &file.text[..(span.start - file.start) as usize];
+            before.rsplit('\n').next().unwrap_or("").trim().is_empty()
         };
         let doc = span
             .filter(|&s| own_line(s))
@@ -935,24 +1027,46 @@ impl Document {
         Some(self.show(ty))
     }
 
-    /// The `///` lines directly above the declaration starting at `span`.
+    /// The `///` lines directly above the declaration starting at `span`, in its file.
     fn doc_comment(&self, span: Span) -> Option<String> {
-        let line = self.position(span.start).line as usize;
+        let file = self.sources.lookup(span.start);
+        let before = &file.text[..(span.start - file.start) as usize];
         let mut docs = Vec::new();
-        for l in (0..line).rev() {
-            let start = self.lines[l] as usize;
-            let end = self
-                .lines
-                .get(l + 1)
-                .map_or(self.text.len(), |&e| e as usize);
-            let text = self.text[start..end].trim();
-            match text.strip_prefix("///") {
+        // The first piece is the declaration's own line, up to it.
+        for line in before.rsplit('\n').skip(1) {
+            match line.trim().strip_prefix("///") {
                 Some(doc) => docs.push(doc.strip_prefix(' ').unwrap_or(doc).to_string()),
                 None => break,
             }
         }
         docs.reverse();
         (!docs.is_empty()).then(|| docs.join("\n"))
+    }
+
+    /// The source text `span` covers, in whichever file it is.
+    fn span_text(&self, span: Span) -> &str {
+        self.sources.text_of(span)
+    }
+
+    /// Whether `span` is in this document's file.
+    fn in_file(&self, span: Span) -> bool {
+        self.base <= span.start && span.start <= self.base + self.text.len() as u32
+    }
+
+    /// Where `span` is, in its own file: this document, or another file of the package.
+    fn location(&self, span: Span, uri: &Uri) -> Option<Location> {
+        if self.in_file(span) {
+            return Some(Location {
+                uri: uri.clone(),
+                range: self.range(span),
+            });
+        }
+        let file = self.sources.lookup(span.start);
+        let at = |offset: u32| position_in(&file.text, offset - file.start, self.utf8);
+        Some(Location {
+            uri: path_uri(Path::new(&file.name))?,
+            range: Range::new(at(span.start), at(span.end)),
+        })
     }
 
     /// What `expr` calls, or names as the callee of a call.
@@ -1150,6 +1264,7 @@ impl Document {
         };
         ast.list(ast.root)
             .iter()
+            .filter(|&&item| self.in_file(ast.item(item).span))
             .filter_map(|&item| {
                 let item = ast.item(item);
                 match item.kind {
@@ -1160,7 +1275,7 @@ impl Document {
                         ty,
                     } => {
                         let span = ast.ty(ty).span;
-                        let named = self.text[span.start as usize..span.end as usize].to_string();
+                        let named = self.span_text(span).to_string();
                         Some(symbol(
                             ast.name(name).to_string(),
                             Some(named),
@@ -1175,6 +1290,7 @@ impl Document {
                         name_span,
                         variants,
                         methods,
+                        ..
                     } => {
                         let mut children: Vec<DocumentSymbol> = ast
                             .list(variants)
@@ -1209,6 +1325,7 @@ impl Document {
                         name_span,
                         fields,
                         methods,
+                        ..
                     } => {
                         let mut children: Vec<DocumentSymbol> = ast
                             .list(fields)
@@ -1243,4 +1360,51 @@ impl Document {
             })
             .collect()
     }
+}
+
+/// The position `offset` bytes into `text`, counted as the editor counts.
+fn position_in(text: &str, offset: u32, utf8: bool) -> Position {
+    let before = &text[..(offset as usize).min(text.len())];
+    let line = before.matches('\n').count();
+    let last = before.rfind('\n').map_or(before, |i| &before[i + 1..]);
+    let character = if utf8 {
+        last.len()
+    } else {
+        last.encode_utf16().count()
+    };
+    Position::new(line as u32, character as u32)
+}
+
+/// The file a `file:` URI names.
+fn uri_path(uri: &Uri) -> Option<PathBuf> {
+    let rest = uri.as_str().strip_prefix("file://")?;
+    let bytes = rest.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(hex) = rest.get(i + 1..i + 3)
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
+        {
+            decoded.push(byte);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Some(PathBuf::from(String::from_utf8(decoded).ok()?))
+}
+
+/// The `file:` URI of `path`.
+fn path_uri(path: &Path) -> Option<Uri> {
+    let mut uri = String::from("file://");
+    for byte in path.to_str()?.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+            uri.push(byte as char);
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri.parse().ok()
 }

@@ -1,8 +1,10 @@
 # Interop
 
-Status: **Reserved.** Nothing here is implemented yet; the syntax and rules are fixed now so that the
-type checker and runtime are designed with them in mind. The order they arrive in is in
-`docs/PLAN.md` §11.
+Status: **Implemented.** Host `extern fn` declarations, the safe Rust embedding API (`noev`
+crate), the Python bindings (`noev-py` / `python/noev`), `extern "C"` imports,
+`extern "C" struct`, `extern "C" fn` callbacks and function pointers (Cranelift and LLVM),
+the C/C++ embedding API (`include/noev.h`, `noev-c`), and inline OpenQASM (`qasm("…")`) are
+all implemented.
 
 Hybrid programs lean on classical libraries Noev will not reimplement (optimisers, linear
 algebra, machine learning, plotting), and many users will want to call Noev from an existing
@@ -18,8 +20,8 @@ program. Interop works in both directions:
 handed to it could be copied or forgotten, breaking the guarantees in
 [ownership.md](ownership.md). So every parameter and result of a foreign function, and of a
 Noev function called by a host, must be **copyable** ([types.md](types.md) §5): no qubits, no
-values containing qubits, and no references. This is checked where the declaration is
-written.
+values containing qubits, and no references, except that C functions take arrays and structs
+by reference (§3). This is checked where the declaration is written.
 
 | Noev                     | Rust                         | C                    | Python          |
 | ------------------------ | ---------------------------- | -------------------- | --------------- |
@@ -30,8 +32,10 @@ written.
 | `Bool`                   | `bool`                       | `bool`               | `bool`          |
 | `Bit`                    | `noev::Bit`                  | `uint8_t` (0 or 1)   | `int` (0 or 1)  |
 | `()`                     | `()`                         | `void`               | `None`          |
-| `(A, B)`, `[T; N]`       | tuples, `[T; N]`             | not supported at first | tuples, lists |
-| classical structs        | generated, or `noev::Value`  | not supported at first | objects       |
+| `(A, B)`                 | tuples                       | not supported        | tuples          |
+| `[T; N]`                 | `[T; N]`                     | `T*`, by reference only (§3) | lists   |
+| classical structs        | generated, or `noev::Value`  | `extern "C" struct` only (§3) | objects |
+| `extern "C" fn(A) -> B`  | `extern "C" fn(A) -> B`      | function pointer     | not supported   |
 | `Observable`             | `noev::Observable`           | not supported        | object          |
 
 "Checked": an `Int` outside the 64-bit range is an error where it crosses.
@@ -62,14 +66,26 @@ to run otherwise. Host functions are written in a memory-safe language behind a 
 interface, so calling one is **safe**: no `unsafe` is needed.
 
 ```rust
-// Rust host (sketch).
+// Rust host (`noev` crate).
 let program = noev::Program::compile_file("vqe.nv")?;
 let mut runtime = noev::Runtime::new(&program)
     .host_fn("minimize_step", |energy: f64, theta: f64| optimiser.step(energy, theta));
 let energy: f64 = runtime.call("vqe", ())?;
 ```
 
-Python bindings expose the same API.
+To call back into Noev from inside a host function, register it with
+`host_fn_with_context`: its first parameter is `&mut noev::HostContext`, which exposes the
+same checked `call` method.
+
+Python bindings (`python/noev`, built from `crates/noev-py` with PyO3/maturin) expose the
+same API (`noev.Program.compile_file`, `noev.Runtime(program).host_fn(...)`,
+`host_fn_with_context(...)`, `runtime.call(...)`, `noev.Observable`, `noev.Struct`,
+`noev.Enum`, `noev.Distribution`).
+
+A host function may call back into the program while it runs, through the same `call`: a
+Python optimiser can evaluate `energy(θ)` from inside the host function Noev called. The
+callback runs as any other call does, creating and consuming its own qubits, and a runtime
+error in it is reported to the host function as an error result.
 
 ## 3. C functions
 
@@ -90,7 +106,52 @@ The claim made by `unsafe` here ([ownership.md](ownership.md) §11) is that the 
 behaves as its declaration says. C functions are linked when the program is built (native
 compilation) or loaded dynamically (the interpreter).
 
-A C API (`noev.h`) also lets C and C++ programs embed Noev, with the same type mapping.
+These are Rust's rules for C.
+
+**Arrays** cross only by reference. A `ref [T; N]` parameter is a `const T*` to `N` elements,
+and a `mut [T; N]` parameter a `T*`, for any `T` C can take. The lend lasts for the call:
+that the C function does not keep the pointer is part of what `unsafe` claims. C cannot
+return an array, so results come back through a `mut` parameter:
+
+```noev
+extern "C" {
+    fn normalize3(v: mut [Float; 3])
+}
+```
+
+**Structs** cross only when declared `extern "C" struct`, which gives them C's layout: fields
+in the order written, aligned as C aligns them. Their fields must be types C can take:
+numbers, `Bool`, `Bit`, arrays of these, and other `extern "C" struct`s. They are passed by
+value, or by reference as arrays are. Other structs have no defined layout, so the compiler
+can reorder and split them, and they cannot cross. Neither can tuples.
+
+```noev
+extern "C" struct Point { x: Float, y: Float }
+```
+
+**Callbacks.** A function defined as `extern "C" fn` uses C's calling convention, and its name
+is a value of type `extern "C" fn(A, …) -> R` that can be passed to C, as an optimiser takes
+its cost function. Its parameters and result follow the rules above. It captures nothing:
+it is a function, not a closure. It may run quantum code, creating and consuming its own
+qubits, like any call. A runtime error inside it ends the program, since it cannot unwind
+through C's stack frames. Calling a function pointer that came from C needs `unsafe`.
+
+```noev
+extern "C" {
+    fn minimize(cost: extern "C" fn(Float) -> Float, start: Float) -> Float
+}
+
+extern "C" fn energy(theta: Float) -> Float {
+    <ansatz(theta)| h |ansatz(theta)>
+}
+
+fn vqe() -> Float {
+    unsafe { minimize(energy, 0.1) }
+}
+```
+
+A C API (`include/noev.h`, built from `crates/noev-c` as `libnoev_c.a`) also lets C and
+C++ programs embed Noev, with the same type mapping and re-entrant host callbacks.
 
 ## 4. Rules for foreign calls
 
@@ -98,8 +159,29 @@ A C API (`noev.h`) also lets C and C++ programs embed Noev, with the same type m
   in reversible contexts (N013).
 - A preparation in an expectation value is run many times, so foreign calls inside it run
   many times too.
-- Inline OpenQASM, for hardware-specific gates, will be an `unsafe` foreign construct of its
-  own; its syntax is not decided.
+- Inline OpenQASM, for hardware-specific gates and directives, is written with the `qasm`
+  built-in inside `unsafe`, taking an interpolated string literal:
+
+  ```noev
+  unsafe {
+      qasm("sx {a}; rz({theta}) {a}; cx {a}, {b};")
+  }
+  ```
+
+  - Every `{expr}` of type `Qubit` (or `mut Qubit`) borrows that qubit `mut` for the call
+    (N002 if moved, N005 if `ref`- or `ctrl`-lent, N018 for array indices). Mentioning the
+    same qubit place more than once in one `qasm("…")` refers to that same qubit.
+  - Every `{expr}` of classical scalar type (`Float`, `f32`, `Int`, sized integers, `Bit`,
+    `Bool`) is formatted into the OpenQASM text at run time. A literal `{` (such as in a
+    `gate` definition) is written `{{`, as in ordinary string literals.
+  - Calling `qasm` outside `unsafe` is N019; calling it in a reversible context (`rev fn`,
+    `ctrl`, `adj`, `with`) is N013.
+  - Inline OpenQASM is recorded into circuits (making `noev export` emit the statements
+    verbatim with each qubit resolved to its `q[k]` index) unless a classical placeholder
+    depends on a measurement result before the run's last quantum operation (§5). Simulators
+    that parse OpenQASM 3 (such as `ketrs`) execute standard and custom-defined gates
+    directly; hardware-only directives (such as pulse delays) export verbatim and report an
+    error if simulated.
 
 ## 5. Where foreign calls can run
 
@@ -107,32 +189,36 @@ A foreign call that uses a measurement result before a run's last quantum operat
 the run not a circuit ([execution.md](execution.md) §4).
 
 
-On a simulator, a foreign call can appear anywhere a classical call can. On real hardware,
-code that runs **while qubits are alive** (between the gates of one circuit) runs on the
-control electronics, under tight latency limits, so arbitrary foreign calls cannot run there.
-Foreign calls between runs, or around whole quantum computations, are fine.
+That rule settles where foreign calls can run on backends that take circuits. A circuit is
+built by running its classical code once on the host ([runtime.md](runtime.md) §3), so a
+foreign call that does not use a measurement result runs then, before anything is sent to the
+backend. One that does makes the run not a circuit, which a backend that takes only circuits
+rejects when the program is built for it, at the line that makes the run need gate-level
+control.
 
-When hardware targets exist, the compiler will have to tell these apart: either reject a
-foreign call made while qubits are alive, or split the program around it. Which is part of
-optimising the whole hybrid program (research question 3 in the plan).
+A backend working gate by gate may run the program's classical code next to its qubits,
+under time limits, where arbitrary foreign calls cannot run while qubits are alive. Its
+target description says whether they can ([runtime.md](runtime.md) §5), and the compiler
+rejects a foreign call made while qubits are alive on a target that says not. The program
+itself never asks what kind of backend it runs on.
 
 ## 6. Grammar
 
 ```ebnf
 item        = … | extern_def ;
 extern_def  = "extern" fn_sig                                   (* host function *)
-            | "extern" STRING "{" { fn_sig sep } "}" ;          (* "C" *)
+            | "extern" STRING "{" { fn_sig sep } "}"            (* "C" imports *)
+            | "extern" STRING struct_def                        (* C layout *)
+            | "extern" STRING fn_def ;                          (* callable from C *)
+type        = … | "extern" STRING "fn" "(" [ type { "," type } [ "," ] ] ")" [ "->" type ] ;
 ```
 
-`extern` becomes a reserved keyword. `STRING` is a string literal; Noev has none yet, so this
-form waits for them.
+`extern` becomes a reserved keyword. `STRING` is a string literal ([grammar.md](grammar.md)),
+without interpolation; only `"C"` is accepted.
 
 ## 7. Open questions
 
 - **Rust without going through C**: a generated two-sided bridge (like the `cxx` crate), so
   Rust libraries can be imported with checked types.
-- **Structs and arrays across the C boundary**: layout rules, or passing them only by
-  pointer.
-- **Callbacks**: whether foreign code can call back into Noev during a call.
-- **Hardware rule**: rejecting foreign calls while qubits are alive, or splitting programs
-  around them (§5).
+- **Closures across the C boundary**: callbacks that capture values, through C's usual
+  `void*` user data.

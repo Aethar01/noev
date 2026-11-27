@@ -212,6 +212,22 @@ fn write_value(program: &Program, value: &Value, ty: Ty, out: &mut String) {
         (Value::Distribution(d), _) => {
             let _ = write!(out, "{d}");
         }
+        (Value::Vec(v), &TyKind::Vec(elem)) => {
+            out.push('[');
+            for (i, item) in v.borrow().iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_value(program, item, elem, out);
+            }
+            out.push(']');
+        }
+        (Value::Vec(v), _) => {
+            let _ = write!(out, "[{} items]", v.borrow().len());
+        }
+        (Value::Handle(kind, _), _) => {
+            let _ = write!(out, "<{kind:?}>");
+        }
         (Value::Variant(index, data), &TyKind::Struct(s)) => {
             let i = *index as usize;
             let variant = program.variant_names[s.index()]
@@ -246,10 +262,11 @@ fn write_value(program: &Program, value: &Value, ty: Ty, out: &mut String) {
         (Value::Qubit(_), _) => out.push_str("<qubit>"),
         (Value::Clbit(_) | Value::Cond(..), _) => out.push('0'),
         (Value::Ref(_), _) => out.push_str("<reference>"),
+        (Value::FnPtr(idx), _) => out.push_str(&format!("<fn#{idx}>")),
     }
 }
 
-fn write_observable(o: &Observable, out: &mut String) {
+pub(crate) fn write_observable(o: &Observable, out: &mut String) {
     use std::fmt::Write;
     if o.terms.is_empty() {
         out.push_str("0.0");
@@ -318,7 +335,12 @@ mod tests {
         let parsed = noev_syntax::parse("");
         let (typed, _) = noev_sema::check(&parsed.ast);
         let (circuits, _) = noev_sema::check_circuits(&parsed.ast, &typed);
-        noev_ir::lower(&parsed.ast, &typed, &circuits, "")
+        noev_ir::lower(
+            &parsed.ast,
+            &typed,
+            &circuits,
+            &noev_syntax::SourceMap::single("test.nv", ""),
+        )
     }
 
     #[test]

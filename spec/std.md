@@ -11,12 +11,10 @@ results. An item can therefore move to Noev source later without any program not
 
 ## 1. What is in scope
 
-Until Noev has modules, every item in [core.md](core.md) and in this document is in scope in every program,
-without imports. A program's own function with the same name takes precedence.
-
-Once Noev has modules ([modules.md](modules.md)), the standard library becomes modules under
-`std::`, and the **prelude** becomes the set of names imported into every module
-automatically.
+Every item in [core.md](core.md) is in the **prelude**, the names every module has without
+imports, and so are most items in this document. The others are in modules of the standard
+library, under `std::`, and need a `use`: each says which in its heading. A module's own
+names, and its imports, take precedence over the prelude's ([modules.md](modules.md) §6).
 
 ## 2. Qubits
 
@@ -25,7 +23,7 @@ automatically.
 Resets a qubit and releases it. Consumes the qubit; not reversible.
 
 ```noev
-fn discard(mv q: Qubit) {
+fn discard(q: Qubit) {
     q.reset()
     unsafe { mv q.release() }
 }
@@ -48,7 +46,7 @@ enum Basis { X, Y, Z }
 
 /// Measures in `basis`: 0 for the +1 eigenstate (|0⟩, |+⟩, |+i⟩), 1 for the −1 eigenstate
 /// (|1⟩, |−⟩, |−i⟩), so the outcome is always (−1)^bit.
-fn measure_in(mv q: Qubit, basis: Basis) -> Bit {
+fn measure_in(q: Qubit, basis: Basis) -> Bit {
     match basis {
         Basis::X => { q.h() }
         Basis::Y => { adj q.s(); q.h() }
@@ -66,7 +64,7 @@ gate angle chosen from one ([execution.md](execution.md) §4).
 A measurement test is a shortcut for the same thing: `<+| mv q` is
 `mv q.measure_in(Basis::X) == 0`.
 
-### `State`
+### `State` (`std::state`)
 
 The six basis states a ket or bra label names, as a value, so a label can be computed
 (`|{s}>`, [types.md](types.md) §3).
@@ -79,11 +77,15 @@ enum State { Zero, One, Plus, Minus, PlusI, MinusI }
 As with `Basis`, a program's own type called `State` takes the name, and kets still accept
 the standard one.
 
-### `amplitudes` (simulators only)
+### `amplitudes` (`std::debug`; backends that can read the state)
 
-For debugging: the amplitudes of a register's state, as a simulator holds them.
+For debugging: the amplitudes of a register's state, on a backend with the capability to
+read it, such as a simulator ([runtime.md](runtime.md) §3). A program that calls it is
+rejected for a target without that capability.
 
 ```noev
+use std::debug::amplitudes
+
 let r = |+0>
 ctrl r[0] { r[1].x() }
 print(amplitudes(r))     // [0.7071…+0.0i, 0.0+0.0i, 0.0+0.0i, 0.7071…+0.0i]
@@ -92,8 +94,7 @@ print(amplitudes(r))     // [0.7071…+0.0i, 0.0+0.0i, 0.0+0.0i, 0.7071…+0.0i]
 `amplitudes(r)` lends `r`, a `Qubit` or `[Qubit; N]` with N at most 20, and gives a
 `[Complex; 2^N]` over its basis states in the order kets read them: \|00⟩, \|01⟩, \|10⟩,
 \|11⟩, with `r[0]` the left label. It changes nothing. A register entangled with other qubits
-has no state of its own, so asking for one is a runtime error, as it is on a backend that
-cannot see the state. The overall phase is chosen so that the first amplitude that is not zero
+has no state of its own, so asking for one is a runtime error. The overall phase is chosen so that the first amplitude that is not zero
 is real and positive; only the relative phases between amplitudes mean anything physically.
 
 It is not reversible, since under `adj` a function's gates are collected rather than run, and
@@ -101,7 +102,7 @@ a `sample` that reads amplitudes runs shot by shot.
 
 ## 3. Classical post-processing
 
-### `fft` and `ifft`
+### `fft` and `ifft` (`std::fourier`)
 
 The discrete Fourier transform of a `[Complex; N]` or `[c32; N]`, as NumPy computes it:
 
@@ -116,7 +117,7 @@ amplitudes or counts; the quantum Fourier transform itself is a circuit of gates
 
 ## 4. Observables
 
-### `P` and `PX`
+### `P` and `PX` (`std::observables`)
 
 Projectors onto one qubit's basis states, as sums of Paulis.
 
@@ -137,6 +138,8 @@ value. A product of single-qubit projectors on different qubits projects onto th
 multi-qubit state:
 
 ```noev
+use std::observables::P
+
 let p11 = <ansatz(theta)| P(0, 1) * P(1, 1) |ansatz(theta)>   // probability of measuring 11
 ```
 
@@ -170,13 +173,13 @@ fn print(values: …) {           // variadic: not expressible in Noev yet
 Like the rest of the standard library, `print` and `eprint` are implemented natively.
 They are not allowed in a run that is repeated ([execution.md](execution.md) §3).
 
-### `std::io` (Reserved)
+### `std::io`
 
-Explicit control over output, as in Rust, for loops that write a lot and for programs that
-must handle write errors. It needs modules, so it comes with them.
+Explicit control over output and standard input, for loops that write a lot and for programs
+and backends that must handle I/O errors.
 
 ```noev
-use std::io::stdout
+use std::io::{stdout, stderr, stdin}
 
 let out = stdout().lock()        // one lock for the whole loop, not one per write
 for i in 0..n {
@@ -185,14 +188,86 @@ for i in 0..n {
 out.flush()
 ```
 
-- `stdout()` and `stderr()` return handles; `lock()` holds the stream for its lifetime, so
-  writes are not re-locked one by one and output from different threads cannot interleave.
-- `write(s: String)` buffers; `flush()` writes the buffer out. Both report write errors as a
-  `Result`.
+- `stdout() -> IoStream`, `stderr() -> IoStream`, and `stdin() -> Stdin` return stream
+  handles. `IoStream::lock(ref self) -> IoStream` returns a handle to the locked stream.
+- `IoStream::write(ref self, s: String) -> Result<(), String>` writes `s`;
+  `IoStream::flush(ref self) -> Result<(), String>` flushes buffered output.
+- `Stdin::read_line(ref self) -> Result<String, String>` reads one line;
+  `Stdin::read_to_string(ref self) -> Result<String, String>` reads until EOF.
+- `IoStream` and `Stdin` are affine handles (not implicitly copied; dropped freely). All
+  `std::io` operations are irreversible (N013).
 
-## 6. Planned
+## 6. Classical collections, strings, and OS interfaces for backends
 
-Most of the standard library needs generics, so that one definition works for any register
-size: the quantum Fourier transform, Grover iterations, arithmetic circuits, state
-preparation, and common observables such as Ising and Heisenberg Hamiltonians. These arrive
-with generics (`docs/PLAN.md` §11).
+Backends can be written in Noev ([runtime.md](runtime.md) §3), so the standard library
+provides the classical types and OS modules they need.
+
+### `Vec<T>` (prelude)
+
+A growable heap-allocated array of classical (non-linear) elements `T`. `Vec<T>` is affine:
+it is moved with `mv`, lent with `ref`/`mut`, dropped automatically at scope exit (no N003),
+and never implicitly copied (use `.clone()` for an explicit copy).
+
+- Construction: `Vec::new() -> Vec<T>` (with element type inferred from context, `Vec::new::<T>()`, or `Vec::<T>::new()`), `Vec::with_capacity(cap: Int) -> Vec<T>`.
+- Reading (`ref self`): `len() -> Int`, `is_empty() -> Bool`, `get(index: Int) -> Option<T>`,
+  `clone() -> Vec<T>`, indexing `v[i] -> T` (bounds-checked at run time), `==` / `!=`, and
+  printing/formatting (`[a, b, c]`).
+- Mutation (`mut self`, requires `let mut`): `push(value: T)`, `pop() -> Option<T>`,
+  `set(index: Int, value: T)` and `v[i] = value` (bounds-checked at run time), `clear()`,
+  `extend(other: ref Vec<T>)`.
+
+### `String` methods (prelude)
+
+- Inspection: `len() -> Int` (UTF-8 byte length), `is_empty() -> Bool`,
+  `contains(pat: String) -> Bool`, `starts_with(pat: String) -> Bool`,
+  `ends_with(pat: String) -> Bool`, `find(pat: String) -> Option<Int>`.
+- Transformation: `trim() -> String`, `replace(from: String, to: String) -> String`,
+  `substring(start: Int, end: Int) -> Option<String>`, `to_uppercase() -> String`,
+  `to_lowercase() -> String`, `repeat(n: Int) -> String`, and `+` concatenation (`a + b`).
+- Splitting, joining, bytes and parsing: `split(sep: String) -> Vec<String>`,
+  `lines() -> Vec<String>`, `String::join(parts: ref Vec<String>, sep: String) -> String`,
+  `as_bytes() -> Vec<u8>`, `String::from_utf8(bytes: ref Vec<u8>) -> Result<String, String>`,
+  `parse_int() -> Result<Int, String>`, `parse_float() -> Result<Float, String>`.
+
+### `std::env`
+
+Environment and process inspection (irreversible, N013):
+
+- `var(key: String) -> Option<String>` — reads an environment variable.
+- `args() -> Vec<String>` — returns the program's command-line arguments.
+- `current_dir() -> Result<String, String>` — returns the current working directory.
+
+### `std::fs`
+
+File-system access for configuration, credentials, and circuit artefacts (irreversible, N013):
+
+- `read_to_string(path: String) -> Result<String, String>`
+- `read(path: String) -> Result<Vec<u8>, String>`
+- `write(path: String, content: String) -> Result<(), String>`
+- `write_bytes(path: String, data: ref Vec<u8>) -> Result<(), String>`
+- `exists(path: String) -> Bool`
+- `create_dir_all(path: String) -> Result<(), String>`
+- `remove_file(path: String) -> Result<(), String>`
+
+### `std::net`
+
+Plain TCP sockets (irreversible, N013); TLS/HTTPS lives in external packages binding a
+maintained C library so Noev never maintains TLS:
+
+- `TcpStream` (affine handle): `TcpStream::connect(addr: String) -> Result<TcpStream, String>`,
+  `read(ref self, max_bytes: Int) -> Result<Vec<u8>, String>`,
+  `read_to_string(ref self) -> Result<String, String>`,
+  `write(ref self, data: ref Vec<u8>) -> Result<Int, String>`,
+  `write_str(ref self, s: String) -> Result<Int, String>`,
+  `flush(ref self) -> Result<(), String>`,
+  `shutdown(ref self) -> Result<(), String>`,
+  `close(mv self)`.
+- `TcpListener` (affine handle): `TcpListener::bind(addr: String) -> Result<TcpListener, String>`,
+  `local_addr(ref self) -> Result<String, String>`,
+  `accept(ref self) -> Result<TcpStream, String>`,
+  `close(mv self)`.
+
+## 7. Planned
+
+`std::backend` (the `Backend` trait, `Circuit`, `Target`, Step 17) and generic quantum
+algorithms (QFT, Grover, arithmetic circuits, Hamiltonians) build on these primitives.

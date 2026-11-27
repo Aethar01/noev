@@ -11,6 +11,15 @@ pub fn validate(program: &Program) -> Vec<String> {
         let mut report = |message: String| problems.push(format!("{}: {message}", function.name));
         let blocks = function.blocks.len();
         let locals = function.locals.len();
+        if matches!(function.extern_kind, ExternKind::Host | ExternKind::CImport) {
+            if blocks != 0 {
+                report("extern function has blocks".into());
+            }
+            if locals < function.params + 1 {
+                report("extern function is missing parameter locals".into());
+            }
+            continue;
+        }
         if blocks == 0 {
             report("no blocks".into());
             continue;
@@ -62,7 +71,10 @@ pub fn validate(program: &Program) -> Vec<String> {
                                 check_operand(index, &mut report);
                                 check_operand(bit, &mut report);
                             }
-                            Rvalue::FloatConst(_) | Rvalue::BigInt(_) | Rvalue::Identity => {}
+                            Rvalue::FloatConst(_)
+                            | Rvalue::BigInt(_)
+                            | Rvalue::Identity
+                            | Rvalue::FnPtr(_) => {}
                             Rvalue::Format(parts) => {
                                 for part in parts {
                                     if let FormatPart::Value(op, _, _) = part {
@@ -90,7 +102,7 @@ pub fn validate(program: &Program) -> Vec<String> {
                     Stmt::CtrlPush(places) => {
                         places.iter().for_each(|p| check_place(p, &mut report))
                     }
-                    Stmt::CtrlPop => {}
+                    Stmt::CtrlPop | Stmt::WithStart | Stmt::WithDo | Stmt::WithEnd => {}
                     Stmt::Sample {
                         dest,
                         func,
@@ -108,6 +120,31 @@ pub fn validate(program: &Program) -> Vec<String> {
                     Stmt::Print { args, .. } => args
                         .iter()
                         .for_each(|(op, _)| check_operand(op, &mut report)),
+                    Stmt::Qasm { parts, qubits } => {
+                        qubits.iter().for_each(|q| check_place(q, &mut report));
+                        for part in parts {
+                            match part {
+                                QasmPart::Text(_) => {}
+                                QasmPart::Qubit(idx) => {
+                                    if *idx >= qubits.len() {
+                                        report(format!(
+                                            "inline qasm qubit index {idx} out of range (len {})",
+                                            qubits.len()
+                                        ));
+                                    }
+                                }
+                                QasmPart::Value(op, _) => check_operand(op, &mut report),
+                            }
+                        }
+                    }
+                    Stmt::StdCall { args, dest, .. } => {
+                        for (op, _) in args {
+                            check_operand(op, &mut report);
+                        }
+                        if let Some((d, _)) = dest {
+                            check_place(d, &mut report);
+                        }
+                    }
                     Stmt::Overlap {
                         dest,
                         bra,
@@ -174,6 +211,17 @@ pub fn validate(program: &Program) -> Vec<String> {
                     check_place(dest, &mut report);
                     vec![*next]
                 }
+                Terminator::CallIndirect {
+                    callee,
+                    args,
+                    dest,
+                    next,
+                } => {
+                    check_operand(callee, &mut report);
+                    args.iter().for_each(|a| check_operand(a, &mut report));
+                    check_place(dest, &mut report);
+                    vec![*next]
+                }
                 Terminator::Undo {
                     func,
                     args,
@@ -187,8 +235,13 @@ pub fn validate(program: &Program) -> Vec<String> {
                     check_place(target, &mut report);
                     vec![*next]
                 }
-                Terminator::Assert { cond, next, .. } => {
+                Terminator::Assert {
+                    cond, msg, next, ..
+                } => {
                     check_operand(cond, &mut report);
+                    if let Some(m) = msg {
+                        check_operand(m, &mut report);
+                    }
                     vec![*next]
                 }
                 Terminator::Return | Terminator::Unreachable => vec![],
@@ -232,7 +285,12 @@ mod tests {
         let errors = noev_sema::check_ownership(&parsed.ast, &typed);
         assert!(errors.is_empty(), "{errors:?}");
         let (circuits, _) = noev_sema::check_circuits(&parsed.ast, &typed);
-        lower(&parsed.ast, &typed, &circuits, source)
+        lower(
+            &parsed.ast,
+            &typed,
+            &circuits,
+            &noev_syntax::SourceMap::single("test.nv", source),
+        )
     }
 
     #[test]

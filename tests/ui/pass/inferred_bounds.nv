@@ -1,0 +1,38 @@
+// Bounds inferred from bodies (spec/types.md §6): `Copy` from a copy, `Measure` from a
+// call of `measure`, and both followed through functions that pass a `T` on.
+
+trait Shape {
+    fn area(ref self) -> Float
+}
+
+struct Square { side: Float }
+
+impl Shape for Square {
+    fn area(ref self) -> Float { self.side * self.side }
+}
+
+fn twice<T>(x: T) -> (T, T) { (x, x) }
+
+fn pair_up<U>(x: U) -> (U, U) { twice(x) }
+
+fn total<T>(a: ref T, b: ref T) -> Float { a.area() + b.area() }
+
+fn doubled<S>(s: ref S) -> Float { total(s, s) }
+
+fn read<Q>(q: Q) -> Q { mv q }
+
+fn read_all<T>(x: T) -> Int {
+    let bits = mv x.measure()
+    1
+}
+
+fn main() {
+    let (a, b) = twice(20)
+    print(a + b + 2)
+    print(pair_up("hi"))
+    let s = Square { side: 3.0 }
+    print(doubled(ref s))
+    let q = read(|1>)
+    print(mv q.measure())
+    print(read_all((|1>, |0>)))
+}

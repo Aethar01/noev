@@ -16,10 +16,13 @@ fn always_one() -> Bit {
     mv b.measure()
 }
 
-fn main() {
+test fn sample_distributions() {
     let d = sample 1000 { always_one() }
-    print(d)
-    print(d.shots(), d.count(1), d.probability(0), d.most_likely())
+    assert "{d}" == "1  1000  100.0%"
+    assert d.shots() == 1000
+    assert d.count(1) == 1000
+    assert d.probability(0) == 0.0
+    assert d.most_likely() == 1
     let flip = true
     let n = 3
     let e = sample 50 {
@@ -27,11 +30,11 @@ fn main() {
         if flip { q.x() }
         (mv q.measure(), n)
     }
-    print(e)
+    assert "{e}" == "(1, 3)  50  100.0%"
     let r = sample 20 {
         let pair = |00>
         pair[1].x()
         mv pair
     }
-    print(r)
+    assert "{r}" == "01  20  100.0%"
 }

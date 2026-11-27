@@ -1,0 +1,91 @@
+// `with`/`do` ownership and reversibility errors, and N003 when qubits are not proven |0⟩.
+
+fn mutate_ancilla_in_do(a: ref Qubit) {
+    with {
+        let anc = |0>
+        ctrl a { anc.x() }
+    } do {
+        anc.x()                     //~ N005
+    }
+}
+
+fn mutate_read_input_in_do(a: mut Qubit, out: mut Qubit) {
+    with {
+        let anc = |0>
+        ctrl a { anc.x() }
+    } do {
+        a.x()                       //~ N005
+        ctrl anc { out.x() }
+    }
+}
+
+fn mutate_acted_input_in_do(a: mut Qubit, out: mut Qubit) {
+    with {
+        a.h()
+    } do {
+        a.z()                       //~ N005
+        ctrl a { out.x() }
+    }
+}
+
+fn move_ancilla_in_do(a: ref Qubit) -> Bit {
+    with {
+        let anc = |0>
+        ctrl a { anc.x() }
+    } do {
+        mv anc.measure()            //~ N006
+    }
+}
+
+fn ref_leaves_with() {
+    let r = with {
+        let anc = |0>
+    } do {
+        ref anc                     //~ N008
+    }
+}
+
+fn measure_in_with() {
+    with {
+        let anc = |0>
+        let _ = mv anc.measure()    //~ N013
+    } do {}
+}
+
+fn move_outer_in_with(q: Qubit) {
+    with {
+        let _ = mv q                //~ N013
+    } do {}
+}
+
+fn assign_outer_in_with() {
+    let mut n = 0
+    with {
+        n = 1                       //~ N013
+    } do {}
+}
+
+rev fn irreversible_do_in_rev(q: mut Qubit, out: mut Qubit) {
+    with {
+        let anc = |0>
+        ctrl q { anc.x() }
+    } do {
+        out.reset()                 //~ N013
+    }
+}
+
+fn unproven_overlap_in_do(r: mut [Qubit; 4], i: Int, j: Int) {
+    assert 0 <= i and i < 4
+    assert 0 <= j and j < 4
+    with {
+        let anc = |0>
+        ctrl r[i] { anc.x() }
+    } do {
+        ctrl anc { r[j].x() }       //~ N017
+    }
+}
+
+fn mutated_zero_still_n003() {
+    let q = |0>
+    q.x()
+}                                   //~ N003

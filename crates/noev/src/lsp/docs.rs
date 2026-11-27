@@ -115,6 +115,17 @@ pub fn builtin(b: Builtin) -> (String, String) {
         Builtin::Print { stderr: true } => {
             ("fn eprint(values…)", "Like `print`, on standard error.")
         }
+        Builtin::Qasm => (
+            "unsafe fn qasm(code: String)",
+            "Emits raw OpenQASM 3 statements (`spec/interop.md` §4). Interpolated `{q}` \
+             placeholders resolve qubit places to OpenQASM registers; classical scalar \
+             placeholders format their values into the statement text. Requires `unsafe` (N019) \
+             and is not reversible (N013).",
+        ),
+        Builtin::Std(op) => (
+            op.name(),
+            "Standard-library operation (`spec/std.md` §5–§6).",
+        ),
     };
     (sig.into(), doc.into())
 }
@@ -124,9 +135,9 @@ fn gate(g: Gate) -> (String, String) {
         Gate::X => ("fn x(mut self) -> mut Self", "Pauli X: a bit flip."),
         Gate::Unitary => (
             "fn unitary(mut self, m: [[Complex; 2]; 2]) -> mut Self",
-            "The gate given by the unitary matrix `m`, rows first; on a `[Qubit; 2]`, a \
-             `[[Complex; 4]; 4]` over |00⟩, |01⟩, |10⟩, |11⟩. Checked to be unitary when it \
-             runs.",
+            "The gate given by the unitary matrix `m`, rows first; on a `[Qubit; N]`, a \
+             `[[Complex; 2^N]; 2^N]` over |0…0⟩ … |1…1⟩ with `r[0]` most significant. Checked \
+             to be unitary when it runs.",
         ),
         Gate::Y => ("fn y(mut self) -> mut Self", "Pauli Y."),
         Gate::Z => ("fn z(mut self) -> mut Self", "Pauli Z: a phase flip."),

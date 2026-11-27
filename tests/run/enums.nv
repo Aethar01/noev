@@ -23,14 +23,21 @@ fn describe(n: Int) -> String {
     }
 }
 
-fn main() {
+test fn enums_and_match() {
     let b = Basis::Y
-    print(b, b.next(), b.next().next(), b == Basis::Y, b != Basis::Y)
-    print(describe(0), describe(1), describe(-1), describe(7))
+    assert "{b}" == "Basis::Y"
+    assert b.next() == Basis::Z
+    assert b.next().next() == Basis::X
+    assert b == Basis::Y
+    assert not (b != Basis::Y)
+    assert describe(0) == "none"
+    assert describe(1) == "one"
+    assert describe(-1) == "minus one"
+    assert describe(7) == "many"
     let q = |1>
     let word = match mv q.measure() {
         0 => "zero",
         1 => "one",
     }
-    print("measured {word}, then {b.next()}")
+    assert "measured {word}, then {b.next()}" == "measured one, then Basis::Z"
 }

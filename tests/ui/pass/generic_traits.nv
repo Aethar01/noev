@@ -1,0 +1,38 @@
+// Generic traits (spec/types.md §6): one trait implemented for a type with several
+// arguments, calls told apart by their arguments, and a bound `T: Oracle<N>`.
+
+trait Oracle<const N: Int> {
+    rev fn apply(ref self, r: mut [Qubit; N])
+    fn width(ref self) -> Int { N }
+}
+
+struct Ladder {}
+
+impl Oracle<2> for Ladder {
+    rev fn apply(ref self, r: mut [Qubit; 2]) { ctrl r[0] { r[1].x() } }
+}
+
+impl Oracle<4> for Ladder {
+    rev fn apply(ref self, r: mut [Qubit; 4]) {
+        for i in 0..3 {
+            ctrl r[i] { r[i + 1].x() }
+        }
+    }
+}
+
+fn sandwich<T: Oracle<N>, const N: Int>(o: ref T, r: mut [Qubit; N]) {
+    assert 0 < N
+    o.apply(mut r)
+    r[0].z()
+    adj o.apply(mut r)
+}
+
+fn main() {
+    let o = Ladder {}
+    let a: [Qubit; 2] = [|+>; 2]
+    let b: [Qubit; 4] = [|+>; 4]
+    sandwich(ref o, mut a)
+    sandwich(ref o, mut b)
+    print(mv a.measure())
+    print(mv b.measure())
+}

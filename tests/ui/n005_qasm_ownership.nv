@@ -1,0 +1,24 @@
+// Ownership rules on inline OpenQASM qubit placeholders (`spec/interop.md` §4).
+
+fn read_ref(q: ref Qubit) {
+    let _ = q
+}
+
+fn borrow_conflict() {
+    let a = |0>
+    let r = ref a
+    unsafe { qasm("sx {a};") }      //~ N005
+    read_ref(r)
+    mv a.discard()
+}
+
+fn moved_qubit() {
+    let q = |0>
+    let _ = mv q.measure()
+    unsafe { qasm("sx {q};") }      //~ N002
+}
+
+fn clears_zero_tracking() {
+    let q = |0>
+    unsafe { qasm("sx {q};") }
+}                                   //~ N003

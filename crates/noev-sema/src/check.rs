@@ -9,7 +9,11 @@ use noev_syntax::ast::*;
 use noev_syntax::{Diagnostic, FxHashMap, Span, Symbol};
 
 use crate::prelude::{self, Builtin, Math, Reversible, Sig};
-use crate::ty::{Kind, StructDef, StructId, Ty, TyKind, Types, VariantDef};
+use crate::resolve::{self, Binding, Entry, Found, Ns, PathError, PathWords, Scopes, Visible};
+use crate::ty::{
+    BIT_NOT, Kind, NEG, OPS, OpKind, StructDef, StructId, Ty, TyKind, Types, VariantDef,
+    op_fn_index, op_index,
+};
 
 /// A local variable: a `let` binding, parameter, `self`, or loop variable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -52,6 +56,11 @@ pub enum Res {
     Builtin(Builtin),
     /// A variant of an enum, as a value: `Basis::X`.
     Variant(StructId, u32),
+    /// A size parameter, as an `Int`: `N` in `for i in 0..N`. Its value is known in each
+    /// copy of the generic function.
+    Size(Ty),
+    /// An `extern "C" fn` used as a function pointer value (`spec/interop.md` §3).
+    FnPtr(FnId),
 }
 
 /// What a call calls.
@@ -59,6 +68,8 @@ pub enum Res {
 pub enum Callee {
     /// A function or method in the program.
     Fn(FnId),
+    /// A value of type `extern "C" fn(…) -> …` called indirectly (`spec/interop.md` §3).
+    FnPtr,
     /// A built-in.
     Builtin(Builtin),
     /// A conversion, such as `Float(n)`.
@@ -84,6 +95,197 @@ pub enum Adjust {
     Deref,
 }
 
+/// A trait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TraitId(u32);
+
+impl TraitId {
+    /// The trait's position in [`Typed::traits`].
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// A trait's name and functions (`spec/types.md` §6).
+#[derive(Clone, Debug)]
+pub struct TraitInfo {
+    /// Its name.
+    pub name: Symbol,
+    /// Its item.
+    pub item: ItemId,
+    /// `Self` in its functions: a type parameter, the first of each function's.
+    pub self_param: Ty,
+    /// Its own type and size parameters (`trait Oracle<const N: Int>`), after `Self` in each
+    /// of its functions' parameters.
+    pub params: Vec<Ty>,
+    /// Defaults for trailing parameters (`trait Add<Rhs = Self>`), aligned with `params`.
+    pub defaults: Vec<Option<Ty>>,
+    /// Its functions, with or without default bodies.
+    pub fns: Vec<FnId>,
+    /// Its associated types, each with whether it must be `Copy`.
+    pub assoc: Vec<(Symbol, bool)>,
+}
+
+/// An `impl` of a trait for a type.
+#[derive(Clone, Debug)]
+pub struct ImplInfo {
+    /// The trait.
+    pub trait_id: TraitId,
+    /// The trait's arguments, which can mention the `impl`'s type parameters: the `4` of
+    /// `impl Oracle<4> for Parity`.
+    pub trait_args: Vec<Ty>,
+    /// The type, which can mention the `impl`'s type parameters.
+    pub self_ty: Ty,
+    /// The `impl`'s type parameters: `impl<T> … for Pair<T, T>`.
+    pub generics: Vec<Ty>,
+    /// The functions it provides; the trait's defaults stand for the others.
+    pub fns: Vec<FnId>,
+    /// What it says each associated type is: `type Result = Bit`.
+    pub assoc: Vec<(Symbol, Ty)>,
+    /// Where it is.
+    pub span: Span,
+}
+
+impl ImplInfo {
+    /// Whether this `impl` is for `ty` and, if given, the trait arguments `trait_args`, with
+    /// what that makes each of its type parameters (`None` for one neither fixes).
+    pub fn matches(
+        &self,
+        types: &Types,
+        ty: Ty,
+        trait_args: Option<&[Ty]>,
+    ) -> Option<Vec<Option<Ty>>> {
+        let mut found = vec![None; self.generics.len()];
+        if !types.match_params(self.self_ty, ty, &self.generics, &mut found) {
+            return None;
+        }
+        if let Some(args) = trait_args {
+            if args.len() != self.trait_args.len() {
+                return None;
+            }
+            for (&pattern, &arg) in self.trait_args.iter().zip(args) {
+                if !types.is_wildcard(arg)
+                    && !types.match_params(pattern, arg, &self.generics, &mut found)
+                {
+                    return None;
+                }
+            }
+        }
+        Some(found)
+    }
+}
+
+/// `ty` with each associated type whose base has an `impl` replaced by what the `impl` says
+/// it is, as `<Qubit as Measure>::Result` is `Bit` (`spec/types.md` §6).
+pub fn normalize(impls: &[ImplInfo], types: &mut Types, ty: Ty) -> Ty {
+    match types.kind(ty).clone() {
+        TyKind::Assoc {
+            base,
+            trait_index,
+            args,
+            name,
+            copy,
+        } => {
+            let base = normalize(impls, types, base);
+            let args: Box<[Ty]> = args.iter().map(|&a| normalize(impls, types, a)).collect();
+            // Qubits measure to bits by the built-in measurement, and tuples and arrays
+            // element by element.
+            if Some(trait_index) == types.measure {
+                if let Some(result) = types.measured(base) {
+                    return result;
+                }
+                let part = |types: &mut Types, elem: Ty| {
+                    let assoc = types.intern(TyKind::Assoc {
+                        base: elem,
+                        trait_index,
+                        args: Box::new([]),
+                        name,
+                        copy,
+                    });
+                    normalize(impls, types, assoc)
+                };
+                match types.kind(base).clone() {
+                    TyKind::Tuple(elems) => {
+                        let results: Box<[Ty]> = elems.iter().map(|&e| part(types, e)).collect();
+                        return types.intern(TyKind::Tuple(results));
+                    }
+                    TyKind::Array(elem, len) => {
+                        let result = part(types, elem);
+                        return types.array(result, len);
+                    }
+                    TyKind::SizedArray(elem, len) => {
+                        let result = part(types, elem);
+                        return types.sized_array(result, len);
+                    }
+                    _ => {}
+                }
+            }
+            // A built-in type's operator gives its `Output`.
+            if let Some(output) = types.builtin_op(trait_index, base, Some(&args)) {
+                return output;
+            }
+            let found = impls.iter().find_map(|i| {
+                if i.trait_id.0 != trait_index {
+                    return None;
+                }
+                let found = i.matches(types, base, Some(&args))?;
+                let args = found.into_iter().collect::<Option<Vec<Ty>>>()?;
+                let &(_, given) = i.assoc.iter().find(|(n, _)| *n == name)?;
+                Some((given, i.generics.clone(), args))
+            });
+            match found {
+                Some((given, from, to)) => {
+                    let given = types.subst(given, &from, &to);
+                    normalize(impls, types, given)
+                }
+                None => types.intern(TyKind::Assoc {
+                    base,
+                    trait_index,
+                    args,
+                    name,
+                    copy,
+                }),
+            }
+        }
+        TyKind::Tuple(elems) => {
+            let elems: Box<[Ty]> = elems.iter().map(|&t| normalize(impls, types, t)).collect();
+            types.intern(TyKind::Tuple(elems))
+        }
+        TyKind::Array(elem, len) => {
+            let elem = normalize(impls, types, elem);
+            types.array(elem, len)
+        }
+        TyKind::SizedArray(elem, len) => {
+            let elem = normalize(impls, types, elem);
+            types.sized_array(elem, len)
+        }
+        TyKind::Ref { mutable, inner } => {
+            let inner = normalize(impls, types, inner);
+            types.reference(mutable, inner)
+        }
+        _ => ty,
+    }
+}
+
+/// Which parameter a returned reference borrows from (`spec/ownership.md` §5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BorrowRoot {
+    /// `self`.
+    Receiver,
+    /// The `n`th parameter after `self`.
+    Param(usize),
+}
+
+/// A parameter (or field path within it) that a returned reference may borrow from
+/// (`spec/ownership.md` §5).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BorrowSource {
+    /// Which parameter (`self` or a numbered parameter).
+    pub root: BorrowRoot,
+    /// Field indices within that parameter, in order; empty for the whole parameter.
+    pub fields: Vec<u32>,
+}
+
 /// A function's resolved signature and where it lives.
 #[derive(Clone, Debug)]
 pub struct FnInfo {
@@ -97,6 +299,16 @@ pub struct FnInfo {
     pub self_local: Option<LocalId>,
     /// The receiver's type (`Self`, `ref Self` or `mut Self`), for methods.
     pub receiver_ty: Option<Ty>,
+    /// Its type parameters: for a method, its struct's first, then its own; for a trait's
+    /// function, `Self` first; for an `impl`'s, the `impl`'s first. Empty if it is not
+    /// generic.
+    pub generics: Vec<Ty>,
+    /// `Self` in a trait's or an `impl`'s function.
+    pub self_ty: Option<Ty>,
+    /// Where a returned reference (or struct holding one) may borrow from, when fixed by
+    /// explicit `[…]` annotations or by library/trait elision; `None` when inferred from the
+    /// function's body by the ownership checker.
+    pub return_borrows: Option<Vec<BorrowSource>>,
 }
 
 /// Everything the type checker learned about a program.
@@ -126,6 +338,50 @@ pub struct Typed {
     pub fns: Vec<FnInfo>,
     /// Each `sample` expression's run.
     pub runs: FxHashMap<ExprId, Run>,
+    /// The program's `fn main`, in the root module of the package being compiled.
+    pub main: Option<FnId>,
+    /// The module each function is in, methods included, indexed by [`FnId::index`].
+    pub fn_modules: Vec<ModuleId>,
+    /// The type arguments of each call of a generic function or method, in the order of
+    /// [`FnInfo::generics`], by the call's expression. They can mention the calling
+    /// function's own type parameters.
+    pub type_args: FxHashMap<ExprId, Vec<Ty>>,
+    /// For `a += b` on a type of the program's own, which calls `AddAssign::add_assign` with
+    /// `a` as receiver: the right side, by the place. The call is recorded on the place, in
+    /// [`Typed::callees`] and the other tables by expression.
+    pub assign_values: FxHashMap<ExprId, ExprId>,
+    /// Every trait.
+    pub traits: Vec<TraitInfo>,
+    /// Every `impl`.
+    pub impls: Vec<ImplInfo>,
+    /// The trait each trait function belongs to.
+    pub fn_traits: FxHashMap<FnId, TraitId>,
+    /// The `impl` each `impl` function belongs to, by its index in [`Typed::impls`].
+    pub fn_impls: FxHashMap<FnId, usize>,
+    /// The name of each trait and `impl` function, to match one with the other.
+    impl_names: FxHashMap<FnId, Symbol>,
+    /// The type parameters whose bounds are inferred from their function's body, which
+    /// writes none and is not visible to other packages (`spec/types.md` §6), with that
+    /// function.
+    pub inferable: FxHashMap<Ty, FnId>,
+    /// Types given to a parameter declared `Copy` that are copyable only if inferable
+    /// parameters in them are: checked with the other inferred `Copy` bounds, by the
+    /// ownership checker.
+    pub copy_needs: Vec<CopyNeed>,
+}
+
+/// A type that must be copyable for a call to be allowed: what a parameter `T: Copy` is
+/// given, in terms of the calling function's inferable parameters.
+#[derive(Clone, Debug)]
+pub struct CopyNeed {
+    /// The type given.
+    pub ty: Ty,
+    /// The call.
+    pub span: Span,
+    /// The function called, and its parameter, as shown in messages.
+    pub callee: String,
+    /// The parameter, as shown in messages.
+    pub param: String,
 }
 
 /// The block of a `sample` expression, which is run separately from the code around it.
@@ -138,7 +394,61 @@ pub struct Run {
     pub ty: Ty,
 }
 
+/// The arguments of a call, after its receiver: a list from the syntax tree, or an
+/// operator's right side.
+#[derive(Clone, Copy, Debug)]
+pub enum Args<'a> {
+    /// A call's or method call's arguments.
+    List(&'a [ExprId]),
+    /// The right side of a binary operator.
+    One([ExprId; 1]),
+    /// A unary operator has none.
+    None,
+}
+
+impl std::ops::Deref for Args<'_> {
+    type Target = [ExprId];
+
+    fn deref(&self) -> &[ExprId] {
+        match self {
+            Args::List(list) => list,
+            Args::One(one) => one,
+            Args::None => &[],
+        }
+    }
+}
+
 impl Typed {
+    /// A call's receiver and arguments, if `id` is a call: a call, a method call, or an
+    /// operator on a type of the program's own, which calls its `std::ops` trait's function
+    /// with the left side (or the only one) as receiver (`spec/types.md` §6).
+    pub fn call_parts<'a>(&self, ast: &'a Ast, id: ExprId) -> Option<(Option<ExprId>, Args<'a>)> {
+        match ast.expr(id).kind {
+            ExprKind::Call { args, .. } => Some((None, Args::List(ast.list(args)))),
+            ExprKind::MethodCall { receiver, args, .. } => {
+                Some((Some(receiver), Args::List(ast.list(args))))
+            }
+            ExprKind::Binary { lhs, rhs, .. } if self.callees[id.index()].is_some() => {
+                Some((Some(lhs), Args::One([rhs])))
+            }
+            ExprKind::Unary { operand, .. } if self.callees[id.index()].is_some() => {
+                Some((Some(operand), Args::None))
+            }
+            _ => {
+                let &value = self.assign_values.get(&id)?;
+                Some((Some(id), Args::One([value])))
+            }
+        }
+    }
+
+    /// Whether `id` is an operator that calls a `std::ops` trait's function.
+    pub fn is_operator_call(&self, ast: &Ast, id: ExprId) -> bool {
+        matches!(
+            ast.expr(id).kind,
+            ExprKind::Binary { .. } | ExprKind::Unary { .. }
+        ) && self.callees[id.index()].is_some()
+    }
+
     /// The type of `expr`.
     pub fn ty(&self, expr: ExprId) -> Ty {
         self.expr_types[expr.index()]
@@ -148,6 +458,65 @@ impl Typed {
     pub fn local(&self, id: LocalId) -> &Local {
         &self.locals[id.index()]
     }
+
+    /// The `impl` of `trait_id` with the arguments `trait_args` for `ty`, all without
+    /// parameters in `types` (this table's, or one made from it), and the `impl`'s type
+    /// arguments, if there is one.
+    pub fn impl_for(
+        &self,
+        types: &Types,
+        trait_id: TraitId,
+        trait_args: &[Ty],
+        ty: Ty,
+    ) -> Option<(usize, Vec<Ty>)> {
+        self.impls.iter().enumerate().find_map(|(index, i)| {
+            if i.trait_id != trait_id {
+                return None;
+            }
+            let found = i.matches(types, ty, Some(trait_args))?;
+            let args = found.into_iter().collect::<Option<Vec<Ty>>>()?;
+            Some((index, args))
+        })
+    }
+
+    /// What a call of the trait function `f` runs, given its type arguments (`Self`'s
+    /// first, with no parameters left, in `types`): the `impl`'s function, or the trait's
+    /// default, and that function's type arguments. `None` if `f` is not a trait's function,
+    /// or there is no `impl` for `Self`.
+    pub fn dispatch(&self, types: &Types, f: FnId, args: &[Ty]) -> Option<(FnId, Vec<Ty>)> {
+        let &trait_id = self.fn_traits.get(&f)?;
+        let (&self_ty, rest) = args.split_first()?;
+        let n = self.traits[trait_id.index()].params.len();
+        let (trait_args, rest) = rest.split_at_checked(n)?;
+        let (index, impl_args) = self.impl_for(types, trait_id, trait_args, self_ty)?;
+        let provided = self.impls[index]
+            .fns
+            .iter()
+            .copied()
+            .find(|&g| self.same_fn(g, f));
+        match provided {
+            Some(g) => {
+                let mut all = impl_args;
+                all.extend_from_slice(rest);
+                Some((g, all))
+            }
+            None => Some((f, args.to_vec())),
+        }
+    }
+
+    /// Whether the `impl` function `g` provides the trait function `f`.
+    fn same_fn(&self, g: FnId, f: FnId) -> bool {
+        self.impl_names.get(&g) == self.impl_names.get(&f)
+    }
+}
+
+/// A function a name refers to.
+#[derive(Clone, Copy, Debug)]
+enum FnRef {
+    /// One of the program's.
+    Fn(FnId),
+    /// A built-in standard-library function, by its name there.
+    Std(&'static str),
 }
 
 /// What the surrounding code wants from an expression.
@@ -175,9 +544,13 @@ impl Expect {
 /// Resolves names and checks types in `ast`.
 pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
     let exprs = ast.all_exprs().len();
+    let (mut scopes, diagnostics) = resolve::resolve(ast);
     let mut checker = Checker {
         ast,
+        words: PathWords::new(ast),
+        module: ModuleId::from_index(0),
         t: Typed {
+            fn_modules: scopes.take_fn_modules(),
             expr_types: vec![Ty::ERROR; exprs],
             res: vec![Res::None; exprs],
             callees: vec![None; exprs],
@@ -188,33 +561,59 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
             pat_variants: vec![None; ast.all_pats().len()],
             ..Typed::default()
         },
-        diagnostics: Vec::new(),
-        fn_names: FxHashMap::default(),
-        struct_names: FxHashMap::default(),
+        scopes,
+        diagnostics,
+        item_structs: vec![None; ast.all_items().len()],
+        std_types: FxHashMap::default(),
+        field_vis: FxHashMap::default(),
         methods: FxHashMap::default(),
         scope: Vec::new(),
         self_ty: None,
         ret: Ty::UNIT,
         loops: 0,
         runs: 0,
+        in_with: 0,
         lent_bindings: None,
         negating: false,
         std_enums: FxHashMap::default(),
         aliases: FxHashMap::default(),
         alias_types: FxHashMap::default(),
         resolving_aliases: Vec::new(),
+        type_params: Vec::new(),
+        struct_params: FxHashMap::default(),
+        inference: Vec::new(),
+        item_traits: FxHashMap::default(),
+        param_bounds: FxHashMap::default(),
+        inferred: FxHashMap::default(),
+        library: false,
+        operator: None,
+        param_assoc: FxHashMap::default(),
+        impl_assoc: Vec::new(),
+        return_borrows: None,
+        pending_borrows: Vec::new(),
     };
     checker.collect();
     checker.check_bodies();
+    checker.check_inferred_bounds();
     (checker.t, checker.diagnostics)
 }
 
 struct Checker<'a> {
     ast: &'a Ast,
     t: Typed,
+    /// What each name means in each module.
+    scopes: Scopes<'a>,
+    /// `pkg`, `super` and `self`, which can start a path.
+    words: PathWords,
+    /// The module of the code being checked.
+    module: ModuleId,
     diagnostics: Vec<Diagnostic>,
-    fn_names: FxHashMap<Symbol, FnId>,
-    struct_names: FxHashMap<Symbol, StructId>,
+    /// The struct or enum each struct or enum item declares, by [`ItemId::index`].
+    item_structs: Vec<Option<StructId>>,
+    /// The standard library's types in the prelude: `Basis` and `State`.
+    std_types: FxHashMap<Symbol, StructId>,
+    /// Where each field of each struct can be used from, in declaration order.
+    field_vis: FxHashMap<StructId, Vec<Visible>>,
     methods: FxHashMap<(StructId, Symbol), FnId>,
     /// Locals in scope, innermost last.
     scope: Vec<(Symbol, LocalId)>,
@@ -226,22 +625,74 @@ struct Checker<'a> {
     loops: u32,
     /// How many `sample` runs enclose the current code.
     runs: u32,
+    /// How many `with`/`do` blocks enclose the current code.
+    in_with: u32,
     /// While binding a `match` arm's pattern on a lent value: whether the lend is `mut`.
     lent_bindings: Option<bool>,
     /// While checking the operand of `-`: a literal there may reach a signed type's minimum.
     negating: bool,
-    /// The `Option` and `Result` types made so far, by name and type arguments.
-    std_enums: FxHashMap<(Symbol, Vec<Ty>), StructId>,
+    /// The generic definitions of `Option` and `Result`, by name, once made.
+    std_enums: FxHashMap<Symbol, StructId>,
     /// Type aliases: the type each names, and where its name is.
-    aliases: FxHashMap<Symbol, (TypeId, Span)>,
+    aliases: FxHashMap<ItemId, (TypeId, Span)>,
     /// The aliases resolved so far.
-    alias_types: FxHashMap<Symbol, Ty>,
+    alias_types: FxHashMap<ItemId, Ty>,
     /// The aliases being resolved, innermost last, to catch one that names itself.
-    resolving_aliases: Vec<Symbol>,
+    resolving_aliases: Vec<ItemId>,
+    /// The type parameters in scope, by name.
+    type_params: Vec<(Symbol, Ty)>,
+    /// The type parameters of each generic struct or enum, by name.
+    struct_params: FxHashMap<StructId, Vec<(Symbol, Ty)>>,
+    /// The generic calls whose type arguments are being inferred, innermost last.
+    inference: Vec<Inference>,
+    /// The trait each trait item declares.
+    item_traits: FxHashMap<ItemId, TraitId>,
+    /// The traits each type parameter is bound by.
+    param_bounds: FxHashMap<Ty, Vec<(TraitId, Vec<Ty>)>>,
+    /// The trait bounds inferred for each inferable parameter so far, each with where it is
+    /// needed.
+    inferred: FxHashMap<Ty, Vec<(TraitId, Span)>>,
+    /// Whether the package being compiled is a library: it has no `fn main`.
+    library: bool,
+    /// While an operator's call is checked, how it is written and where it is, so a bound
+    /// it does not meet is reported as the operator's (and one of a call in its operands is
+    /// not).
+    operator: Option<(&'static str, Span)>,
+    /// The associated types bounds fix, as `T: Measure<Result = Bit>`, by parameter, trait,
+    /// trait arguments and name.
+    param_assoc: FxHashMap<(Ty, TraitId, Vec<Ty>, Symbol), Ty>,
+    /// While an `impl` is collected, what it says its associated types are, so its
+    /// signatures can name them through `Self`.
+    impl_assoc: Vec<ImplAssoc>,
+    /// While resolving a function's return type, borrow annotations collected from it.
+    return_borrows: Option<Vec<RawBorrow>>,
+    /// Raw return-type borrow annotations collected per function, resolved once every struct's
+    /// fields and generic instances are filled.
+    pending_borrows: Vec<(FnId, Vec<RawBorrow>)>,
+}
+
+/// A raw borrow annotation collected while resolving a function's return type.
+type RawBorrow = (Ty, List<BorrowPlace>, Span);
+
+/// An `impl`'s type, trait, trait arguments and associated types, while `impl`s are
+/// collected.
+type ImplAssoc = (Ty, TraitId, Vec<Ty>, Vec<(Symbol, Ty)>);
+
+/// Declared generic parameters before their bounds and defaults are resolved.
+type DeclaredParams = (
+    Vec<(Symbol, Ty)>,
+    Vec<(Ty, Vec<List<Bound>>)>,
+    Vec<(Option<TypeId>, Span)>,
+);
+
+/// The type parameters of a generic call or literal, and what each is found to be so far.
+struct Inference {
+    params: Vec<Ty>,
+    found: Vec<Option<Ty>>,
 }
 
 // Collecting items.
-impl Checker<'_> {
+impl<'a> Checker<'a> {
     fn error(&mut self, span: Span, message: impl Into<String>) -> &mut Diagnostic {
         self.diagnostics.push(Diagnostic::error(span, message));
         self.diagnostics.last_mut().expect("just pushed")
@@ -277,8 +728,10 @@ impl Checker<'_> {
             variants: Some(vec![variant("X"), variant("Y"), variant("Z")]),
             args: Vec::new(),
             bare: false,
+            template: None,
+            is_extern_c: false,
         });
-        self.struct_names.insert(std_name("Basis"), basis);
+        self.std_types.insert(std_name("Basis"), basis);
         let basis_ty = self.t.types.struct_ty(basis);
         self.t.types.basis = Some(basis_ty);
         // `enum State { Zero, One, Plus, Minus, PlusI, MinusI }`, in `state::Label`'s order.
@@ -291,14 +744,76 @@ impl Checker<'_> {
             variants: Some(labels.iter().map(|l| variant(l)).collect()),
             args: Vec::new(),
             bare: false,
+            template: None,
+            is_extern_c: false,
         });
-        self.struct_names.insert(std_name("State"), state);
+        self.std_types.insert(std_name("State"), state);
         let state_ty = self.t.types.struct_ty(state);
         self.t.types.state = Some(state_ty);
         let std_types = self.t.types.structs.len() as u32;
 
+        // Traits first, so any bound can name one.
+        for &item in items {
+            let ItemKind::Trait {
+                name, fns, types, ..
+            } = ast.item(item).kind
+            else {
+                continue;
+            };
+            let id = TraitId(self.t.traits.len() as u32);
+            // `Self` in the trait's functions: a type parameter bound by the trait. The
+            // trait's own parameters are made once struct names are known.
+            let self_name = ast.symbols.get("Self").unwrap_or(name);
+            let self_param = self.t.types.param(self_name, false);
+            self.param_bounds.insert(self_param, vec![(id, Vec::new())]);
+            self.item_traits.insert(item, id);
+            self.module = self.scopes.item_module(item);
+            let assoc = ast
+                .list(types)
+                .iter()
+                .map(|a| {
+                    let copy = ast
+                        .list(a.bounds)
+                        .iter()
+                        .any(|b| matches!(ast.list(b.path), [n] if ast.name(*n) == "Copy"));
+                    if ast.list(a.bounds).len() > usize::from(copy) {
+                        self.error(
+                            ast.item(item).span,
+                            "bounds on associated types other than `Copy` are not supported yet",
+                        );
+                    }
+                    (a.name, copy)
+                })
+                .collect();
+            self.t.traits.push(TraitInfo {
+                name,
+                item,
+                self_param,
+                params: Vec::new(),
+                defaults: Vec::new(),
+                fns: ast.list(fns).to_vec(),
+                assoc,
+            });
+            if Some(ast.module(self.module).package) == ast.std_package()
+                && ast.name(name) == "Measure"
+            {
+                self.t.types.measure = Some(id.0);
+            }
+            if Some(ast.module(self.module).package) == ast.std_package()
+                && let Some(op) = OPS.iter().position(|o| o.name == ast.name(name))
+            {
+                self.t.types.ops[op] = Some(id.0);
+            }
+            for &f in ast.list(fns) {
+                self.t.fn_traits.insert(f, id);
+                self.t.impl_names.insert(f, ast.function(f).name);
+            }
+        }
+
         // Struct, enum and alias names next, so field and parameter types can refer to any
-        // of them.
+        // of them. Bounds on struct and enum parameters wait until traits' parameters and
+        // defaults exist.
+        let mut struct_bounds = Vec::new();
         for &item in items {
             if let ItemKind::Type {
                 name,
@@ -311,47 +826,115 @@ impl Checker<'_> {
                     let message =
                         format!("`{text}` is a built-in type; an alias needs a name of its own");
                     self.error(name_span, message);
-                } else if self.aliases.insert(name, (ty, name_span)).is_some()
-                    || self
-                        .struct_names
-                        .get(&name)
-                        .is_some_and(|e| e.0 >= std_types)
-                {
-                    let message = format!("the type `{text}` is defined twice");
-                    self.error(name_span, message);
+                } else {
+                    self.aliases.insert(item, (ty, name_span));
                 }
                 continue;
             }
-            let (name, name_span, is_enum) = match ast.item(item).kind {
+            let (name, name_span, is_enum, generics, is_extern_c) = match ast.item(item).kind {
                 ItemKind::Struct {
-                    name, name_span, ..
-                } => (name, name_span, false),
+                    name,
+                    name_span,
+                    generics,
+                    is_extern_c,
+                    ..
+                } => (name, name_span, false, generics, is_extern_c),
                 ItemKind::Enum {
-                    name, name_span, ..
-                } => (name, name_span, true),
+                    name,
+                    name_span,
+                    generics,
+                    ..
+                } => (name, name_span, true, generics, false),
                 _ => continue,
             };
             let id = StructId(self.t.types.structs.len() as u32);
-            let earlier = self.struct_names.insert(name, id);
-            if earlier.is_some_and(|e| e.0 >= std_types) || self.aliases.contains_key(&name) {
-                let message = format!("the type `{}` is defined twice", self.name(name));
-                self.error(name_span, message);
-            }
+            self.item_structs[item.index()] = Some(id);
+            // A generic struct or enum is a template: its arguments are its parameters.
+            let module = self.scopes.item_module(item);
+            self.module = module;
+            let (params, typed, _) = self.declare_generic_params(generics, false);
             self.t.types.structs.push(StructDef {
                 name,
                 span: name_span,
                 fields: Vec::new(),
                 variants: is_enum.then(Vec::new),
-                args: Vec::new(),
+                args: params.iter().map(|&(_, t)| t).collect(),
                 bare: false,
+                template: None,
+                is_extern_c,
             });
+            if !params.is_empty() {
+                self.struct_params.insert(id, params.clone());
+            }
+            if !generics.params.is_empty() || !generics.wheres.is_empty() {
+                struct_bounds.push((module, generics, params, typed));
+            }
         }
 
         // Every alias, so a broken one is reported even if nothing uses it.
-        let mut aliases: Vec<Symbol> = self.aliases.keys().copied().collect();
+        let mut aliases: Vec<ItemId> = self.aliases.keys().copied().collect();
         aliases.sort_by_key(|a| self.aliases[a].1.start);
         for alias in aliases {
             self.alias_type(alias);
+        }
+
+        // Each trait's own parameters and defaults (`Self: Oracle<N>`, `Add<Rhs = Self>`):
+        // parameters first, then defaults (which may name `Self` and earlier parameters), then
+        // bounds on those parameters.
+        let mut trait_pending = Vec::new();
+        for &item in items {
+            let ItemKind::Trait { generics, .. } = ast.item(item).kind else {
+                continue;
+            };
+            if generics.params.is_empty() && generics.wheres.is_empty() {
+                continue;
+            }
+            let id = self.item_traits[&item];
+            let module = self.scopes.item_module(item);
+            self.module = module;
+            let (params, typed, raw_defaults) = self.declare_generic_params(generics, true);
+            let param_tys: Vec<Ty> = params.iter().map(|&(_, t)| t).collect();
+            let self_param = self.t.traits[id.index()].self_param;
+            self.param_bounds
+                .insert(self_param, vec![(id, param_tys.clone())]);
+            self.t.traits[id.index()].params = param_tys;
+            trait_pending.push((id, module, generics, params, typed, raw_defaults));
+        }
+        for &(id, module, _, ref params, _, ref raw_defaults) in &trait_pending {
+            self.module = module;
+            let self_param = self.t.traits[id.index()].self_param;
+            self.self_ty = Some(self_param);
+            self.type_params.clear();
+            let mut defaults = Vec::with_capacity(params.len());
+            let mut seen_default = false;
+            for (&(name, param_ty), &(def, span)) in params.iter().zip(raw_defaults) {
+                if let Some(def_ty) = def {
+                    seen_default = true;
+                    let resolved = self.resolve_type_arg(def_ty);
+                    let ok = self.check_arg_kinds(&[param_ty], &[resolved], span);
+                    defaults.push(Some(if ok { resolved } else { Ty::ERROR }));
+                } else {
+                    if seen_default {
+                        self.error(
+                            span,
+                            "a parameter without a default cannot follow one with a default",
+                        );
+                    }
+                    defaults.push(None);
+                }
+                self.type_params.push((name, param_ty));
+            }
+            self.type_params.clear();
+            self.self_ty = None;
+            self.t.traits[id.index()].defaults = defaults;
+        }
+        for (_, module, generics, params, typed, _) in trait_pending {
+            self.module = module;
+            self.resolve_generic_bounds(generics, &params, typed);
+        }
+        for (module, generics, params, typed) in struct_bounds {
+            self.module = module;
+            self.resolve_generic_bounds(generics, &params, typed);
         }
 
         self.t.fns = ast
@@ -369,23 +952,34 @@ impl Checker<'_> {
                 params: Vec::new(),
                 self_local: None,
                 receiver_ty: None,
+                generics: Vec::new(),
+                self_ty: None,
+                return_borrows: None,
             })
             .collect();
 
         let mut next_struct = std_types;
-        for &item in items {
-            let item = ast.item(item);
+        let main_root = ast.packages().first().map(|p| p.root);
+        self.library = !items.iter().any(|&item| {
+            matches!(ast.item(item).kind, ItemKind::Fn(f)
+                if ast.name(ast.function(f).name) == "main"
+                    && Some(self.scopes.item_module(item)) == main_root)
+        });
+        for &item_id in items {
+            let item = ast.item(item_id);
+            self.module = self.scopes.item_module(item_id);
             match item.kind {
                 ItemKind::Fn(f) => {
                     let decl = ast.function(f);
-                    if self.fn_names.insert(decl.name, f).is_some() {
-                        let message =
-                            format!("the function `{}` is defined twice", self.name(decl.name));
-                        self.error(decl.name_span, message);
-                    }
-                    self.collect_fn(f, None);
-                    if self.name(decl.name) == "main" {
+                    self.collect_fn(f, None, Vec::new(), None);
+                    if self.name(decl.name) == "main" && Some(self.module) == main_root {
+                        self.t.main = Some(f);
                         self.check_main(f);
+                    }
+                }
+                ItemKind::ExternBlock(fns) => {
+                    for &f in ast.list(fns) {
+                        self.collect_fn(f, None, Vec::new(), None);
                     }
                 }
                 ItemKind::Struct {
@@ -395,7 +989,9 @@ impl Checker<'_> {
                     next_struct += 1;
                     let self_ty = self.t.types.struct_ty(id);
                     self.self_ty = Some(self_ty);
+                    self.type_params = self.struct_params.get(&id).cloned().unwrap_or_default();
                     let mut resolved: Vec<(Symbol, Ty)> = Vec::new();
+                    let mut visible = Vec::new();
                     for field in ast.list(fields) {
                         if resolved.iter().any(|(name, _)| *name == field.name) {
                             let message =
@@ -404,16 +1000,19 @@ impl Checker<'_> {
                         }
                         let ty = self.resolve_type(field.ty);
                         resolved.push((field.name, ty));
+                        visible.push(self.visibility(field.vis));
                     }
                     self.t.types.structs[id.index()].fields = resolved;
+                    self.field_vis.insert(id, visible);
                     for &method in ast.list(methods) {
+                        self.visibility(ast.function(method).vis);
                         let name = ast.function(method).name;
                         if self.methods.insert((id, name), method).is_some() {
                             let message = format!("`{}` is defined twice", self.name(name));
                             let span = ast.function(method).name_span;
                             self.error(span, message);
                         }
-                        self.collect_fn(method, Some(id));
+                        self.collect_fn(method, Some(id), Vec::new(), None);
                     }
                     self.self_ty = None;
                 }
@@ -424,6 +1023,7 @@ impl Checker<'_> {
                     next_struct += 1;
                     let self_ty = self.t.types.struct_ty(id);
                     self.self_ty = Some(self_ty);
+                    self.type_params = self.struct_params.get(&id).cloned().unwrap_or_default();
                     let mut resolved: Vec<VariantDef> = Vec::new();
                     for variant in ast.list(variants) {
                         if resolved.iter().any(|v| v.name == variant.name) {
@@ -463,6 +1063,7 @@ impl Checker<'_> {
                     }
                     self.t.types.structs[id.index()].variants = Some(resolved);
                     for &method in ast.list(methods) {
+                        self.visibility(ast.function(method).vis);
                         let name = ast.function(method).name;
                         let clash = self.methods.insert((id, name), method).is_some()
                             || self.t.types.structs[id.index()]
@@ -475,43 +1076,784 @@ impl Checker<'_> {
                             let span = ast.function(method).name_span;
                             self.error(span, message);
                         }
-                        self.collect_fn(method, Some(id));
+                        self.collect_fn(method, Some(id), Vec::new(), None);
                     }
                     self.self_ty = None;
                 }
-                ItemKind::Trait { .. } => {
-                    self.error(item.span, "traits are not supported yet").help =
-                        Some("they need generics; see spec/types.md §6".into());
+                ItemKind::Trait { fns, .. } => {
+                    let id = self.item_traits[&item_id];
+                    let info = &self.t.traits[id.index()];
+                    let prefix: Vec<(Symbol, Ty)> = std::iter::once(info.self_param)
+                        .chain(info.params.iter().copied())
+                        .map(|t| (self.t.types.param_name(t), t))
+                        .collect();
+                    let self_param = info.self_param;
+                    for &f in ast.list(fns) {
+                        self.collect_fn(f, None, prefix.clone(), Some(self_param));
+                    }
                 }
-                ItemKind::Impl { .. } => {
-                    self.error(item.span, "`impl` blocks are not supported yet")
-                        .help = Some("methods go inside the struct".into());
+                ItemKind::Impl {
+                    generics,
+                    bound,
+                    ty,
+                    fns,
+                    types,
+                } => {
+                    let params = self.generic_params(generics);
+                    self.type_params = params.clone();
+                    let self_ty = self.resolve_type(ty);
+                    let trait_ref = self.bound_trait(&bound, self_ty);
+                    let trait_id = trait_ref.as_ref().map(|(t, _)| *t);
+                    self.type_params.clear();
+                    self.type_params = params.clone();
+                    let assoc: Vec<(Symbol, Ty)> = ast
+                        .list(types)
+                        .iter()
+                        .map(|a| (a.name, self.resolve_type(a.ty)))
+                        .collect();
+                    self.type_params.clear();
+                    if let Some((trait_id, args)) = &trait_ref {
+                        // Signatures can name the associated types, through `Self`.
+                        self.impl_assoc
+                            .push((self_ty, *trait_id, args.clone(), assoc.clone()));
+                    }
+                    for &f in ast.list(fns) {
+                        self.collect_fn(f, None, params.clone(), Some(self_ty));
+                        self.t.impl_names.insert(f, ast.function(f).name);
+                    }
+                    if let Some(trait_id) = trait_id {
+                        let index = self.t.impls.len();
+                        for &f in ast.list(fns) {
+                            self.t.fn_impls.insert(f, index);
+                        }
+                        self.t.impls.push(ImplInfo {
+                            trait_id,
+                            trait_args: trait_ref.map(|(_, a)| a).unwrap_or_default(),
+                            self_ty,
+                            generics: params.iter().map(|&(_, t)| t).collect(),
+                            fns: ast.list(fns).to_vec(),
+                            assoc,
+                            span: item.span,
+                        });
+                    }
+                    // Finished `impl`s are found through `self.t.impls`.
+                    self.impl_assoc.clear();
                 }
-                ItemKind::Type { .. } | ItemKind::Error => {}
+                ItemKind::Use(_) | ItemKind::Type { .. } | ItemKind::Error => {}
+            }
+            self.type_params.clear();
+        }
+        // Instances made while fields were being resolved may have missed some.
+        self.t.types.refill_instances();
+        self.impl_assoc.clear();
+        self.resolve_all_fn_borrows();
+        self.check_extern_fns();
+        for index in 0..self.t.impls.len() {
+            self.check_impl(index);
+        }
+    }
+
+    /// The trait `bound` names, with its arguments (the `4` of `Oracle<4>`, and any omitted
+    /// trailing arguments filled from the trait's defaults for `self_ty`), reporting one that
+    /// is not a trait or is given the wrong number of arguments.
+    fn bound_trait(&mut self, bound: &Bound, self_ty: Ty) -> Option<(TraitId, Vec<Ty>)> {
+        let span = bound.span;
+        let (at, rest) = self.qualify(bound.path, span)?;
+        let [name] = *rest else {
+            let message = format!("cannot find the trait `{}`", self.path_text(bound.path));
+            self.error(span, message);
+            return None;
+        };
+        let found = match at {
+            None => self
+                .scopes
+                .lexical(self.module, name, Ns::Type)
+                .or_else(|| self.prelude_trait(name)),
+            Some(module) => self.scopes.qualified(self.module, module, name, Ns::Type),
+        };
+        let trait_id = match self.found(found, name, span) {
+            Some(Binding::Item(item)) => self.item_traits.get(&item).copied(),
+            _ => None,
+        };
+        let Some(trait_id) = trait_id else {
+            let message = format!("cannot find the trait `{}`", self.path_text(bound.path));
+            self.error(span, message);
+            return None;
+        };
+        let ast = self.ast;
+        let given: Vec<TypeId> = ast
+            .list(bound.args)
+            .iter()
+            .filter_map(|a| match *a {
+                BoundArg::Type(t) => Some(t),
+                BoundArg::Assoc { .. } => None,
+            })
+            .collect();
+        let params = self.t.traits[trait_id.index()].params.clone();
+        let defaults = self.t.traits[trait_id.index()].defaults.clone();
+        let self_param = self.t.traits[trait_id.index()].self_param;
+        let max = params.len();
+        let min = defaults.iter().take_while(|d| d.is_none()).count();
+        if given.len() < min || given.len() > max {
+            let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
+            let takes = if min == max {
+                format!("{max} argument{}", if max == 1 { "" } else { "s" })
+            } else if min == 0 {
+                format!("at most {max} argument{}", if max == 1 { "" } else { "s" })
+            } else {
+                format!("{min} to {max} arguments")
+            };
+            let message = format!(
+                "`{trait_name}` takes {takes}, but {} {} given",
+                given.len(),
+                if given.len() == 1 { "is" } else { "are" }
+            );
+            self.error(span, message);
+            return None;
+        }
+        let mut args: Vec<Ty> = given
+            .into_iter()
+            .map(|t| self.resolve_type_arg(t))
+            .collect();
+        for i in args.len()..max {
+            let Some(def) = defaults.get(i).copied().flatten() else {
+                break;
+            };
+            let mut from = Vec::with_capacity(1 + i);
+            let mut to = Vec::with_capacity(1 + i);
+            from.push(self_param);
+            to.push(self_ty);
+            from.extend_from_slice(&params[..i]);
+            to.extend_from_slice(&args[..i]);
+            args.push(self.t.types.subst(def, &from, &to));
+        }
+        if params.len() == args.len() && !self.check_arg_kinds(&params, &args, span) {
+            return None;
+        }
+        Some((trait_id, args))
+    }
+
+    /// The associated types `bound` fixes, as `Measure<Result = Bit>`, reporting names the
+    /// trait does not have.
+    fn bound_assoc(&mut self, bound: &Bound, trait_id: TraitId) -> Vec<(Symbol, Ty)> {
+        let mut fixed = Vec::new();
+        for arg in self.ast.list(bound.args) {
+            let BoundArg::Assoc { name, ty } = *arg else {
+                continue;
+            };
+            let known = self.t.traits[trait_id.index()]
+                .assoc
+                .iter()
+                .any(|(n, _)| *n == name);
+            if !known {
+                let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
+                let message = format!(
+                    "`{}` is not an associated type of `{trait_name}`",
+                    self.name(name)
+                );
+                self.error(bound.span, message);
+                continue;
+            }
+            let ty = self.resolve_type(ty);
+            fixed.push((name, ty));
+        }
+        fixed
+    }
+
+    /// Checks an `impl` against its trait: every function the trait has no default for is
+    /// there, with the trait's signature for `Self`; it is in the trait's package or the
+    /// type's; and no other `impl` gives the same trait for the same type.
+    fn check_impl(&mut self, index: usize) {
+        let ast = self.ast;
+        let info = self.t.impls[index].clone();
+        let trait_info = self.t.traits[info.trait_id.index()].clone();
+        let trait_name = self.name(trait_info.name).to_string();
+        let shown = self.show(info.self_ty);
+        for &g in &info.fns {
+            let name = ast.function(g).name;
+            let Some(&f) = trait_info
+                .fns
+                .iter()
+                .find(|&&f| ast.function(f).name == name)
+            else {
+                let message = format!("`{}` is not a function of `{trait_name}`", self.name(name));
+                self.error(ast.function(g).name_span, message);
+                continue;
+            };
+            self.check_impl_fn(f, g, &info, &trait_name);
+        }
+        for &(name, copy) in &trait_info.assoc {
+            match info.assoc.iter().find(|(n, _)| *n == name) {
+                None => {
+                    let message = format!(
+                        "this `impl` of `{trait_name}` for {shown} lacks `type {}`",
+                        self.name(name)
+                    );
+                    self.error(info.span, message);
+                }
+                Some(&(_, ty)) if copy && self.t.types.linearity(ty) != Kind::Copyable => {
+                    let message = format!(
+                        "`{trait_name}` needs `{}` to be `Copy`, but {} is not",
+                        self.name(name),
+                        self.show(ty)
+                    );
+                    self.error(info.span, message);
+                }
+                Some(_) => {}
+            }
+        }
+        for &(name, _) in &info.assoc {
+            if !trait_info.assoc.iter().any(|(n, _)| *n == name) {
+                let message = format!(
+                    "`{}` is not an associated type of `{trait_name}`",
+                    self.name(name)
+                );
+                self.error(info.span, message);
+            }
+        }
+        for &f in &trait_info.fns {
+            let decl = ast.function(f);
+            let provided = info.fns.iter().any(|&g| ast.function(g).name == decl.name);
+            if !provided && decl.body.is_none() {
+                let message = format!(
+                    "this `impl` of `{trait_name}` for {shown} lacks `{}`",
+                    self.name(decl.name)
+                );
+                self.error(info.span, message);
+            }
+        }
+        // Coherence: the `impl` is in the package of the trait or of the type.
+        let impl_module = self.scopes.item_module(
+            ast.list(ast.root)
+                .iter()
+                .copied()
+                .find(|&i| ast.item(i).span == info.span)
+                .expect("the impl's item"),
+        );
+        let package = ast.module(impl_module).package;
+        let trait_package = ast.module(self.scopes.item_module(trait_info.item)).package;
+        let type_package = self.struct_of(info.self_ty).and_then(|s| {
+            let template = self.t.types.structs[s.index()].template.unwrap_or(s);
+            let item = self
+                .item_structs
+                .iter()
+                .position(|&id| id == Some(template))?;
+            Some(
+                ast.module(self.scopes.item_module(ItemId::from_index(item)))
+                    .package,
+            )
+        });
+        if package != trait_package && type_package != Some(package) {
+            let message = format!(
+                "an `impl` of `{trait_name}` for {shown} must be in the package of `{trait_name}` or of the type"
+            );
+            self.error(info.span, message).help =
+                Some("so two packages can never give the same one".into());
+        }
+        // No two `impl`s of the trait, with the same arguments, for the same type.
+        for earlier in 0..index {
+            let other = &self.t.impls[earlier];
+            if other.trait_id != info.trait_id {
+                continue;
+            }
+            let mut params = info.generics.clone();
+            params.extend(&other.generics);
+            let types = &self.t.types;
+            let one_way = |a: &ImplInfo, b: &ImplInfo| {
+                let mut found = vec![None; params.len()];
+                types.match_params(a.self_ty, b.self_ty, &params, &mut found)
+                    && a.trait_args.len() == b.trait_args.len()
+                    && a.trait_args
+                        .iter()
+                        .zip(&b.trait_args)
+                        .all(|(&p, &t)| types.match_params(p, t, &params, &mut found))
+            };
+            let overlap = one_way(other, &info) || one_way(&info, other);
+            if overlap {
+                let trait_name = self.trait_text(info.trait_id, &info.trait_args);
+                let message = format!("`{trait_name}` is implemented for {shown} twice");
+                let span = other.span;
+                self.error(info.span, message)
+                    .labels
+                    .push((span, "first here".into()));
             }
         }
     }
 
-    /// The type the alias `name` names, if there is one (`spec/types.md` §2).
-    fn alias_type(&mut self, name: Symbol) -> Option<Ty> {
-        if let Some(&ty) = self.alias_types.get(&name) {
+    /// Checks that the `impl` function `g` has the signature of the trait function `f`
+    /// for the `impl`'s type, and makes it reversible if `f` is declared so.
+    fn check_impl_fn(&mut self, f: FnId, g: FnId, info: &ImplInfo, trait_name: &str) {
+        let trait_sig = self.t.fns[f.index()].sig.clone();
+        let impl_sig = self.t.fns[g.index()].sig.clone();
+        let trait_generics = self.t.fns[f.index()].generics.clone();
+        let impl_generics = self.t.fns[g.index()].generics.clone();
+        // `Self` and the trait's arguments, then the trait function's own parameters, for
+        // the `impl`'s.
+        let own = &impl_generics[info.generics.len()..];
+        let span = self.ast.function(g).name_span;
+        let name = self.name(self.ast.function(f).name).to_string();
+        let before = 1 + info.trait_args.len();
+        if own.len() + before != trait_generics.len() {
+            let wanted = trait_generics.len().saturating_sub(before);
+            let message = format!(
+                "`{name}` takes {wanted} type parameter{} in `{trait_name}`",
+                if wanted == 1 { "" } else { "s" }
+            );
+            self.error(span, message);
+            return;
+        }
+        let mut to = vec![info.self_ty];
+        to.extend_from_slice(&info.trait_args);
+        to.extend_from_slice(own);
+        let impls = std::slice::from_ref(info);
+        let types = &mut self.t.types;
+        let want_params: Vec<Ty> = trait_sig
+            .params
+            .iter()
+            .map(|&t| {
+                let t = types.subst(t, &trait_generics, &to);
+                normalize(impls, types, t)
+            })
+            .collect();
+        let want_ret = types.subst(trait_sig.ret, &trait_generics, &to);
+        let want_ret = normalize(impls, types, want_ret);
+        if trait_sig.receiver != impl_sig.receiver
+            || want_params != impl_sig.params
+            || want_ret != impl_sig.ret
+        {
+            let message = format!("`{name}` has a different signature than in `{trait_name}`");
+            self.error(span, message);
+        }
+        if trait_sig.reversible == Reversible::Yes {
+            self.t.fns[g.index()].sig.reversible = Reversible::Yes;
+        }
+        // An `impl` function cannot borrow from sources the trait's signature does not allow.
+        if let Some(allowed) = self.t.fns[f.index()].return_borrows.clone() {
+            match &self.t.fns[g.index()].return_borrows {
+                None => self.t.fns[g.index()].return_borrows = Some(allowed),
+                Some(actual) => {
+                    let ok = actual.iter().all(|s| {
+                        allowed
+                            .iter()
+                            .any(|a| a.root == s.root && s.fields.starts_with(&a.fields))
+                    });
+                    if !ok {
+                        let message = format!(
+                            "`{name}` borrows from a parameter that `{trait_name}` does not allow"
+                        );
+                        self.error(span, message);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Makes the type and size parameters of `generics`, written in the current module.
+    fn generic_params(&mut self, generics: Generics) -> Vec<(Symbol, Ty)> {
+        let (params, typed, _) = self.declare_generic_params(generics, false);
+        self.resolve_generic_bounds(generics, &params, typed);
+        params
+    }
+
+    /// Creates the type and size parameter `Ty`s for `generics`, without resolving trait
+    /// bounds yet. Returns the parameters, each type parameter with its bound lists, and each
+    /// parameter's raw default (if any) and span.
+    fn declare_generic_params(
+        &mut self,
+        generics: Generics,
+        allow_defaults: bool,
+    ) -> DeclaredParams {
+        let ast = self.ast;
+        let is_copy = |bound: &Bound| {
+            matches!(ast.list(bound.path), [n] if ast.name(*n) == "Copy") && bound.args.is_empty()
+        };
+        let mut params = Vec::new();
+        let mut typed = Vec::new();
+        let mut defaults = Vec::new();
+        for param in ast.list(generics.params) {
+            if params.iter().any(|&(n, _)| n == param.name) {
+                let message = format!(
+                    "the parameter `{}` is declared twice",
+                    self.name(param.name)
+                );
+                self.error(param.span, message);
+                continue;
+            }
+            match param.kind {
+                GenericKind::Size { ty, default } => {
+                    if default.is_some() && !allow_defaults {
+                        self.error(param.span, "defaults are only allowed on trait parameters");
+                    }
+                    if self.resolve_type(ty) != Ty::INT {
+                        let span = ast.ty(ty).span;
+                        self.error(span, "a size parameter is an `Int`: `const N: Int`");
+                    }
+                    for pred in ast.list(generics.wheres) {
+                        if pred.name == param.name {
+                            let message = format!(
+                                "`{}` is a size, which takes no bounds",
+                                self.name(pred.name)
+                            );
+                            self.error(pred.span, message);
+                        }
+                    }
+                    params.push((param.name, self.t.types.size_param(param.name)));
+                    defaults.push((default, param.span));
+                }
+                GenericKind::Type { bounds, default } => {
+                    if default.is_some() && !allow_defaults {
+                        self.error(param.span, "defaults are only allowed on trait parameters");
+                    }
+                    let mut lists = vec![bounds];
+                    lists.extend(
+                        ast.list(generics.wheres)
+                            .iter()
+                            .filter(|pred| pred.name == param.name)
+                            .map(|pred| pred.bounds),
+                    );
+                    let copy = lists.iter().any(|&l| ast.list(l).iter().any(is_copy));
+                    let ty = self.t.types.param(param.name, copy);
+                    params.push((param.name, ty));
+                    typed.push((ty, lists));
+                    defaults.push((default, param.span));
+                }
+            }
+        }
+        (params, typed, defaults)
+    }
+
+    /// Resolves trait bounds and `where` clauses for parameters created by
+    /// [`Checker::declare_generic_params`].
+    fn resolve_generic_bounds(
+        &mut self,
+        generics: Generics,
+        params: &[(Symbol, Ty)],
+        typed: Vec<(Ty, Vec<List<Bound>>)>,
+    ) {
+        let ast = self.ast;
+        let is_copy = |bound: &Bound| {
+            matches!(ast.list(bound.path), [n] if ast.name(*n) == "Copy") && bound.args.is_empty()
+        };
+        let outer = self.type_params.len();
+        self.type_params.extend(params.iter().copied());
+        for (ty, lists) in typed {
+            let mut traits = Vec::new();
+            for &list in &lists {
+                for bound in ast.list(list) {
+                    if is_copy(bound) {
+                        continue;
+                    }
+                    let Some((trait_id, args)) = self.bound_trait(bound, ty) else {
+                        continue;
+                    };
+                    // `T: Measure<Result = Bit>`: the associated types the bound fixes.
+                    for (name, fixed) in self.bound_assoc(bound, trait_id) {
+                        self.param_assoc
+                            .insert((ty, trait_id, args.clone(), name), fixed);
+                    }
+                    traits.push((trait_id, args));
+                }
+            }
+            if !traits.is_empty() {
+                self.param_bounds.insert(ty, traits);
+            }
+        }
+        self.type_params.truncate(outer);
+        for pred in ast.list(generics.wheres) {
+            if !ast
+                .list(generics.params)
+                .iter()
+                .any(|p| p.name == pred.name)
+            {
+                let message = format!("`{}` is not a type parameter here", self.name(pred.name));
+                self.error(pred.span, message);
+            }
+        }
+    }
+
+    /// A trait of the prelude named `name`: one in the standard library's root module, such
+    /// as `Measure`.
+    fn prelude_trait(&self, name: Symbol) -> Option<Found> {
+        let std = self.ast.std_package()?;
+        let root = self.ast.package(std).root;
+        self.scopes.qualified(self.module, root, name, Ns::Type)
+    }
+
+    /// The trait `name` names in the module `at`, or here, without reporting anything.
+    fn trait_at(&self, at: Option<ModuleId>, name: Symbol) -> Option<TraitId> {
+        let found = match at {
+            None => self
+                .scopes
+                .lexical(self.module, name, Ns::Type)
+                .or_else(|| self.prelude_trait(name)),
+            Some(module) => self.scopes.qualified(self.module, module, name, Ns::Type),
+        }?;
+        match found {
+            Found::Entry(Entry {
+                binding: Binding::Item(item),
+                ..
+            }) => self.item_traits.get(&item).copied(),
+            _ => None,
+        }
+    }
+
+    /// Resolves associated types in `ty` that are known: through an `impl`, a bound that
+    /// fixes one (`T: Measure<Result = Bit>`), or an `impl` being collected.
+    fn resolve_assoc(&mut self, ty: Ty) -> Ty {
+        let ty = normalize(&self.t.impls, &mut self.t.types, ty);
+        let TyKind::Assoc {
+            base,
+            trait_index,
+            ref args,
+            name,
+            ..
+        } = *self.t.types.kind(ty)
+        else {
+            return ty;
+        };
+        let key = (base, TraitId(trait_index), args.to_vec(), name);
+        if let Some(&fixed) = self.param_assoc.get(&key) {
+            return fixed;
+        }
+        // The latest first: in an `impl`'s own signatures, `Self::Output` is its own.
+        let found = self
+            .impl_assoc
+            .iter()
+            .rev()
+            .find_map(|(self_ty, t, a, assoc)| {
+                (*self_ty == base && t.0 == trait_index && *a == key.2)
+                    .then(|| assoc.iter().find(|(n, _)| *n == name).map(|&(_, t)| t))
+                    .flatten()
+            });
+        found.unwrap_or(ty)
+    }
+
+    /// The associated type `name` of `base`, through the traits it implements. For a generic
+    /// trait, the arguments are those of `base`'s bound, of the `impl` being collected, or of
+    /// `base`'s only `impl`s of it.
+    fn assoc_type(&mut self, base: Ty, name: Symbol, span: Span) -> Ty {
+        let found = (0..self.t.traits.len())
+            .map(|t| TraitId(t as u32))
+            .filter(|&t| self.implements(base, t, None))
+            .find_map(|t| {
+                let &(_, copy) = self.t.traits[t.index()]
+                    .assoc
+                    .iter()
+                    .find(|(n, _)| *n == name)?;
+                Some((t, copy))
+            });
+        let Some((trait_id, copy)) = found else {
+            let message = format!(
+                "{} has no associated type `{}`",
+                self.show(base),
+                self.name(name)
+            );
+            self.error(span, message);
+            return Ty::ERROR;
+        };
+        let args = match self.assoc_args(base, trait_id) {
+            Ok(args) => args,
+            Err(()) => {
+                let message = format!(
+                    "{} implements `{}` with several arguments, so `{}::{}` could be several types",
+                    self.show(base),
+                    self.name(self.t.traits[trait_id.index()].name),
+                    self.show(base).trim_matches('`'),
+                    self.name(name)
+                );
+                self.error(span, message).help =
+                    Some("name it through a bound that gives the arguments".into());
+                return Ty::ERROR;
+            }
+        };
+        let ty = self.t.types.intern(TyKind::Assoc {
+            base,
+            trait_index: trait_id.0,
+            args: args.into(),
+            name,
+            copy,
+        });
+        self.resolve_assoc(ty)
+    }
+
+    /// The arguments of `trait_id` that `base` implements it with, when that is one list: an
+    /// error when there are several.
+    fn assoc_args(&mut self, base: Ty, trait_id: TraitId) -> Result<Vec<Ty>, ()> {
+        if self.t.traits[trait_id.index()].params.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some((_, _, args, _)) = self
+            .impl_assoc
+            .iter()
+            .rev()
+            .find(|(t, id, ..)| *t == base && *id == trait_id)
+        {
+            return Ok(args.clone());
+        }
+        let mut lists: Vec<Vec<Ty>> = self
+            .param_bounds
+            .get(&base)
+            .into_iter()
+            .flatten()
+            .filter(|(t, _)| *t == trait_id)
+            .map(|(_, args)| args.clone())
+            .collect();
+        for index in 0..self.t.impls.len() {
+            let i = &self.t.impls[index];
+            if i.trait_id != trait_id {
+                continue;
+            }
+            let Some(found) = i.matches(&self.t.types, base, None) else {
+                continue;
+            };
+            let Some(to) = found.into_iter().collect::<Option<Vec<Ty>>>() else {
+                continue;
+            };
+            let (from, pattern) = (i.generics.clone(), i.trait_args.clone());
+            let args: Vec<Ty> = pattern
+                .iter()
+                .map(|&a| self.t.types.subst(a, &from, &to))
+                .collect();
+            if !lists.contains(&args) {
+                lists.push(args);
+            }
+        }
+        lists.dedup();
+        match lists.len() {
+            1 => Ok(lists.pop().expect("one")),
+            _ => Err(()),
+        }
+    }
+
+    /// Whether `ty` implements `trait_id`, with the arguments `args` if given (any if not):
+    /// a type parameter bound by it, or a type with an `impl` of it.
+    fn implements(&self, ty: Ty, trait_id: TraitId, args: Option<&[Ty]>) -> bool {
+        let types = &self.t.types;
+        if types.is_wildcard(ty) {
+            return true;
+        }
+        if types.as_param(ty).is_some() {
+            let inferred = args.is_none_or(<[Ty]>::is_empty)
+                && self
+                    .inferred
+                    .get(&ty)
+                    .is_some_and(|b| b.iter().any(|&(t, _)| t == trait_id));
+            return inferred
+                || self.param_bounds.get(&ty).is_some_and(|bounds| {
+                    bounds.iter().any(|(t, given)| {
+                        *t == trait_id
+                            && args.is_none_or(|args| {
+                                args.len() == given.len()
+                                    && args
+                                        .iter()
+                                        .zip(given)
+                                        .all(|(&a, &g)| a == g || types.is_wildcard(a))
+                            })
+                    })
+                });
+        }
+        // Built-in types implement `std::ops` by their built-in operators.
+        if types.builtin_op(trait_id.0, ty, args).is_some() {
+            return true;
+        }
+        if Some(trait_id.0) == types.measure {
+            if types.is_measurable(ty) {
+                return true;
+            }
+            // Tuples and arrays measure element by element.
+            match types.kind(ty) {
+                TyKind::Tuple(elems) => {
+                    return !elems.is_empty()
+                        && elems.iter().all(|&e| self.implements(e, trait_id, args));
+                }
+                &TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _) => {
+                    return self.implements(elem, trait_id, args);
+                }
+                _ => {}
+            }
+        }
+        // An `impl` for a generic type matches instances whose arguments are parameters too.
+        self.t
+            .impls
+            .iter()
+            .any(|i| i.trait_id == trait_id && i.matches(types, ty, args).is_some())
+    }
+
+    /// The arguments with which `ty` implements `trait_id`, when there is exactly one list
+    /// of them: from its bounds, or its `impl`s. `None` if there are none or several, or an
+    /// `impl` leaves one open.
+    fn only_trait_args(&mut self, ty: Ty, trait_id: TraitId) -> Option<Vec<Ty>> {
+        let mut lists: Vec<Vec<Ty>> = Vec::new();
+        if self.t.types.as_param(ty).is_some() {
+            for (t, args) in self.param_bounds.get(&ty).into_iter().flatten() {
+                if *t == trait_id && !lists.contains(args) {
+                    lists.push(args.clone());
+                }
+            }
+        } else {
+            for i in 0..self.t.impls.len() {
+                let info = &self.t.impls[i];
+                if info.trait_id != trait_id {
+                    continue;
+                }
+                let Some(found) = info.matches(&self.t.types, ty, None) else {
+                    continue;
+                };
+                let found: Vec<Ty> = found.into_iter().collect::<Option<_>>()?;
+                let (from, args) = (info.generics.clone(), info.trait_args.clone());
+                let args: Vec<Ty> = args
+                    .iter()
+                    .map(|&a| self.t.types.subst(a, &from, &found))
+                    .collect();
+                if !lists.contains(&args) {
+                    lists.push(args);
+                }
+            }
+        }
+        match <[Vec<Ty>; 1]>::try_from(lists) {
+            Ok([only]) => Some(only),
+            Err(_) => None,
+        }
+    }
+
+    /// The type the alias `item` names, if it is one (`spec/types.md` §2).
+    fn alias_type(&mut self, item: ItemId) -> Option<Ty> {
+        if let Some(&ty) = self.alias_types.get(&item) {
             return Some(ty);
         }
-        let &(id, span) = self.aliases.get(&name)?;
-        if self.resolving_aliases.contains(&name) {
+        let &(id, span) = self.aliases.get(&item)?;
+        if self.resolving_aliases.contains(&item) {
+            let ItemKind::Type { name, .. } = self.ast.item(item).kind else {
+                unreachable!("an alias")
+            };
             let message = format!("the alias `{}` names itself", self.name(name));
             self.error(span, message).help = Some(
                 "an alias names another type; for a type that holds itself, use an enum".into(),
             );
-            self.alias_types.insert(name, Ty::ERROR);
+            self.alias_types.insert(item, Ty::ERROR);
             return Some(Ty::ERROR);
         }
-        self.resolving_aliases.push(name);
+        // The alias's type is written in its own module.
+        let module = std::mem::replace(&mut self.module, self.scopes.item_module(item));
+        self.resolving_aliases.push(item);
         let ty = self.resolve_type(id);
         self.resolving_aliases.pop();
+        self.module = module;
         // A cycle through this alias was reported where it closed.
-        let ty = *self.alias_types.entry(name).or_insert(ty);
+        let ty = *self.alias_types.entry(item).or_insert(ty);
         Some(ty)
+    }
+
+    /// The type parameters in scope in `f`'s body, by name.
+    fn fn_type_params(&self, f: FnId) -> Vec<(Symbol, Ty)> {
+        let generics = &self.t.fns[f.index()].generics;
+        generics
+            .iter()
+            .map(|&t| {
+                let p = self.t.types.as_param(t).expect("a type parameter");
+                (self.t.types.params[p.index()].name, t)
+            })
+            .collect()
     }
 
     /// `main` takes no parameters and returns `()` (`spec/execution.md` §6).
@@ -527,35 +1869,640 @@ impl Checker<'_> {
         }
     }
 
-    fn collect_fn(&mut self, f: FnId, owner: Option<StructId>) {
+    /// Resolves `f`'s signature. A method of `owner` sees its struct's type parameters; a
+    /// trait's or an `impl`'s function sees `prefix` first, and `Self` is `self_ty`.
+    fn collect_fn(
+        &mut self,
+        f: FnId,
+        owner: Option<StructId>,
+        prefix: Vec<(Symbol, Ty)>,
+        self_ty: Option<Ty>,
+    ) {
         let decl = *self.ast.function(f);
+        let outer = std::mem::take(&mut self.type_params);
+        let outer_self = self.self_ty;
+        if self_ty.is_some() {
+            self.self_ty = self_ty;
+        }
+        let mut scope = owner
+            .and_then(|o| self.struct_params.get(&o).cloned())
+            .unwrap_or_default();
+        scope.extend(prefix);
+        self.type_params = scope;
+        let own = self.generic_params(decl.generics);
+        // A function's own type parameters with no bounds written have them inferred, unless
+        // the function is a trait's or an `impl`'s, or other packages can call it.
+        let package = self.ast.module(self.module).package;
+        let exported = decl.vis == Vis::Pub && (package.index() != 0 || self.library);
+        if self_ty.is_none() && !exported {
+            let ast = self.ast;
+            for &(name, ty) in &own {
+                let written = ast.list(decl.generics.params).iter().any(|p| {
+                    p.name == name
+                        && matches!(p.kind, GenericKind::Type { bounds, .. } if !bounds.is_empty())
+                }) || ast
+                    .list(decl.generics.wheres)
+                    .iter()
+                    .any(|w| w.name == name);
+                if !self.t.types.is_size(ty) && !written {
+                    self.t.inferable.insert(ty, f);
+                }
+            }
+        }
+        self.type_params.extend(own);
         let params = self
             .ast
             .list(decl.params)
             .iter()
             .map(|p| self.resolve_type(p.ty))
             .collect();
+        self.return_borrows = Some(Vec::new());
         let ret = decl.ret.map_or(Ty::UNIT, |ty| self.resolve_type(ty));
-        if decl.receiver.is_some() && owner.is_none() {
+        let raw_borrows = self.return_borrows.take().unwrap_or_default();
+        self.pending_borrows.push((f, raw_borrows));
+        if decl.receiver.is_some() && owner.is_none() && self_ty.is_none() {
             let span = decl.receiver.map_or(decl.name_span, |r| r.span);
             self.error(
                 span,
                 "`self` is only allowed in methods inside a struct or enum",
             );
         }
+        let generics = self.type_params.iter().map(|&(_, t)| t).collect();
+        self.type_params = outer;
+        self.self_ty = outer_self;
+        // Generic code cannot see an `impl`'s body, so a trait's function is reversible only
+        // if declared so.
+        let in_trait = self.t.fn_traits.contains_key(&f);
         let info = &mut self.t.fns[f.index()];
         info.owner = owner;
+        info.generics = generics;
+        info.self_ty = self_ty;
         info.sig = Sig {
             receiver: decl.receiver.map(|r| r.kind),
             params,
             ret,
-            is_unsafe: decl.is_unsafe,
-            reversible: if decl.is_rev {
+            is_unsafe: decl.is_unsafe || decl.extern_kind == ExternKind::CImport,
+            reversible: if decl.is_foreign_import() {
+                Reversible::No
+            } else if decl.is_rev {
                 Reversible::Yes
+            } else if in_trait {
+                Reversible::No
             } else {
                 Reversible::Infer
             },
         };
+    }
+
+    /// Checks `extern` host functions, `extern "C"` imports/exports, and `extern "C" struct`
+    /// definitions (`spec/interop.md` §1–4).
+    fn check_extern_fns(&mut self) {
+        self.check_extern_c_structs();
+        let count = self.ast.all_fns().len();
+        for index in 0..count {
+            let f = FnId::from_index(index);
+            let decl = *self.ast.function(f);
+            if decl.test != noev_syntax::ast::TestKind::None {
+                if decl.is_foreign_import() || decl.extern_kind != ExternKind::None {
+                    self.error(decl.name_span, "a `test fn` cannot be `extern`");
+                }
+                if decl.is_rev {
+                    self.error(decl.name_span, "a `test fn` cannot be `rev`");
+                }
+                if !self.t.fns[index].generics.is_empty() {
+                    self.error(decl.name_span, "a `test fn` cannot have generic parameters");
+                }
+                if !self.t.fns[index].sig.params.is_empty() {
+                    self.error(decl.name_span, "a `test fn` cannot take parameters");
+                }
+                if self.t.fns[index].sig.ret != Ty::UNIT && self.t.fns[index].sig.ret != Ty::ERROR {
+                    self.error(decl.name_span, "a `test fn` must return `()`");
+                }
+            }
+            match decl.extern_kind {
+                ExternKind::None => continue,
+                ExternKind::Host => {
+                    if decl.is_rev {
+                        self.error(
+                            decl.name_span,
+                            "an `extern fn` cannot be `rev` (foreign calls are not reversible)",
+                        );
+                    }
+                    if decl.is_unsafe {
+                        self.error(
+                            decl.name_span,
+                            "a host `extern fn` is safe and does not take `unsafe`",
+                        );
+                    }
+                    if decl.is_circuit {
+                        self.error(decl.name_span, "an `extern fn` cannot be `circuit fn`");
+                    }
+                    if !self.t.fns[index].generics.is_empty() {
+                        self.error(
+                            decl.name_span,
+                            "an `extern fn` cannot have generic parameters",
+                        );
+                        continue;
+                    }
+                    let params = self.t.fns[index].sig.params.clone();
+                    let ret = self.t.fns[index].sig.ret;
+                    let param_spans: Vec<Span> = self
+                        .ast
+                        .list(decl.params)
+                        .iter()
+                        .map(|p| self.ast.ty(p.ty).span)
+                        .collect();
+                    for (ty, span) in params.into_iter().zip(param_spans) {
+                        self.check_extern_boundary_ty(ty, span, "parameter");
+                    }
+                    if let Some(ret_expr) = decl.ret {
+                        let span = self.ast.ty(ret_expr).span;
+                        self.check_extern_boundary_ty(ret, span, "return type");
+                    }
+                }
+                ExternKind::CImport | ExternKind::CExport => {
+                    let label = if decl.extern_kind == ExternKind::CImport {
+                        "an `extern \"C\"` import"
+                    } else {
+                        "an `extern \"C\" fn`"
+                    };
+                    if decl.is_rev {
+                        self.error(decl.name_span, format!("{label} cannot be `rev`"));
+                    }
+                    if decl.extern_kind == ExternKind::CImport && decl.is_unsafe {
+                        self.error(
+                            decl.name_span,
+                            "an `extern \"C\"` import is implicitly unsafe and does not take `unsafe`",
+                        );
+                    }
+                    if decl.is_circuit {
+                        self.error(decl.name_span, format!("{label} cannot be `circuit fn`"));
+                    }
+                    if !self.t.fns[index].generics.is_empty() {
+                        self.error(
+                            decl.name_span,
+                            format!("{label} cannot have generic parameters"),
+                        );
+                        continue;
+                    }
+                    let params = self.t.fns[index].sig.params.clone();
+                    let ret = self.t.fns[index].sig.ret;
+                    let param_spans: Vec<Span> = self
+                        .ast
+                        .list(decl.params)
+                        .iter()
+                        .map(|p| self.ast.ty(p.ty).span)
+                        .collect();
+                    for (ty, span) in params.into_iter().zip(param_spans) {
+                        self.check_c_param_ty(ty, span);
+                    }
+                    if let Some(ret_expr) = decl.ret {
+                        let span = self.ast.ty(ret_expr).span;
+                        self.check_c_ret_ty(ret, span);
+                    }
+                }
+            }
+        }
+    }
+
+    fn check_extern_c_structs(&mut self) {
+        let items = self.ast.list(self.ast.root).to_vec();
+        for item_id in items {
+            let ItemKind::Struct {
+                name_span,
+                fields,
+                is_extern_c: true,
+                ..
+            } = self.ast.item(item_id).kind
+            else {
+                continue;
+            };
+            let Some(id) = self.item_structs[item_id.index()] else {
+                continue;
+            };
+            if !self.t.types.structs[id.index()].args.is_empty() {
+                self.error(
+                    name_span,
+                    "an `extern \"C\" struct` cannot have generic parameters",
+                );
+                continue;
+            }
+            let field_tys: Vec<Ty> = self.t.types.structs[id.index()]
+                .fields
+                .iter()
+                .map(|&(_, t)| t)
+                .collect();
+            let field_spans: Vec<Span> = self
+                .ast
+                .list(fields)
+                .iter()
+                .map(|f| self.ast.ty(f.ty).span)
+                .collect();
+            for (ty, span) in field_tys.into_iter().zip(field_spans) {
+                if !self.is_c_field_ty(ty, 0) {
+                    let shown = self.show(ty);
+                    self.error(
+                        span,
+                        format!("an `extern \"C\" struct` field cannot have type `{shown}`"),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Whether `ty` is a valid C value type inside an `extern "C" struct` or array element
+    /// (`spec/interop.md` §3): numbers, `Bool`, `Bit`, `extern "C" struct`, `extern "C" fn`,
+    /// or arrays of these.
+    fn is_c_field_ty(&self, ty: Ty, depth: usize) -> bool {
+        if depth > 64 || ty == Ty::ERROR {
+            return true;
+        }
+        match self.t.types.kind(ty) {
+            TyKind::Int
+            | TyKind::Float
+            | TyKind::F32
+            | TyKind::I8
+            | TyKind::I16
+            | TyKind::I32
+            | TyKind::I64
+            | TyKind::U8
+            | TyKind::U16
+            | TyKind::U32
+            | TyKind::U64
+            | TyKind::Bool
+            | TyKind::Bit => true,
+            TyKind::Array(elem, _) => self.is_c_field_ty(*elem, depth + 1),
+            TyKind::Struct(id) => {
+                let def = &self.t.types.structs[id.index()];
+                def.is_extern_c && def.variants.is_none()
+            }
+            TyKind::ExternCFn { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Whether `ty` can be passed or returned by value across the C ABI (same as
+    /// `is_c_field_ty` except arrays cannot cross by value — only by `ref`/`mut`).
+    fn is_c_by_value_ty(&self, ty: Ty) -> bool {
+        if ty == Ty::ERROR {
+            return true;
+        }
+        if matches!(self.t.types.kind(ty), TyKind::Array(..)) {
+            return false;
+        }
+        self.is_c_field_ty(ty, 0)
+    }
+
+    fn check_c_param_ty(&mut self, ty: Ty, span: Span) {
+        if ty == Ty::ERROR {
+            return;
+        }
+        if let TyKind::Ref { inner, .. } = *self.t.types.kind(ty) {
+            match *self.t.types.kind(inner) {
+                TyKind::Array(elem, _) if self.is_c_field_ty(elem, 0) => return,
+                TyKind::Struct(id)
+                    if self.t.types.structs[id.index()].is_extern_c
+                        && self.t.types.structs[id.index()].variants.is_none() =>
+                {
+                    return;
+                }
+                _ => {}
+            }
+        } else if self.is_c_by_value_ty(ty) {
+            return;
+        }
+        let shown = self.show(ty);
+        self.error(
+            span,
+            format!("`{shown}` cannot be passed across an `extern \"C\"` boundary"),
+        );
+    }
+
+    fn check_c_ret_ty(&mut self, ty: Ty, span: Span) {
+        if ty == Ty::ERROR || ty == Ty::UNIT || self.is_c_by_value_ty(ty) {
+            return;
+        }
+        let shown = self.show(ty);
+        self.error(
+            span,
+            format!("`{shown}` cannot be returned across an `extern \"C\"` boundary"),
+        );
+    }
+
+    fn check_extern_boundary_ty(&mut self, ty: Ty, span: Span, role: &str) {
+        if ty == Ty::ERROR {
+            return;
+        }
+        if self.t.types.has_ref(ty) {
+            let shown = self.show(ty);
+            self.error(
+                span,
+                format!("an `extern fn` {role} cannot hold a reference (found `{shown}`)"),
+            );
+        } else if self.t.types.linearity(ty) != Kind::Copyable {
+            let shown = self.show(ty);
+            self.error(
+                span,
+                format!("an `extern fn` {role} must be classical and copyable (found `{shown}`)"),
+            );
+        }
+    }
+
+    /// Resolves return-type borrow annotations (`ref[a, b] T`, `Window[r]`, `mut[self.s] T`)
+    /// and applies elision for library `pub` and trait functions (`spec/ownership.md` §5).
+    /// Runs after all struct fields and generic instances are filled so `has_ref` is exact.
+    fn resolve_all_fn_borrows(&mut self) {
+        let pending = std::mem::take(&mut self.pending_borrows);
+        for (f, raw) in pending {
+            let decl = self.ast.function(f);
+            let fn_name = self.name(decl.name).to_string();
+            let info = &self.t.fns[f.index()];
+            let ret = info.sig.ret;
+            let params = info.sig.params.clone();
+            let self_base = info
+                .self_ty
+                .or_else(|| info.owner.map(|s| self.t.types.struct_ty(s)));
+            let receiver_can_borrow = decl.receiver.is_some_and(|r| {
+                r.kind != OwnKind::Mv || self_base.is_some_and(|t| self.t.types.has_ref(t))
+            });
+
+            if !raw.is_empty() {
+                let mut resolved = Vec::new();
+                for (ty, list, span) in raw {
+                    if !self.t.types.is_wildcard(ty) && !self.t.types.has_ref(ty) {
+                        let message = format!(
+                            "{} does not hold a reference, so it cannot have a borrow annotation",
+                            self.show(ty)
+                        );
+                        self.error(span, message);
+                        continue;
+                    }
+                    for &place in self.ast.list(list) {
+                        let root_name = self.name(place.root);
+                        let (root, mut cur_ty) = if root_name == "self" {
+                            if decl.receiver.is_none() {
+                                self.error(
+                                    place.span,
+                                    format!("`self` is not a parameter of `{fn_name}`"),
+                                );
+                                continue;
+                            }
+                            if !receiver_can_borrow {
+                                self.error(
+                                    place.span,
+                                    "`self` is taken by value and holds no reference, so the return value cannot borrow from it",
+                                );
+                                continue;
+                            }
+                            (BorrowRoot::Receiver, self_base.unwrap_or(Ty::ERROR))
+                        } else if let Some(idx) = self
+                            .ast
+                            .list(decl.params)
+                            .iter()
+                            .position(|p| p.name == place.root)
+                        {
+                            let param_ty = params[idx];
+                            if !self.t.types.is_wildcard(param_ty)
+                                && !self.t.types.has_ref(param_ty)
+                            {
+                                let message = format!(
+                                    "`{root_name}` holds no reference, so the return value cannot borrow from it"
+                                );
+                                self.error(place.span, message);
+                                continue;
+                            }
+                            (BorrowRoot::Param(idx), param_ty)
+                        } else {
+                            let message =
+                                format!("`{root_name}` is not a parameter of `{fn_name}`");
+                            self.error(place.span, message);
+                            continue;
+                        };
+
+                        let mut fields = Vec::new();
+                        let mut ok = true;
+                        for &field_sym in self.ast.list(place.fields) {
+                            cur_ty = self.t.types.deref(cur_ty);
+                            if let TyKind::Struct(s) = *self.t.types.kind(cur_ty)
+                                && self.t.types.structs[s.index()].variants.is_none()
+                                && let Some((idx, &(_, fty))) = self.t.types.structs[s.index()]
+                                    .fields
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(_, (n, _))| *n == field_sym)
+                            {
+                                fields.push(idx as u32);
+                                cur_ty = fty;
+                            } else if !self.t.types.is_wildcard(cur_ty) {
+                                let message = format!(
+                                    "{} has no field `{}`",
+                                    self.show(cur_ty),
+                                    self.name(field_sym)
+                                );
+                                self.error(place.span, message);
+                                ok = false;
+                                break;
+                            } else {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if ok {
+                            let src = BorrowSource { root, fields };
+                            if !resolved.contains(&src) {
+                                resolved.push(src);
+                            }
+                        }
+                    }
+                }
+                self.t.fns[f.index()].return_borrows = Some(resolved);
+            } else if self.t.types.has_ref(ret) {
+                let package = self.ast.module(self.t.fn_modules[f.index()]).package;
+                let in_trait = self.t.fn_traits.contains_key(&f);
+                let exported = decl.vis == Vis::Pub && (package.index() != 0 || self.library);
+                if exported || in_trait || decl.body.is_none() {
+                    let sources = if receiver_can_borrow {
+                        vec![BorrowSource {
+                            root: BorrowRoot::Receiver,
+                            fields: Vec::new(),
+                        }]
+                    } else {
+                        let candidates: Vec<usize> = params
+                            .iter()
+                            .enumerate()
+                            .filter(|&(_, &t)| self.t.types.has_ref(t))
+                            .map(|(i, _)| i)
+                            .collect();
+                        if candidates.len() == 1 {
+                            vec![BorrowSource {
+                                root: BorrowRoot::Param(candidates[0]),
+                                fields: Vec::new(),
+                            }]
+                        } else if candidates.is_empty() {
+                            if decl.body.is_none() {
+                                let span = decl.ret.map_or(decl.name_span, |t| self.ast.ty(t).span);
+                                self.error(
+                                    span,
+                                    format!(
+                                        "`{fn_name}` returns a reference, but no parameter holds one"
+                                    ),
+                                );
+                            }
+                            Vec::new()
+                        } else {
+                            let span = decl.ret.map_or(decl.name_span, |t| self.ast.ty(t).span);
+                            let message = format!(
+                                "`{fn_name}` returns a reference, and more than one parameter could be its source"
+                            );
+                            self.error(span, message).help = Some(
+                                "name which parameters it may borrow from, e.g. `ref[a, b] T`"
+                                    .into(),
+                            );
+                            candidates
+                                .into_iter()
+                                .map(|i| BorrowSource {
+                                    root: BorrowRoot::Param(i),
+                                    fields: Vec::new(),
+                                })
+                                .collect()
+                        }
+                    };
+                    self.t.fns[f.index()].return_borrows = Some(sources);
+                }
+            }
+        }
+    }
+
+    /// A type argument: a type, or a size (`4`, or a size parameter `N`).
+    fn resolve_type_arg(&mut self, id: TypeId) -> Ty {
+        let ast = self.ast;
+        match ast.ty(id).kind {
+            TypeKind::Size(n) => self.t.types.intern(TyKind::Size(n)),
+            TypeKind::SizeExpr(e) => self.size_expr(e).unwrap_or(Ty::ERROR),
+            TypeKind::Path(segments)
+                if let [name] = *ast.list(segments)
+                    && let Some(ty) = self.size_param(name) =>
+            {
+                ty
+            }
+            _ => self.resolve_type(id),
+        }
+    }
+
+    /// The size parameter `name` names here, if it names one.
+    /// The size an array's length `id` computes: numbers and size parameters joined with
+    /// `+`, and `*` with a number on one side (`spec/types.md` §6). Reports anything else.
+    fn size_expr(&mut self, id: ExprId) -> Option<Ty> {
+        let expr = *self.ast.expr(id);
+        let size = match expr.kind {
+            ExprKind::Int(n) => Some(self.t.types.intern(TyKind::Size(n))),
+            ExprKind::Name(name) => {
+                let found = match self.t.res[id.index()] {
+                    Res::Size(size) => Some(size),
+                    _ => self.size_param(name),
+                };
+                if found.is_none() {
+                    let message = format!(
+                        "cannot find the size `{0}`; declare it with `const {0}: Int`",
+                        self.name(name)
+                    );
+                    self.error(expr.span, message);
+                    return None;
+                }
+                found
+            }
+            ExprKind::Binary {
+                op: BinaryOp::Add,
+                lhs,
+                rhs,
+            } => {
+                let (a, b) = (self.size_expr(lhs)?, self.size_expr(rhs)?);
+                self.t.types.size_add(a, b)
+            }
+            ExprKind::Binary {
+                op: BinaryOp::Mul,
+                lhs,
+                rhs,
+            } => {
+                let (a, b) = (self.size_expr(lhs)?, self.size_expr(rhs)?);
+                let fixed = |t: Ty| match *self.t.types.kind(t) {
+                    TyKind::Size(k) => Some(k),
+                    _ => None,
+                };
+                match (fixed(a), fixed(b)) {
+                    (Some(k), _) => self.t.types.size_scale(k, b),
+                    (_, Some(k)) => self.t.types.size_scale(k, a),
+                    _ => {
+                        self.error(expr.span, "sizes can only be multiplied by a number")
+                            .help = Some("write `2 * N`, not `N * M`".into());
+                        return None;
+                    }
+                }
+            }
+            ExprKind::Binary {
+                op: BinaryOp::Sub,
+                lhs,
+                rhs,
+            } => {
+                let (a, b) = (self.size_expr(lhs)?, self.size_expr(rhs)?);
+                match self.t.types.size_sub(a, b) {
+                    Ok(size) => Some(size),
+                    Err(true) => {
+                        self.error(
+                            expr.span,
+                            "a size can only subtract a number, or sizes it adds",
+                        )
+                        .help = Some("such as `N - 1` or `N + M - M`, not `N - M`".into());
+                        return None;
+                    }
+                    Err(false) => {
+                        self.error(expr.span, "this size is negative");
+                        return None;
+                    }
+                }
+            }
+            _ => {
+                self.error(
+                    expr.span,
+                    "the length of an array must be a number, a size parameter, or a sum of them",
+                )
+                .help = Some("such as `4`, `N`, `N + 1` or `2 * N`".into());
+                return None;
+            }
+        };
+        if size.is_none() {
+            self.error(expr.span, "this size is too large");
+        }
+        size
+    }
+
+    fn size_param(&self, name: Symbol) -> Option<Ty> {
+        let &(_, ty) = self.type_params.iter().rev().find(|&&(n, _)| n == name)?;
+        self.t.types.is_size(ty).then_some(ty)
+    }
+
+    /// Reports each argument that is a size where its parameter is a type, or the reverse.
+    /// Returns whether there were none.
+    fn check_arg_kinds(&mut self, params: &[Ty], args: &[Ty], span: Span) -> bool {
+        let mut ok = true;
+        for (&p, &arg) in params.iter().zip(args) {
+            let types = &self.t.types;
+            if types.is_size(p) == types.is_size(arg) || types.is_wildcard(arg) {
+                continue;
+            }
+            let param = types.display(p, self.ast);
+            let message = if types.is_size(p) {
+                format!("`{param}` is a size, but {} is a type", self.show(arg))
+            } else {
+                format!(
+                    "`{param}` is a type, but `{}` is a size",
+                    types.display(arg, self.ast)
+                )
+            };
+            self.error(span, message);
+            ok = false;
+        }
+        ok
     }
 
     fn resolve_type(&mut self, id: TypeId) -> Ty {
@@ -564,9 +2511,38 @@ impl Checker<'_> {
         match node.kind {
             TypeKind::Error => Ty::ERROR,
             TypeKind::Unit => Ty::UNIT,
-            TypeKind::Ref { mutable, inner } => {
+            TypeKind::Ref {
+                mutable,
+                borrows,
+                inner,
+            } => {
                 let inner = self.resolve_type(inner);
-                self.t.types.reference(mutable, inner)
+                let ty = self.t.types.reference(mutable, inner);
+                if !borrows.is_empty() {
+                    if let Some(collected) = &mut self.return_borrows {
+                        collected.push((ty, borrows, node.span));
+                    } else {
+                        self.error(
+                            node.span,
+                            "borrow annotations are only allowed in function return types",
+                        );
+                    }
+                }
+                ty
+            }
+            TypeKind::Borrowed { inner, borrows } => {
+                let ty = self.resolve_type(inner);
+                if !borrows.is_empty() {
+                    if let Some(collected) = &mut self.return_borrows {
+                        collected.push((ty, borrows, node.span));
+                    } else {
+                        self.error(
+                            node.span,
+                            "borrow annotations are only allowed in function return types",
+                        );
+                    }
+                }
+                ty
             }
             TypeKind::Tuple(elems) => {
                 let elems: Box<[Ty]> = ast
@@ -578,20 +2554,53 @@ impl Checker<'_> {
             }
             TypeKind::Array { elem, len } => {
                 let elem = self.resolve_type(elem);
-                self.t.types.array(elem, len)
+                match len {
+                    Len::Int(len) => self.t.types.array(elem, len),
+                    Len::Expr(len) => match self.size_expr(len) {
+                        Some(len) => self.t.types.sized_array(elem, len),
+                        None => Ty::ERROR,
+                    },
+                    Len::Param(name) => match self.size_param(name) {
+                        Some(len) => self.t.types.sized_array(elem, len),
+                        None => {
+                            let message = format!(
+                                "cannot find the size `{0}`; declare it with `const {0}: Int`",
+                                self.name(name)
+                            );
+                            self.error(node.span, message);
+                            Ty::ERROR
+                        }
+                    },
+                }
+            }
+            TypeKind::Size(_) | TypeKind::SizeExpr(_) => {
+                self.error(node.span, "a size is not a type");
+                Ty::ERROR
+            }
+            TypeKind::ExternCFn { params, ret } => {
+                let params: Vec<Ty> = ast
+                    .list(params)
+                    .iter()
+                    .map(|&t| self.resolve_type(t))
+                    .collect();
+                let ret = ret.map_or(Ty::UNIT, |t| self.resolve_type(t));
+                self.t.types.extern_c_fn(params, ret)
             }
             TypeKind::Generic { path, args } => {
                 let args: Vec<Ty> = ast
                     .list(args)
                     .iter()
-                    .map(|&a| self.resolve_type(a))
+                    .map(|&a| self.resolve_type_arg(a))
                     .collect();
                 let name = self.path_text(path);
                 match (name.as_str(), args.as_slice()) {
                     ("Distribution", &[elem]) => {
-                        if !self.t.types.is_wildcard(elem) && !self.t.types.is_printable(elem) {
+                        if !self.t.types.is_wildcard(elem)
+                            && (self.t.types.linearity(elem) != Kind::Copyable
+                                || !self.t.types.is_printable(elem))
+                        {
                             let message = format!(
-                                "a `Distribution` holds classical values, but {} is not one",
+                                "a `Distribution` holds copyable classical values, but {} is not one",
                                 self.show(elem)
                             );
                             self.error(node.span, message);
@@ -601,6 +2610,41 @@ impl Checker<'_> {
                     ("Distribution", _) => {
                         self.error(node.span, "`Distribution` takes one type argument");
                         Ty::ERROR
+                    }
+                    ("Vec", &[elem]) => {
+                        if !self.t.types.is_wildcard(elem)
+                            && self.t.types.linearity(elem) == Kind::Linear
+                        {
+                            let message = format!(
+                                "a `Vec` holds classical values, not linear type {}",
+                                self.show(elem)
+                            );
+                            self.error(node.span, message);
+                        }
+                        self.t.types.vec_ty(elem)
+                    }
+                    ("Vec", _) => {
+                        self.error(node.span, "`Vec` takes one type argument");
+                        Ty::ERROR
+                    }
+                    _ if let Some(template) = self.generic_struct(path, node.span) => {
+                        let expected = self.t.types.structs[template.index()].args.len();
+                        if args.len() != expected {
+                            let message = format!(
+                                "`{name}` takes {expected} type argument{}, but {} {} given",
+                                if expected == 1 { "" } else { "s" },
+                                args.len(),
+                                if args.len() == 1 { "was" } else { "were" }
+                            );
+                            self.error(node.span, message);
+                            return Ty::ERROR;
+                        }
+                        let params = self.t.types.structs[template.index()].args.clone();
+                        if !self.check_arg_kinds(&params, &args, node.span) {
+                            return Ty::ERROR;
+                        }
+                        let id = self.t.types.instantiate(template, args);
+                        self.t.types.struct_ty(id)
                     }
                     ("Option", &[value]) => self.std_enum(vec![value]),
                     ("Result", &[value, error]) => self.std_enum(vec![value, error]),
@@ -622,25 +2666,33 @@ impl Checker<'_> {
                 }
             }
             TypeKind::Path(segments) => {
-                if let [single] = ast.list(segments) {
+                let Some((at, rest)) = self.qualify(segments, node.span) else {
+                    return Ty::ERROR;
+                };
+                if let [single] = rest {
                     let name = ast.name(*single);
-                    if let Some(ty) = prelude::builtin_type(name) {
-                        return ty;
-                    }
-                    if name == "Self" {
-                        if let Some(ty) = self.self_ty {
-                            return ty;
-                        }
+                    if name == "Self" && at.is_none() && self.self_ty.is_none() {
                         self.error(node.span, "`Self` is only available inside a struct");
                         return Ty::ERROR;
                     }
-                    if let Some(&id) = self.struct_names.get(single) {
-                        return self.t.types.struct_ty(id);
-                    }
-                    if let Some(ty) = self.alias_type(*single) {
+                    if let Some(ty) = self.path_type(at, *single, node.span) {
+                        if self.t.types.is_size(ty) {
+                            self.error(node.span, format!("`{name}` is a size, not a type"));
+                            return Ty::ERROR;
+                        }
+                        if let TyKind::Struct(id) = *self.t.types.kind(ty)
+                            && self.struct_params.contains_key(&id)
+                            && Some(ty) != self.self_ty
+                        {
+                            let message = format!(
+                                "`{name}` is generic: give its type arguments, as in `{name}<…>`"
+                            );
+                            self.error(node.span, message);
+                            return Ty::ERROR;
+                        }
                         return ty;
                     }
-                    if name == "Option" || name == "Result" {
+                    if at.is_none() && (name == "Option" || name == "Result") {
                         let example = if name == "Option" {
                             "Option<Int>"
                         } else {
@@ -652,9 +2704,17 @@ impl Checker<'_> {
                         return Ty::ERROR;
                     }
                 }
+                // `T::Result`, `Self::Result`: an associated type.
+                if at.is_none()
+                    && let [base, name] = *rest
+                    && let Some(base_ty) = self.path_type(None, base, node.span)
+                {
+                    return self.assoc_type(base_ty, name, node.span);
+                }
                 let text = self.path_text(segments);
                 let message = format!("cannot find the type `{text}`");
-                self.error(node.span, message);
+                let help = self.std_help(ast.list(segments)[0]);
+                self.error(node.span, message).help = help;
                 Ty::ERROR
             }
         }
@@ -662,14 +2722,19 @@ impl Checker<'_> {
 }
 
 // Function bodies and statements.
-impl Checker<'_> {
+impl<'a> Checker<'a> {
     fn check_bodies(&mut self) {
         let ast = self.ast;
         for (index, decl) in ast.all_fns().iter().enumerate() {
             let f = FnId::from_index(index);
             let Some(body) = decl.body else { continue };
+            self.module = self.t.fn_modules[f.index()];
+            self.type_params = self.fn_type_params(f);
             let info = self.t.fns[index].clone();
-            self.self_ty = info.owner.map(|id| self.t.types.struct_ty(id));
+            self.self_ty = info
+                .owner
+                .map(|id| self.t.types.struct_ty(id))
+                .or(info.self_ty);
             self.ret = info.sig.ret;
             self.scope.clear();
             self.loops = 0;
@@ -813,6 +2878,27 @@ impl Checker<'_> {
                         self.expr(value, Expect::Ty(target));
                     }
                     AssignOp::Compound(op) => {
+                        // `a += b` on a type of the program's own calls `AddAssign`, recorded
+                        // on the place.
+                        if let Some(index) = op_index(op, true)
+                            && self
+                                .operator(
+                                    place,
+                                    index,
+                                    0,
+                                    OPS[index].word,
+                                    place,
+                                    place_ty,
+                                    &[value],
+                                    stmt.span,
+                                )
+                                .is_some()
+                        {
+                            if self.t.callees[place.index()].is_some() {
+                                self.t.assign_values.insert(place, value);
+                            }
+                            return false;
+                        }
                         let value_ty = self.expr(value, Expect::Hint(target));
                         let result = self.binary_type(op, target, value_ty, stmt.span);
                         if !self.t.types.is_wildcard(result) && result != target {
@@ -828,12 +2914,17 @@ impl Checker<'_> {
                 }
                 false
             }
-            StmtKind::Return(value) if self.runs > 0 => {
+            StmtKind::Return(value) if self.runs > 0 || self.in_with > 0 => {
                 if let Some(value) = value {
                     self.expr(value, Expect::None);
                 }
-                self.error(stmt.span, "`return` cannot leave a `sample` run")
-                    .help = Some("the run's result is its block's last expression".into());
+                if self.runs > 0 {
+                    self.error(stmt.span, "`return` cannot leave a `sample` run")
+                        .help = Some("the run's result is its block's last expression".into());
+                } else {
+                    self.error(stmt.span, "`return` cannot leave a `with`/`do` block")
+                        .help = Some("yield the value from the `do` block instead".into());
+                }
                 true
             }
             StmtKind::Return(value) => {
@@ -861,8 +2952,11 @@ impl Checker<'_> {
                 }
                 true
             }
-            StmtKind::Assert(cond) => {
+            StmtKind::Assert { cond, msg } => {
                 self.expr(cond, Expect::Ty(Ty::BOOL));
+                if let Some(m) = msg {
+                    self.expr(m, Expect::Ty(Ty::STRING));
+                }
                 false
             }
             StmtKind::Expr { expr, .. } => self.expr(expr, Expect::Discard) == Ty::NEVER,
@@ -958,10 +3052,10 @@ impl Checker<'_> {
     ) {
         let ast = self.ast;
         let span = ast.pat(pat).span;
-        let segments = ast.list(path);
+        let (at, segments) = self.qualify(path, span).unwrap_or((None, &[]));
         let found = match *segments {
-            [enum_name, name] => self.path_type(enum_name).map(|t| (t, name)),
-            [name] => {
+            [enum_name, name] => self.path_type(at, enum_name, span).map(|t| (t, name)),
+            [name] if at.is_none() => {
                 let text = self.name(name).to_string();
                 let bare = match *self.t.types.kind(ty) {
                     TyKind::Struct(s) => self.t.types.structs[s.index()].bare,
@@ -992,6 +3086,16 @@ impl Checker<'_> {
         let Some((enum_ty, name)) = found else {
             self.bind_data_wildcard(data, mutable);
             return;
+        };
+        // `Maybe::Just(x)` names the generic enum; the value is one of its instances.
+        let enum_ty = match (self.struct_of(enum_ty), self.struct_of(ty)) {
+            (Some(e), Some(v))
+                if self.struct_params.contains_key(&e)
+                    && self.t.types.structs[v.index()].template == Some(e) =>
+            {
+                ty
+            }
+            _ => enum_ty,
         };
         if !self.t.types.is_wildcard(ty) && enum_ty != ty {
             let message = format!(
@@ -1144,7 +3248,7 @@ impl Checker<'_> {
 }
 
 // Expressions.
-impl Checker<'_> {
+impl<'a> Checker<'a> {
     /// Checks an expression, applying `expect`, and records its type.
     fn expr(&mut self, id: ExprId, expect: Expect) -> Ty {
         let ty = self.expr_kind(id, expect);
@@ -1161,6 +3265,19 @@ impl Checker<'_> {
     /// Makes a value of type `found` usable where `want` is expected, recording any implicit
     /// lend or dereference, or reports a mismatch.
     fn coerce(&mut self, id: ExprId, found: Ty, want: Ty) {
+        // In a generic call, the parameters being inferred match what they are given.
+        if !self.inference.is_empty() && self.t.types.has_params(want) {
+            if self.bind_param(want, found) {
+                return;
+            }
+            if let TyKind::Ref { mutable, inner } = *self.t.types.kind(want)
+                && !matches!(self.t.types.kind(found), TyKind::Ref { .. })
+                && self.bind_param(inner, found)
+            {
+                self.t.adjust[id.index()] = Adjust::Lend { mutable };
+                return;
+            }
+        }
         let types = &self.t.types;
         if found == want || types.is_wildcard(found) || types.is_wildcard(want) {
             return;
@@ -1179,6 +3296,8 @@ impl Checker<'_> {
             Some(adjust) => adjust,
             None => {
                 let span = self.ast.expr(id).span;
+                // In a generic call, what is known of the parameters so far.
+                let want = self.known(want);
                 let message = format!(
                     "mismatched types: expected {}, found {}",
                     self.show(want),
@@ -1213,7 +3332,7 @@ impl Checker<'_> {
             },
             ExprKind::Str(parts) => self.string(parts),
             ExprKind::Bool(_) => Ty::BOOL,
-            ExprKind::Ket { qubits, parts } => {
+            ExprKind::Ket { qubits, parts, .. } => {
                 let Some(computed) = self.computed_labels(parts) else {
                     return Ty::ERROR;
                 };
@@ -1246,17 +3365,10 @@ impl Checker<'_> {
             }
             ExprKind::Array(elems) => self.array_expr(elems, expect, expr.span),
             ExprKind::ArrayRepeat { value, count } => {
-                let elem_hint = expect.ty().and_then(|t| self.array_of(t)).map(|(e, _)| e);
+                let elem_hint = expect.ty().and_then(|t| self.t.types.elem_of(t));
                 let elem = self.expr(value, elem_hint.map_or(Expect::None, Expect::Hint));
                 self.expr(count, Expect::Ty(Ty::INT));
-                let len = match ast.expr(count).kind {
-                    ExprKind::Int(n) => n,
-                    _ => {
-                        let span = ast.expr(count).span;
-                        self.error(span, "the length of an array must be an integer literal");
-                        0
-                    }
-                };
+                let len = self.size_expr(count).unwrap_or(Ty::ERROR);
                 if self.t.types.linearity(elem) != crate::ty::Kind::Copyable
                     && !matches!(ast.expr(value).kind, ExprKind::Ket { .. })
                 {
@@ -1268,7 +3380,7 @@ impl Checker<'_> {
                     .help =
                         Some("write the elements out, or repeat a ket such as `[|0>; 3]`".into());
                 }
-                self.t.types.array(elem, len)
+                self.t.types.sized_array(elem, len)
             }
             ExprKind::StructLit { path, fields } => self.struct_lit(path, fields, expr.span),
             ExprKind::Field { base, name } => {
@@ -1278,12 +3390,13 @@ impl Checker<'_> {
                     return Ty::ERROR;
                 }
                 if let Some(id) = self.struct_of(ty)
-                    && let Some(&(_, field_ty)) = self.t.types.structs[id.index()]
+                    && let Some(index) = self.t.types.structs[id.index()]
                         .fields
                         .iter()
-                        .find(|(n, _)| *n == name)
+                        .position(|(n, _)| *n == name)
                 {
-                    return field_ty;
+                    self.field_visible(id, index, expr.span);
+                    return self.t.types.structs[id.index()].fields[index].1;
                 }
                 let message = format!("{} has no field `{}`", self.show(ty), self.name(name));
                 self.error(expr.span, message);
@@ -1305,7 +3418,7 @@ impl Checker<'_> {
                 let base_ty = self.expr(base, Expect::None);
                 self.expr(index, Expect::Ty(Ty::INT));
                 let ty = self.t.types.deref(base_ty);
-                if let Some((elem, _)) = self.array_of(ty) {
+                if let Some(elem) = self.t.types.elem_of(ty) {
                     return elem;
                 }
                 if !self.t.types.is_wildcard(ty) {
@@ -1327,6 +3440,13 @@ impl Checker<'_> {
                     && matches!(ast.expr(operand).kind, ExprKind::Int(_) | ExprKind::BigInt);
                 let ty = self.expr(operand, hint);
                 self.negating = false;
+                if matches!(op, UnaryOp::Neg | UnaryOp::BitNot)
+                    && let index = if op == UnaryOp::Neg { NEG } else { BIT_NOT }
+                    && let Some(ty) =
+                        self.operator(id, index, 0, OPS[index].word, operand, ty, &[], expr.span)
+                {
+                    return ty;
+                }
                 let ty = self.t.types.deref(ty);
                 let ok = match op {
                     UnaryOp::Neg => {
@@ -1368,6 +3488,20 @@ impl Checker<'_> {
                     (self.expr(lhs, Expect::Hint(hint)), rhs_ty)
                 } else {
                     let lhs_ty = self.expr(lhs, outer);
+                    if let Some(index) = op_index(op, false)
+                        && let Some(ty) = self.operator(
+                            id,
+                            index,
+                            op_fn_index(op),
+                            op.as_str(),
+                            lhs,
+                            lhs_ty,
+                            &[rhs],
+                            expr.span,
+                        )
+                    {
+                        return ty;
+                    }
                     let hint = self.t.types.deref(lhs_ty);
                     (lhs_ty, self.expr(rhs, Expect::Hint(hint)))
                 };
@@ -1548,10 +3682,20 @@ impl Checker<'_> {
                 self.block(body, Expect::Discard);
                 Ty::UNIT
             }
-            ExprKind::With { .. } => {
-                self.error(expr.span, "`with`/`do` is not supported yet")
-                    .help = Some("see spec/ownership.md §8".into());
-                Ty::UNIT
+            ExprKind::With { with, body } => {
+                let scope_mark = self.scope.len();
+                let outer_loops = self.loops;
+                self.loops = 0;
+                self.in_with += 1;
+                // Statements of `with` stay in scope for `do`.
+                for &stmt in ast.list(ast.block(with).stmts) {
+                    self.stmt(stmt);
+                }
+                let ty = self.block(body, expect);
+                self.in_with -= 1;
+                self.loops = outer_loops;
+                self.scope.truncate(scope_mark);
+                ty
             }
         }
     }
@@ -1582,10 +3726,24 @@ impl Checker<'_> {
             self.t.res[id.index()] = Res::Local(local);
             return self.t.local(local).ty;
         }
+        if let Some(size) = self.size_param(name) {
+            self.t.res[id.index()] = Res::Size(size);
+            return Ty::INT;
+        }
+        if let Ok(Some(FnRef::Fn(f))) = self.path_fn(None, name, span)
+            && self.ast.function(f).extern_kind == ExternKind::CExport
+        {
+            self.t.res[id.index()] = Res::FnPtr(f);
+            let sig = self.t.fns[f.index()].sig.clone();
+            return self.t.types.extern_c_fn(sig.params, sig.ret);
+        }
         let text = self.name(name).to_string();
-        let message = if self.fn_names.contains_key(&name) {
+        let message = if self.names(name, Ns::Value) {
             format!("`{text}` is a function; call it with `{text}(…)`")
-        } else if self.struct_names.contains_key(&name) || prelude::builtin_type(&text).is_some() {
+        } else if self.names(name, Ns::Type)
+            || self.std_types.contains_key(&name)
+            || prelude::builtin_type(&text).is_some()
+        {
             format!("`{text}` is a type, not a value")
         } else {
             format!("cannot find `{text}` in this scope")
@@ -1594,30 +3752,599 @@ impl Checker<'_> {
         Ty::ERROR
     }
 
-    /// The type a `Type::` path names, if it is a struct, `Self` or a built-in type.
-    fn path_type(&mut self, name: Symbol) -> Option<Ty> {
-        let text = self.name(name);
-        if let Some(ty) = prelude::builtin_type(text) {
-            return Some(ty);
-        }
-        if text == "Self" {
-            return self.self_ty;
-        }
-        if let Some(&id) = self.struct_names.get(&name) {
+    /// The type `name` names in the module `at`, or as written here when `at` is `None`,
+    /// where it can also be `Self`, a built-in type or one of the prelude's.
+    fn path_type(&mut self, at: Option<ModuleId>, name: Symbol, span: Span) -> Option<Ty> {
+        let found = match at {
+            None => {
+                if let Some(&(_, ty)) = self.type_params.iter().rev().find(|&&(n, _)| n == name) {
+                    return Some(ty);
+                }
+                let text = self.name(name);
+                if let Some(ty) = prelude::builtin_type(text) {
+                    return Some(ty);
+                }
+                if text == "Self" {
+                    return self.self_ty;
+                }
+                self.scopes.lexical(self.module, name, Ns::Type)
+            }
+            Some(module) => self.scopes.qualified(self.module, module, name, Ns::Type),
+        };
+        let Some(binding) = self.found(found, name, span) else {
+            // The prelude's types, which a module's own names take precedence over; `State`
+            // is in `std::state`.
+            let in_prelude = at.is_none() && resolve::std_module_of(self.name(name)).is_none();
+            let id = *self.std_types.get(&name).filter(|_| in_prelude)?;
             return Some(self.t.types.struct_ty(id));
+        };
+        match binding {
+            Binding::Item(item) => match self.item_structs[item.index()] {
+                Some(id) => Some(self.t.types.struct_ty(id)),
+                None => self.alias_type(item),
+            },
+            Binding::Std(text) => match text {
+                "IoStream" => Some(Ty::IO_STREAM),
+                "Stdin" => Some(Ty::STDIN),
+                "TcpStream" => Some(Ty::TCP_STREAM),
+                "TcpListener" => Some(Ty::TCP_LISTENER),
+                _ => {
+                    let id = *self.std_types.get(&self.ast.symbols.get(text)?)?;
+                    Some(self.t.types.struct_ty(id))
+                }
+            },
+            Binding::Module(_) | Binding::Fn(_) => None,
         }
-        self.alias_type(name)
+    }
+
+    /// Matches `found` against `want`, binding the type parameters being inferred that `want`
+    /// mentions. Returns whether they match.
+    fn bind_param(&mut self, want: Ty, found: Ty) -> bool {
+        // Before comparing: a parameter can be given itself, as a struct's `T` is in its own
+        // methods.
+        if let Some(inference) = self.inference.last_mut()
+            && let Some(i) = inference.params.iter().position(|&p| p == want)
+        {
+            return match inference.found[i] {
+                None => {
+                    inference.found[i] = Some(found);
+                    true
+                }
+                Some(earlier) => {
+                    earlier == found
+                        || self.t.types.is_wildcard(earlier)
+                        || self.t.types.is_wildcard(found)
+                }
+            };
+        }
+        let types = &self.t.types;
+        if types.is_wildcard(found) {
+            return true;
+        }
+        // The same type still binds the parameters being inferred in it: a generic function
+        // calling itself gives its own `T` for `T`.
+        if want == found
+            && !self.inference.last().is_some_and(|inference| {
+                types
+                    .params_in(want)
+                    .iter()
+                    .any(|p| inference.params.contains(p))
+            })
+        {
+            return true;
+        }
+        match (types.kind(want).clone(), types.kind(found).clone()) {
+            (TyKind::Tuple(a), TyKind::Tuple(b)) if a.len() == b.len() => {
+                a.iter().zip(b.iter()).all(|(&w, &f)| self.bind_param(w, f))
+            }
+            (TyKind::Array(w, n), TyKind::Array(f, m)) if n == m => self.bind_param(w, f),
+            (TyKind::SizedArray(w, n), TyKind::SizedArray(f, m)) => {
+                self.bind_param(w, f) && self.bind_param(n, m)
+            }
+            // `[Qubit; 4]` given for `[Qubit; N]`: `N` is 4.
+            (TyKind::SizedArray(w, n), TyKind::Array(f, m)) => {
+                let m = self.t.types.intern(TyKind::Size(m));
+                self.bind_param(w, f) && self.bind_param(n, m)
+            }
+            (TyKind::Distribution(w), TyKind::Distribution(f))
+            | (TyKind::Vec(w), TyKind::Vec(f)) => self.bind_param(w, f),
+            (TyKind::SizeSum { .. }, _) => self.bind_size(want, found),
+            (
+                TyKind::Ref {
+                    mutable: a,
+                    inner: w,
+                },
+                TyKind::Ref {
+                    mutable: b,
+                    inner: f,
+                },
+            ) if a == b => self.bind_param(w, f),
+            (TyKind::Struct(a), TyKind::Struct(b)) => {
+                let (da, db) = (&types.structs[a.index()], &types.structs[b.index()]);
+                if da.template.unwrap_or(a) != db.template.unwrap_or(b)
+                    || da.args.len() != db.args.len()
+                {
+                    return false;
+                }
+                let (wa, fa) = (da.args.clone(), db.args.clone());
+                wa.iter().zip(&fa).all(|(&w, &f)| self.bind_param(w, f))
+            }
+            _ => false,
+        }
+    }
+
+    /// `want`, a sum of sizes, given the size `found`: equal once the parameters already
+    /// known are put in, or solved for the one still unknown, as `N` is 4 when `[Qubit; 5]`
+    /// is given for `[Qubit; N + 1]` (`spec/types.md` §6).
+    fn bind_size(&mut self, want: Ty, found: Ty) -> bool {
+        let want = self.known(want);
+        if want == found {
+            return true;
+        }
+        let types = &self.t.types;
+        let (Some((c, terms)), Some((d, mut rest))) =
+            (types.size_parts(want), types.size_parts(found))
+        else {
+            return false;
+        };
+        let inference = self.inference.last();
+        let (unknown, known): (Vec<_>, Vec<_>) = terms
+            .into_iter()
+            .partition(|(p, _)| inference.is_some_and(|i| i.params.contains(p)));
+        let [(param, k)] = unknown[..] else {
+            return false;
+        };
+        // What is left of `found` once the constant and the known terms are taken away must
+        // be `k` times the unknown parameter.
+        let Some(mut constant) = d.checked_sub(c).filter(|&c| c >= 0) else {
+            return false;
+        };
+        for (p, j) in known {
+            let Some(at) = rest.iter().position(|&(q, _)| q == p) else {
+                return false;
+            };
+            let Some(left) = rest[at].1.checked_sub(j) else {
+                return false;
+            };
+            rest[at].1 = left;
+        }
+        rest.retain(|&(_, j)| j != 0);
+        let Ok(k_signed) = i64::try_from(k) else {
+            return false;
+        };
+        if constant % k_signed != 0 || rest.iter().any(|&(_, j)| j % k != 0) {
+            return false;
+        }
+        constant /= k_signed;
+        for term in &mut rest {
+            term.1 /= k;
+        }
+        match self.t.types.size_sum(constant, rest) {
+            Some(value) => self.bind_param(param, value),
+            None => false,
+        }
+    }
+
+    /// `ty` with the type parameters being inferred that are already known replaced, so
+    /// that literals take the type expected (`swap::<Bit>((0, 1))`).
+    fn known(&mut self, ty: Ty) -> Ty {
+        let Some(inference) = self.inference.last() else {
+            return ty;
+        };
+        if inference.found.iter().all(Option::is_none) || !self.t.types.has_params(ty) {
+            return ty;
+        }
+        let (from, to): (Vec<Ty>, Vec<Ty>) = inference
+            .params
+            .iter()
+            .zip(&inference.found)
+            .filter_map(|(&p, f)| Some((p, (*f)?)))
+            .unzip();
+        let ty = self.t.types.subst(ty, &from, &to);
+        self.resolve_assoc(ty)
+    }
+
+    /// Runs `check` with `params` being inferred, starting from `given`, and returns what
+    /// each was found to be, or `None` for one nothing determined.
+    fn infer(
+        &mut self,
+        params: &[Ty],
+        given: Vec<Option<Ty>>,
+        check: impl FnOnce(&mut Self),
+    ) -> Vec<Option<Ty>> {
+        self.inference.push(Inference {
+            params: params.to_vec(),
+            found: given,
+        });
+        check(self);
+        self.inference.pop().expect("pushed").found
+    }
+
+    /// The type arguments a generic call or literal ends with: what was found, with each
+    /// parameter nothing determined reported and left unknown.
+    fn settle(
+        &mut self,
+        params: &[Ty],
+        mut found: Vec<Option<Ty>>,
+        what: &str,
+        span: Span,
+    ) -> Vec<Ty> {
+        self.found_from_bounds(params, &mut found);
+        params
+            .iter()
+            .zip(found)
+            .map(|(&p, found)| {
+                found.unwrap_or_else(|| {
+                    let message = format!(
+                        "cannot tell what `{}` is in this {what}",
+                        self.t.types.display(p, self.ast)
+                    );
+                    self.error(span, message).help =
+                        Some("give it with `::<…>`, or a type annotation".into());
+                    Ty::ERROR
+                })
+            })
+            .collect()
+    }
+
+    /// Fills in parameters that only a bound's associated type fixes: `U` in
+    /// `T: Add<T, Output = U>`, once `T` is known, is `T`'s `Output`.
+    fn found_from_bounds(&mut self, params: &[Ty], found: &mut [Option<Ty>]) {
+        if self.param_assoc.is_empty() || found.iter().all(Option::is_some) {
+            return;
+        }
+        loop {
+            let (from, to): (Vec<Ty>, Vec<Ty>) = params
+                .iter()
+                .zip(found.iter())
+                .filter_map(|(&p, f)| Some((p, (*f)?)))
+                .unzip();
+            let fixed: Vec<(Ty, TraitId, Vec<Ty>, Symbol, Ty)> = self
+                .param_assoc
+                .iter()
+                .filter(|&((p, ..), _)| from.contains(p))
+                .map(|((p, t, args, name), &want)| (*p, *t, args.clone(), *name, want))
+                .collect();
+            let mut changed = false;
+            for (p, trait_id, args, name, want) in fixed {
+                let Some(slot) = params.iter().position(|&q| q == want) else {
+                    continue;
+                };
+                if found[slot].is_some() {
+                    continue;
+                }
+                let base = self.t.types.subst(p, &from, &to);
+                let args: Vec<Ty> = args
+                    .iter()
+                    .map(|&a| self.t.types.subst(a, &from, &to))
+                    .collect();
+                // An argument still naming a parameter of this call is not known yet.
+                let types = &self.t.types;
+                if args
+                    .iter()
+                    .any(|&a| types.params_in(a).iter().any(|q| params.contains(q)))
+                {
+                    continue;
+                }
+                let copy = self.t.traits[trait_id.index()]
+                    .assoc
+                    .iter()
+                    .any(|&(n, c)| n == name && c);
+                let assoc = self.t.types.intern(TyKind::Assoc {
+                    base,
+                    trait_index: trait_id.0,
+                    args: args.into(),
+                    name,
+                    copy,
+                });
+                let ty = self.resolve_assoc(assoc);
+                if !matches!(self.t.types.kind(ty), TyKind::Assoc { .. }) {
+                    found[slot] = Some(ty);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
+    }
+
+    /// Reports each type argument that does not meet its parameter's bound.
+    fn check_bounds(&mut self, params: &[Ty], args: &[Ty], callee: &str, span: Span) {
+        for (&p, &arg) in params.iter().zip(args) {
+            let Some(id) = self.t.types.as_param(p) else {
+                continue;
+            };
+            let def = self.t.types.params[id.index()];
+            if def.copy
+                && !self.t.types.is_wildcard(arg)
+                && self.t.types.linearity(arg) != Kind::Copyable
+                && !self.copy_inferred(arg, callee, def.name, span)
+            {
+                let message = format!(
+                    "`{callee}` needs `{}: Copy`, but here `{}` is {}",
+                    self.name(def.name),
+                    self.name(def.name),
+                    self.show(arg)
+                );
+                self.error(span, message);
+            }
+            for (trait_id, bound_args) in self.param_bounds.get(&p).cloned().unwrap_or_default() {
+                // `T: Oracle<N>`: the trait's arguments, in terms of the call's.
+                let trait_args: Vec<Ty> = bound_args
+                    .iter()
+                    .map(|&t| self.t.types.subst(t, params, args))
+                    .collect();
+                if !self.implements(arg, trait_id, Some(&trait_args))
+                    && !(trait_args.is_empty() && self.infer_bound(arg, trait_id, span))
+                {
+                    let trait_name = self.trait_text(trait_id, &trait_args);
+                    if let Some((word, at)) = self.operator
+                        && at == span
+                        && let [rhs] = trait_args[..]
+                    {
+                        let message = format!(
+                            "`{word}` cannot be applied to {} and {}: {} does not implement `{trait_name}`",
+                            self.show(arg),
+                            self.show(rhs),
+                            self.show(arg)
+                        );
+                        self.error(span, message);
+                        continue;
+                    }
+                    let message = format!(
+                        "`{callee}` needs `{}: {trait_name}`, but {} does not implement `{trait_name}`",
+                        self.name(def.name),
+                        self.show(arg)
+                    );
+                    self.error(span, message);
+                    continue;
+                }
+                let fixed: Vec<(Symbol, Ty)> = self
+                    .param_assoc
+                    .iter()
+                    .filter(|((q, t, a, _), _)| *q == p && *t == trait_id && *a == bound_args)
+                    .map(|((_, _, _, n), &ty)| (*n, ty))
+                    .collect();
+                for (name, want) in fixed {
+                    let want = self.t.types.subst(want, params, args);
+                    let copy = self.t.traits[trait_id.index()]
+                        .assoc
+                        .iter()
+                        .any(|&(n, c)| n == name && c);
+                    let found = self.t.types.intern(TyKind::Assoc {
+                        base: arg,
+                        trait_index: trait_id.0,
+                        args: trait_args.clone().into(),
+                        name,
+                        copy,
+                    });
+                    let found = self.resolve_assoc(found);
+                    if found != want && !self.t.types.is_wildcard(found) {
+                        let message = format!(
+                            "`{callee}` needs `{}::{}` to be {}, but it is {}",
+                            self.show(arg).trim_matches('`'),
+                            self.name(name),
+                            self.show(want),
+                            self.show(found)
+                        );
+                        self.error(span, message);
+                    }
+                }
+            }
+        }
+    }
+
+    /// For a type given to a parameter declared `Copy` that is copyable once the inferable
+    /// parameters in it are, records it for the ownership checker, which infers their `Copy`
+    /// bounds. Returns whether it did.
+    fn copy_inferred(&mut self, ty: Ty, callee: &str, param: Symbol, span: Span) -> bool {
+        let inferable: Vec<Ty> = self
+            .t
+            .types
+            .params_in(ty)
+            .into_iter()
+            .filter(|p| self.t.inferable.contains_key(p))
+            .collect();
+        if inferable.is_empty() || self.t.types.linearity_assuming(ty, &inferable) != Kind::Copyable
+        {
+            return false;
+        }
+        let param = self.name(param).to_string();
+        self.t.copy_needs.push(CopyNeed {
+            ty,
+            span,
+            callee: callee.to_string(),
+            param,
+        });
+        true
+    }
+
+    /// A trait as written with its arguments: `Oracle<4>`, or `Shape`.
+    fn trait_text(&self, trait_id: TraitId, args: &[Ty]) -> String {
+        let name = self.name(self.t.traits[trait_id.index()].name);
+        if args.is_empty() {
+            return name.to_string();
+        }
+        let args: Vec<String> = args
+            .iter()
+            .map(|&a| self.t.types.display(a, self.ast).to_string())
+            .collect();
+        format!("{name}<{}>", args.join(", "))
+    }
+
+    /// For `ty`, a generic enum named without arguments (`Maybe::Nothing`), the instance the
+    /// surrounding code expects; otherwise `ty`.
+    fn instance_expected(&mut self, ty: Ty, expect: Expect, span: Span) -> Ty {
+        let Some(s) = self.struct_of(ty) else {
+            return ty;
+        };
+        if !self.struct_params.contains_key(&s) {
+            return ty;
+        }
+        if let Some(want) = expect.ty()
+            && let Some(w) = self.struct_of(want)
+            && self.t.types.structs[w.index()].template == Some(s)
+        {
+            return want;
+        }
+        let params = self.t.types.structs[s.index()].args.clone();
+        let args = self.settle(&params, vec![None; params.len()], "variant", span);
+        let instance = self.t.types.instantiate(s, args);
+        self.t.types.struct_ty(instance)
+    }
+
+    /// The generic struct or enum `path` names, if it names one.
+    fn generic_struct(&mut self, path: List<Symbol>, span: Span) -> Option<StructId> {
+        let (at, rest) = self.qualify(path, span)?;
+        let [name] = *rest else { return None };
+        let ty = self.path_type(at, name, span)?;
+        let TyKind::Struct(id) = *self.t.types.kind(ty) else {
+            return None;
+        };
+        self.struct_params.contains_key(&id).then_some(id)
+    }
+
+    /// The help for a standard-library name used without its `use`, if it is one.
+    fn std_help(&self, name: Symbol) -> Option<String> {
+        let text = self.name(name);
+        let module = resolve::std_module_of(text)?;
+        Some(format!(
+            "`{text}` is in `std::{module}`, which the prelude does not import: add \
+             `use std::{module}::{text}`"
+        ))
+    }
+
+    /// The function `name` names in the module `at`, or as written here when `at` is `None`:
+    /// the program's, or a standard-library one imported by name. `Err` if the name is
+    /// ambiguous, which is reported.
+    fn path_fn(
+        &mut self,
+        at: Option<ModuleId>,
+        name: Symbol,
+        span: Span,
+    ) -> Result<Option<FnRef>, ()> {
+        let found = match at {
+            None => self.scopes.lexical(self.module, name, Ns::Value),
+            Some(module) => self.scopes.qualified(self.module, module, name, Ns::Value),
+        };
+        let ambiguous = matches!(found, Some(Found::Ambiguous(..)));
+        match self.found(found, name, span) {
+            Some(Binding::Fn(f)) => Ok(Some(FnRef::Fn(f))),
+            Some(Binding::Std(text)) => Ok(Some(FnRef::Std(text))),
+            _ if ambiguous => Err(()),
+            _ => Ok(None),
+        }
+    }
+
+    /// What a lookup found, reporting a name that is private or ambiguous.
+    fn found(&mut self, found: Option<Found>, name: Symbol, span: Span) -> Option<Binding> {
+        match found? {
+            Found::Entry(entry) => Some(entry.binding),
+            Found::Private(entry) => {
+                let message = format!("`{}` is private", self.name(name));
+                self.error(span, message);
+                Some(entry.binding)
+            }
+            Found::Ambiguous(a, b) => {
+                let message = format!(
+                    "`{}` is ambiguous: glob imports bring two different items with that name",
+                    self.name(name)
+                );
+                let labels = &mut self.error(span, message).labels;
+                labels.push((a, "one comes from this import".into()));
+                labels.push((b, "another from this one".into()));
+                None
+            }
+        }
+    }
+
+    /// Whether `name`, written here, names something in `ns`, without reporting anything.
+    fn names(&self, name: Symbol, ns: Ns) -> bool {
+        matches!(
+            self.scopes.lexical(self.module, name, ns),
+            Some(Found::Entry(_) | Found::Ambiguous(..))
+        )
+    }
+
+    /// Splits off the modules a path starts with: the module the rest is in (`None` if the
+    /// path does not start with one) and the rest. `None` if the path is broken, which is
+    /// reported.
+    fn qualify(
+        &mut self,
+        segments: List<Symbol>,
+        span: Span,
+    ) -> Option<(Option<ModuleId>, &'a [Symbol])> {
+        let path: &'a [Symbol] = self.ast.list(segments);
+        if path.len() < 2 {
+            return Some((None, path));
+        }
+        let mut module = match self.scopes.path_start(self.words, self.module, path[0]) {
+            None => return Some((None, path)),
+            Some(Ok(module)) => module,
+            Some(Err(error)) => {
+                let message = resolve::path_message(self.ast, path, &error);
+                self.error(span, message);
+                return None;
+            }
+        };
+        let mut at = 1;
+        while at + 1 < path.len() {
+            if self.words.is_super(path[at]) {
+                let Some(parent) = self.scopes.parent(module) else {
+                    let error = PathError::NoParent { at };
+                    let message = resolve::path_message(self.ast, path, &error);
+                    self.error(span, message);
+                    return None;
+                };
+                module = parent;
+            } else {
+                match self
+                    .scopes
+                    .qualified(self.module, module, path[at], Ns::Type)
+                {
+                    Some(Found::Entry(Entry {
+                        binding: Binding::Module(inner),
+                        ..
+                    })) => module = inner,
+                    _ => break,
+                }
+            }
+            at += 1;
+        }
+        Some((Some(module), &path[at..]))
     }
 
     /// A path used as a value: a variant such as `Basis::X`, or a constant such as `Float::PI`.
     fn path_value(&mut self, id: ExprId, segments: List<Symbol>, expect: Expect, span: Span) -> Ty {
-        if let [name] = *self.ast.list(segments) {
-            return self.bare_value(id, name, expect, span);
+        let Some((at, rest)) = self.qualify(segments, span) else {
+            return Ty::ERROR;
+        };
+        if let ([name], None) = (rest, at) {
+            return self.bare_value(id, *name, expect, span);
         }
-        if let [ty_name, name] = *self.ast.list(segments)
-            && let Some(ty) = self.path_type(ty_name)
+        if let ([name], Some(module)) = (rest, at) {
+            let path = self.path_text(segments);
+            let message = if !matches!(self.path_fn(Some(module), *name, span), Ok(None)) {
+                format!("`{path}` is a function; call it with `{path}(…)`")
+            } else if self.path_type(Some(module), *name, span).is_some() {
+                format!("`{path}` is a type, not a value")
+            } else {
+                format!("cannot find the value `{path}`")
+            };
+            self.error(span, message);
+            return Ty::ERROR;
+        }
+        if let [ty_name, name] = *rest
+            && let Some(ty) = self.path_type(at, ty_name, span)
             && let Some(index) = self.variant_index(ty, name)
         {
+            let written_self = self.name(ty_name) == "Self";
+            let ty = if written_self {
+                ty
+            } else {
+                self.instance_expected(ty, expect, span)
+            };
             let TyKind::Struct(s) = *self.t.types.kind(ty) else {
                 unreachable!("only enums have variants")
             };
@@ -1634,8 +4361,8 @@ impl Checker<'_> {
             }
             return ty;
         }
-        if let [ty_name, name] = *self.ast.list(segments)
-            && let Some(ty) = self.path_type(ty_name)
+        if let [ty_name, name] = *rest
+            && let Some(ty) = self.path_type(at, ty_name, span)
             && let Some(constant) = prelude::constant(ty, self.name(name))
         {
             self.t.res[id.index()] = Res::Builtin(constant);
@@ -1643,7 +4370,8 @@ impl Checker<'_> {
         }
         let text = self.path_text(segments);
         let message = format!("cannot find the value `{text}`");
-        self.error(span, message);
+        let help = self.std_help(self.ast.list(segments)[0]);
+        self.error(span, message).help = help;
         Ty::ERROR
     }
 
@@ -1667,7 +4395,7 @@ impl Checker<'_> {
 
     fn array_expr(&mut self, elems: List<ExprId>, expect: Expect, span: Span) -> Ty {
         let elems = self.ast.list(elems);
-        let wanted = expect.ty().and_then(|t| self.array_of(t)).map(|(e, _)| e);
+        let wanted = expect.ty().and_then(|t| self.t.types.elem_of(t));
         let Some((&first, rest)) = elems.split_first() else {
             return match wanted {
                 Some(elem) => self.t.types.array(elem, 0),
@@ -1688,10 +4416,19 @@ impl Checker<'_> {
 
     fn struct_lit(&mut self, path: ExprId, inits: List<FieldInit>, span: Span) -> Ty {
         let ast = self.ast;
+        let path_span = ast.expr(path).span;
+        let qualified = match ast.expr(path).kind {
+            ExprKind::Path(segments) => Some(self.qualify(segments, path_span)),
+            _ => None,
+        };
+        if let Some(None) = qualified {
+            self.skip_inits(inits);
+            return Ty::ERROR;
+        }
         // `Enum::Variant { … }`: a variant with named fields.
         if let ExprKind::Path(segments) = ast.expr(path).kind
-            && let [enum_name, name] = *ast.list(segments)
-            && let Some(enum_ty) = self.path_type(enum_name)
+            && let Some(Some((at, &[enum_name, name]))) = qualified
+            && let Some(enum_ty) = self.path_type(at, enum_name, path_span)
             && let Some(index) = self.variant_index(enum_ty, name)
         {
             let TyKind::Struct(s) = *self.t.types.kind(enum_ty) else {
@@ -1725,8 +4462,9 @@ impl Checker<'_> {
             self.field_inits(inits, &fields, enum_ty, span);
             return enum_ty;
         }
-        let struct_ty = match ast.expr(path).kind {
-            ExprKind::Name(name) => self.path_type(name),
+        let struct_ty = match (ast.expr(path).kind, qualified) {
+            (ExprKind::Name(name), _) => self.path_type(None, name, path_span),
+            (_, Some(Some((at, &[name])))) => self.path_type(at, name, path_span),
             _ => None,
         };
         let Some(struct_ty) = struct_ty else {
@@ -1751,8 +4489,75 @@ impl Checker<'_> {
             return Ty::ERROR;
         }
         let fields = self.t.types.structs[id.index()].fields.clone();
+        // Other modules cannot create a struct whose fields they cannot see.
+        for init in ast.list(inits) {
+            if let Some(index) = fields.iter().position(|(n, _)| *n == init.name) {
+                self.field_visible(id, index, init.span);
+            }
+        }
+        // `Pair { first: 1, second: |0> }`: a generic struct's arguments, from its fields.
+        // `Self { … }` is the struct's own type, in its methods.
+        let written_self =
+            matches!(ast.expr(path).kind, ExprKind::Name(n) if self.name(n) == "Self");
+        if self.struct_params.contains_key(&id) && !written_self {
+            let params = self.t.types.structs[id.index()].args.clone();
+            let found = self.infer(&params, vec![None; params.len()], |this| {
+                this.field_inits(inits, &fields, struct_ty, span);
+            });
+            let args = self.settle(&params, found, "struct literal", path_span);
+            let instance = self.t.types.instantiate(id, args);
+            return self.t.types.struct_ty(instance);
+        }
         self.field_inits(inits, &fields, struct_ty, span);
         struct_ty
+    }
+
+    /// Where `vis`, written in the current module, can be used from, reporting a `pub(in …)`
+    /// that names no module containing it.
+    fn visibility(&mut self, vis: Vis) -> Visible {
+        match self.scopes.visibility(self.words, self.module, vis) {
+            Ok(visible) => visible,
+            Err((span, message)) => {
+                self.error(span, message);
+                Visible::Within(self.module)
+            }
+        }
+    }
+
+    /// Reports the field `index` of the struct `id` if the current module cannot see it.
+    fn field_visible(&mut self, id: StructId, index: usize, span: Span) {
+        let id = self.t.types.structs[id.index()].template.unwrap_or(id);
+        let Some(&visible) = self.field_vis.get(&id).and_then(|v| v.get(index)) else {
+            return;
+        };
+        if !self.scopes.can_see(self.module, visible) {
+            let def = &self.t.types.structs[id.index()];
+            let message = format!(
+                "the field `{}` of `{}` is private",
+                self.name(def.fields[index].0),
+                self.name(def.name)
+            );
+            self.error(span, message);
+        }
+    }
+
+    /// Reports the method `f` if the current module cannot see it.
+    fn method_visible(&mut self, f: FnId, span: Span) {
+        let decl = self.ast.function(f);
+        let module = self.t.fn_modules[f.index()];
+        // Trait methods inherit the visibility of their trait (`spec/modules.md`).
+        let vis = match self.t.fn_traits.get(&f) {
+            Some(&trait_id) => self.ast.item(self.t.traits[trait_id.index()].item).vis,
+            None => decl.vis,
+        };
+        let visible = self
+            .scopes
+            .visibility(self.words, module, vis)
+            .unwrap_or(Visible::Within(module));
+        if !self.scopes.can_see(self.module, visible) {
+            let message = format!("`{}` is private", self.name(decl.name));
+            self.error(span, message);
+        }
     }
 
     fn skip_inits(&mut self, inits: List<FieldInit>) {
@@ -1792,6 +4597,7 @@ impl Checker<'_> {
                 self.error(init.span, message);
             }
             seen.push(init.name);
+            let field_ty = self.known(field_ty);
             match init.value {
                 Some(value) => {
                     self.expr(value, Expect::Ty(field_ty));
@@ -1799,7 +4605,8 @@ impl Checker<'_> {
                 None => match self.lookup(init.name) {
                     Some(local) => {
                         let ty = self.t.local(local).ty;
-                        if ty != field_ty && !self.t.types.is_wildcard(ty) {
+                        let inferred = !self.inference.is_empty() && self.bind_param(field_ty, ty);
+                        if ty != field_ty && !inferred && !self.t.types.is_wildcard(ty) {
                             let message = format!(
                                 "mismatched types: the field `{}` is {}, but the variable is {}",
                                 self.name(init.name),
@@ -2108,30 +4915,7 @@ impl Checker<'_> {
                 _ => Ty::ERROR,
             };
         }
-        let result = match op {
-            Or | And => (lhs == Ty::BOOL && rhs == Ty::BOOL).then_some(Ty::BOOL),
-            Eq | NotEq => (lhs == rhs && self.t.types.is_comparable(lhs)).then_some(Ty::BOOL),
-            Lt | Le | Gt | Ge => (lhs == rhs && lhs.is_number()).then_some(Ty::BOOL),
-            BitOr | BitXor | BitAnd => {
-                (lhs == rhs && (lhs.is_integer() || lhs == Ty::BIT)).then_some(lhs)
-            }
-            // The shift amount is the same type, or an `Int`.
-            Shl | Shr => (lhs.is_integer() && (rhs == lhs || rhs == Ty::INT)).then_some(lhs),
-            Add | Sub => match (lhs, rhs) {
-                (a, b) if a == b && (a.is_number() || a.is_complex()) => Some(a),
-                (Ty::OBSERVABLE, Ty::OBSERVABLE) => Some(Ty::OBSERVABLE),
-                _ => None,
-            },
-            Mul => match (lhs, rhs) {
-                (a, b) if a == b && (a.is_number() || a.is_complex()) => Some(a),
-                (Ty::OBSERVABLE | Ty::FLOAT, Ty::OBSERVABLE) | (Ty::OBSERVABLE, Ty::FLOAT) => {
-                    Some(Ty::OBSERVABLE)
-                }
-                _ => None,
-            },
-            Div => (lhs == rhs && (lhs.is_number() || lhs.is_complex())).then_some(lhs),
-            Rem => (lhs == rhs && lhs.is_number()).then_some(lhs),
-        };
+        let result = self.t.types.builtin_binary(op, lhs, rhs);
         if let Some(ty) = result {
             return ty;
         }
@@ -2155,6 +4939,16 @@ impl Checker<'_> {
             ))
         } else if lhs.is_number() && rhs.is_number() {
             Some("Noev does not convert between number types implicitly; convert one side, as in `i64(x)` or `Int(x)`".to_string())
+        } else if let Some(index) = op_index(op, false)
+            && let name = OPS[index].name
+            && let module = OPS[index].module
+            && matches!(self.t.types.kind(lhs), TyKind::Struct(_) | TyKind::Param(_))
+        {
+            Some(format!(
+                "to give {} `{}`, implement `std::{module}::{name}` for it",
+                self.show(lhs),
+                op.as_str()
+            ))
         } else {
             None
         };
@@ -2167,7 +4961,162 @@ impl Checker<'_> {
 }
 
 // Calls.
-impl Checker<'_> {
+impl<'a> Checker<'a> {
+    /// A call of the program's function `f`, through the path `callee`.
+    /// A call of `f`, whose type is `expect`ed to be one, if any: what the arguments leave
+    /// unknown of its type arguments, the type expected can tell (`let r: [Qubit; 4] =
+    /// fresh()`).
+    fn fn_call(
+        &mut self,
+        id: ExprId,
+        callee: ExprId,
+        f: FnId,
+        args: &[ExprId],
+        expect: Expect,
+        span: Span,
+    ) -> Ty {
+        let sig = self.t.fns[f.index()].sig.clone();
+        self.t.callees[id.index()] = Some(Callee::Fn(f));
+        let generics = self.t.fns[f.index()].generics.clone();
+        let given = self.ast.list(self.ast.path_args(callee)).to_vec();
+        if generics.is_empty() {
+            if !given.is_empty() {
+                let span = self.ast.expr(callee).span;
+                self.error(span, "this function takes no type arguments");
+            }
+            return self.check_args(&sig, None, args, span);
+        }
+        let name = self.name(self.ast.function(f).name).to_string();
+        let given = self.given_args(&generics, &given, callee);
+        let found = self.infer(&generics, given, |this| {
+            this.check_args(&sig, None, args, span);
+            if let Some(want) = expect.ty() {
+                // A mismatch is reported where the call's type is compared.
+                this.bind_param(sig.ret, want);
+            }
+        });
+        let type_args = self.settle(&generics, found, "call", self.ast.expr(callee).span);
+        self.check_bounds(&generics, &type_args, &name, span);
+        let ret = self.t.types.subst(sig.ret, &generics, &type_args);
+        let ret = self.resolve_assoc(ret);
+        self.t.type_args.insert(id, type_args);
+        ret
+    }
+
+    /// The type arguments written with `::<…>` on `callee`, for `generics`, each `None` if
+    /// none is written.
+    fn given_args(&mut self, generics: &[Ty], given: &[TypeId], callee: ExprId) -> Vec<Option<Ty>> {
+        if given.is_empty() {
+            return vec![None; generics.len()];
+        }
+        if given.len() != generics.len() {
+            let span = self.ast.expr(callee).span;
+            let message = format!(
+                "this takes {} type argument{}, but {} {} given",
+                generics.len(),
+                if generics.len() == 1 { "" } else { "s" },
+                given.len(),
+                if given.len() == 1 { "was" } else { "were" }
+            );
+            self.error(span, message);
+        }
+        let span = self.ast.expr(callee).span;
+        let mut args: Vec<Option<Ty>> = Vec::new();
+        for (i, &t) in given.iter().enumerate() {
+            let arg = self.resolve_type_arg(t);
+            // One of the wrong kind is reported, and the argument inferred instead.
+            let fits = generics
+                .get(i)
+                .is_none_or(|&p| self.check_arg_kinds(&[p], &[arg], span));
+            args.push(fits.then_some(arg));
+        }
+        args.resize(generics.len(), None);
+        args
+    }
+
+    /// A call of the built-in function or conversion named `text`, if there is one.
+    fn builtin_call(&mut self, id: ExprId, text: &str, args: &[ExprId], span: Span) -> Option<Ty> {
+        if let Some(target) = prelude::builtin_type(text) {
+            return Some(self.conversion(id, target, args, span));
+        }
+        Some(match text {
+            "print" | "eprint" => self.print_call(id, text == "eprint", args),
+            "qasm" => self.qasm_call(id, args, span),
+            "measure" => self.measure_fn(id, args, span),
+            "amplitudes" => self.amplitudes_fn(id, args, span),
+            "fft" | "ifft" => self.fourier_fn(id, text == "ifft", args, span),
+            "stdout" | "stderr" | "stdin" | "var" | "args" | "current_dir" | "read_to_string"
+            | "read" | "write" | "write_bytes" | "exists" | "create_dir_all" | "remove_file" => {
+                self.std_free_call(id, text, args, span)
+            }
+            _ => {
+                let (builtin, sig) = prelude::function(&mut self.t.types, text)?;
+                self.t.callees[id.index()] = Some(Callee::Builtin(builtin));
+                self.check_args(&sig, None, args, span)
+            }
+        })
+    }
+
+    /// A call of a function named by one name, `name`, through `callee`.
+    fn name_call(
+        &mut self,
+        id: ExprId,
+        callee: ExprId,
+        name: Symbol,
+        args: &[ExprId],
+        expect: Expect,
+        span: Span,
+    ) -> Ty {
+        let callee_expr = *self.ast.expr(callee);
+        if let Some(local) = self.lookup(name) {
+            self.t.res[callee.index()] = Res::Local(local);
+            let local_ty = self.t.local(local).ty;
+            self.t.expr_types[callee.index()] = local_ty;
+            if let TyKind::ExternCFn { params, ret } = self.t.types.kind(local_ty).clone() {
+                let sig = Sig {
+                    receiver: None,
+                    params: params.into_vec(),
+                    ret,
+                    is_unsafe: true,
+                    reversible: Reversible::No,
+                };
+                self.t.callees[id.index()] = Some(Callee::FnPtr);
+                return self.check_args(&sig, None, args, span);
+            }
+            let message = format!("`{}` is a variable, not a function", self.name(name));
+            self.error(callee_expr.span, message);
+            return self.skip_args(args);
+        }
+        let Ok(found) = self.path_fn(None, name, callee_expr.span) else {
+            return self.skip_args(args);
+        };
+        match found {
+            Some(FnRef::Fn(f)) => return self.fn_call(id, callee, f, args, expect, span),
+            Some(FnRef::Std(text)) => {
+                if let Some(ty) = self.builtin_call(id, text, args, span) {
+                    return ty;
+                }
+            }
+            None => {}
+        }
+        let text = self.name(name).to_string();
+        if let Some(help) = self.std_help(name) {
+            let message = format!("cannot find the function `{text}`");
+            self.error(callee_expr.span, message).help = Some(help);
+            return self.skip_args(args);
+        }
+        if let Some(ty) = self.builtin_call(id, &text, args, span) {
+            return ty;
+        }
+        let message = if self.names(name, Ns::Type) {
+            format!("`{text}` is a struct; create one with `{text} {{ … }}`")
+        } else {
+            format!("cannot find the function `{text}`")
+        };
+        self.error(callee_expr.span, message);
+        self.skip_args(args)
+    }
+
     fn call(
         &mut self,
         id: ExprId,
@@ -2180,68 +5129,102 @@ impl Checker<'_> {
         let callee_expr = *ast.expr(callee);
         let args = ast.list(args);
         match callee_expr.kind {
-            ExprKind::Name(name) => {
-                if let Some(local) = self.lookup(name) {
-                    let message = format!("`{}` is a variable, not a function", self.name(name));
-                    self.t.res[callee.index()] = Res::Local(local);
-                    self.error(callee_expr.span, message);
+            ExprKind::Name(name) => self.name_call(id, callee, name, args, expect, span),
+            ExprKind::Path(segments) => {
+                let path_span = callee_expr.span;
+                let Some((at, rest)) = self.qualify(segments, path_span) else {
+                    return self.skip_args(args);
+                };
+                if let ([name], None) = (rest, at) {
+                    // `swap::<Int>`: a path only for its arguments.
+                    if !BARE_VARIANTS.contains(&self.name(*name)) {
+                        return self.name_call(id, callee, *name, args, expect, span);
+                    }
+                    return self.bare_call(id, *name, args, expect, span);
+                }
+                if let ([name], Some(module)) = (rest, at) {
+                    let Ok(found) = self.path_fn(Some(module), *name, path_span) else {
+                        return self.skip_args(args);
+                    };
+                    match found {
+                        Some(FnRef::Fn(f)) => {
+                            return self.fn_call(id, callee, f, args, expect, span);
+                        }
+                        Some(FnRef::Std(text)) => {
+                            if let Some(ty) = self.builtin_call(id, text, args, span) {
+                                return ty;
+                            }
+                        }
+                        None => {}
+                    }
+                    let message =
+                        format!("cannot find the function `{}`", self.path_text(segments));
+                    self.error(path_span, message);
                     return self.skip_args(args);
                 }
-                if let Some(&f) = self.fn_names.get(&name) {
-                    let sig = self.t.fns[f.index()].sig.clone();
-                    self.t.callees[id.index()] = Some(Callee::Fn(f));
-                    return self.check_args(&sig, None, args, span);
-                }
-                let text = self.name(name).to_string();
-                if let Some(target) = prelude::builtin_type(&text) {
-                    return self.conversion(id, target, args, span);
-                }
-                if text == "print" || text == "eprint" {
-                    return self.print_call(id, text == "eprint", args);
-                }
-                if text == "measure" {
-                    return self.measure_fn(id, args, span);
-                }
-                if text == "amplitudes" {
-                    return self.amplitudes_fn(id, args, span);
-                }
-                if text == "fft" || text == "ifft" {
-                    return self.fourier_fn(id, text == "ifft", args, span);
-                }
-                if let Some((builtin, sig)) = prelude::function(&mut self.t.types, &text) {
-                    self.t.callees[id.index()] = Some(Callee::Builtin(builtin));
-                    return self.check_args(&sig, None, args, span);
-                }
-                let message = if self.struct_names.contains_key(&name) {
-                    format!("`{text}` is a struct; create one with `{text} {{ … }}`")
-                } else {
-                    format!("cannot find the function `{text}`")
-                };
-                self.error(callee_expr.span, message);
-                self.skip_args(args)
-            }
-            ExprKind::Path(segments) => {
-                if let [name] = *ast.list(segments) {
-                    return self.bare_call(id, name, args, expect, span);
-                }
-                if let [ty_name, name] = *ast.list(segments)
-                    && let Some(ty) = self.path_type(ty_name)
+                if let [ty_name, name] = *rest
+                    && let Some(ty) = self.path_type(at, ty_name, path_span)
                     && let Some(index) = self.variant_index(ty, name)
                 {
                     let path = self.path_text(segments);
                     return self.variant_call(id, ty, index, &path, args, span);
                 }
-                if let [ty_name, name] = *ast.list(segments)
-                    && let Some(target) = self.path_type(ty_name)
+                // `Trait::f(x, …)`: the trait's function, for the type of its receiver.
+                if let [trait_name, name] = *rest
+                    && let Some(trait_id) = self.trait_at(at, trait_name)
+                {
+                    let ast = self.ast;
+                    let Some(&f) = self.t.traits[trait_id.index()]
+                        .fns
+                        .iter()
+                        .find(|&&f| ast.function(f).name == name)
+                    else {
+                        let message = format!(
+                            "`{}` has no function `{}`",
+                            self.name(trait_name),
+                            self.name(name)
+                        );
+                        self.error(path_span, message);
+                        return self.skip_args(args);
+                    };
+                    let sig = self.t.fns[f.index()].sig.clone();
+                    let self_param = self.t.traits[trait_id.index()].self_param;
+                    let receiver = sig.receiver.map(|kind| match kind {
+                        OwnKind::Mv => self_param,
+                        OwnKind::Ref => self.t.types.reference(false, self_param),
+                        OwnKind::Mut => self.t.types.reference(true, self_param),
+                    });
+                    self.t.callees[id.index()] = Some(Callee::Fn(f));
+                    return self.method_args(id, f, &sig, None, receiver, args, span);
+                }
+                if let [ty_name, name] = *rest
+                    && at.is_none()
+                    && self.name(ty_name) == "Vec"
+                    && matches!(self.name(name), "new" | "with_capacity")
+                {
+                    return self.vec_ctor_call(
+                        id,
+                        callee,
+                        self.name(name) == "with_capacity",
+                        args,
+                        expect,
+                        span,
+                    );
+                }
+                if let [ty_name, name] = *rest
+                    && let Some(target) = self.path_type(at, ty_name, path_span)
                     && target.width().is_some()
                     && self.name(name) == "try_from"
                 {
                     return self.try_conversion(id, target, args, span);
                 }
-                if let [ty_name, name] = *ast.list(segments)
-                    && let Some(ty) = self.path_type(ty_name)
+                if let [ty_name, name] = *rest
+                    && let Some(ty) = self.path_type(at, ty_name, path_span)
                 {
-                    if let Some((callee_kind, sig)) = self.lookup_method(ty, name) {
+                    if let Some((callee_kind, sig)) = self.lookup_method(ty, name, path_span) {
+                        if let Callee::Fn(f) = callee_kind {
+                            self.method_visible(f, path_span);
+                        }
                         self.t.callees[id.index()] = Some(callee_kind);
                         // `Type::method(x, …)` passes the receiver as the first argument.
                         let receiver = sig.receiver.map(|kind| match kind {
@@ -2249,7 +5232,12 @@ impl Checker<'_> {
                             OwnKind::Ref => self.t.types.reference(false, ty),
                             OwnKind::Mut => self.t.types.reference(true, ty),
                         });
-                        return self.check_args(&sig, receiver, args, span);
+                        return match callee_kind {
+                            Callee::Fn(f) => {
+                                self.method_args(id, f, &sig, Some(ty), receiver, args, span)
+                            }
+                            _ => self.check_args(&sig, receiver, args, span),
+                        };
                     }
                     let message =
                         format!("{} has no function `{}`", self.show(ty), self.name(name));
@@ -2261,7 +5249,18 @@ impl Checker<'_> {
                 self.skip_args(args)
             }
             _ => {
-                self.expr(callee, Expect::None);
+                let ty = self.expr(callee, Expect::None);
+                if let TyKind::ExternCFn { params, ret } = self.t.types.kind(ty).clone() {
+                    let sig = Sig {
+                        receiver: None,
+                        params: params.into_vec(),
+                        ret,
+                        is_unsafe: true,
+                        reversible: Reversible::No,
+                    };
+                    self.t.callees[id.index()] = Some(Callee::FnPtr);
+                    return self.check_args(&sig, None, args, span);
+                }
                 self.error(callee_expr.span, "only functions can be called");
                 self.skip_args(args)
             }
@@ -2292,7 +5291,6 @@ impl Checker<'_> {
             self.skip_args(args);
             return enum_ty;
         }
-        self.t.callees[id.index()] = Some(Callee::Variant(s, index));
         let sig = Sig {
             receiver: None,
             params: variant.data.clone(),
@@ -2300,6 +5298,19 @@ impl Checker<'_> {
             is_unsafe: false,
             reversible: Reversible::Yes,
         };
+        // `Maybe::Just(x)`: a generic enum's arguments, from the variant's data. `Self::Just(x)`
+        // is the enum's own type, in its methods.
+        if self.struct_params.contains_key(&s) && !path.starts_with("Self::") {
+            let params = self.t.types.structs[s.index()].args.clone();
+            let found = self.infer(&params, vec![None; params.len()], |this| {
+                this.check_args(&sig, None, args, span);
+            });
+            let type_args = self.settle(&params, found, "variant", span);
+            let instance = self.t.types.instantiate(s, type_args);
+            self.t.callees[id.index()] = Some(Callee::Variant(instance, index));
+            return self.t.types.struct_ty(instance);
+        }
+        self.t.callees[id.index()] = Some(Callee::Variant(s, index));
         self.check_args(&sig, None, args, span);
         enum_ty
     }
@@ -2307,8 +5318,20 @@ impl Checker<'_> {
     /// The standard library's `Option<T>` (one type argument) or `Result<T, E>` (two): an enum
     /// made the first time each is used (`spec/types.md` §2).
     fn std_enum(&mut self, args: Vec<Ty>) -> Ty {
+        let template = self.std_template(args.len() == 2);
+        let id = self.t.types.instantiate(template, args);
+        self.t.types.struct_ty(id)
+    }
+
+    /// The generic definition of `Option<T>`, or of `Result<T, E>` if `result`, made the
+    /// first time it is needed.
+    fn std_template(&mut self, result: bool) -> StructId {
         let ast = self.ast;
         let symbol = |text: &str| ast.symbols.get(text).expect("interned by the parser");
+        let name = symbol(if result { "Result" } else { "Option" });
+        if let Some(&id) = self.std_enums.get(&name) {
+            return id;
+        }
         let variant = |text: &str, data: Vec<Ty>| VariantDef {
             name: symbol(text),
             span: Span::default(),
@@ -2316,32 +5339,33 @@ impl Checker<'_> {
             names: Vec::new(),
             named: false,
         };
-        let (name, variants) = match *args.as_slice() {
-            [value] => (
-                "Option",
-                vec![variant("Some", vec![value]), variant("None", Vec::new())],
-            ),
-            [value, error] => (
-                "Result",
+        // The parameters are only ever shown replaced, so they can share the enum's name.
+        let value = self.t.types.param(name, false);
+        let (args, variants) = if result {
+            let error = self.t.types.param(name, false);
+            (
+                vec![value, error],
                 vec![variant("Ok", vec![value]), variant("Err", vec![error])],
-            ),
-            _ => unreachable!("`Option` takes one type argument, `Result` two"),
+            )
+        } else {
+            (
+                vec![value],
+                vec![variant("Some", vec![value]), variant("None", Vec::new())],
+            )
         };
-        let name = symbol(name);
-        if let Some(&id) = self.std_enums.get(&(name, args.clone())) {
-            return self.t.types.struct_ty(id);
-        }
         let id = StructId(self.t.types.structs.len() as u32);
         self.t.types.structs.push(StructDef {
             name,
             span: Span::default(),
             fields: Vec::new(),
             variants: Some(variants),
-            args: args.clone(),
+            args,
             bare: true,
+            template: None,
+            is_extern_c: false,
         });
-        self.std_enums.insert((name, args), id);
-        self.t.types.struct_ty(id)
+        self.std_enums.insert(name, id);
+        id
     }
 
     /// The `Option` or `Result` that `expect` asks for, if it has the variant `name`, and the
@@ -2452,14 +5476,271 @@ impl Checker<'_> {
     }
 
     /// A method or associated function of `ty`, built-in or declared in a struct.
-    fn lookup_method(&mut self, ty: Ty, name: Symbol) -> Option<(Callee, Sig)> {
+    fn lookup_method(&mut self, ty: Ty, name: Symbol, span: Span) -> Option<(Callee, Sig)> {
         if let Some(id) = self.struct_of(ty) {
-            let &f = self.methods.get(&(id, name))?;
-            return Some((Callee::Fn(f), self.t.fns[f.index()].sig.clone()));
+            // An instance's methods are its generic definition's.
+            let id = self.t.types.structs[id.index()].template.unwrap_or(id);
+            if let Some(&f) = self.methods.get(&(id, name)) {
+                return Some((Callee::Fn(f), self.t.fns[f.index()].sig.clone()));
+            }
         }
         let text = self.ast.name(name);
-        prelude::method(&mut self.t.types, ty, text)
-            .map(|(builtin, sig)| (Callee::Builtin(builtin), sig))
+        if let Some((builtin, sig)) = prelude::method(&mut self.t.types, ty, text) {
+            return Some((Callee::Builtin(builtin), sig));
+        }
+        if let Some((op, sig)) = self.std_method(ty, text) {
+            return Some((Callee::Builtin(Builtin::Std(op)), sig));
+        }
+        // A trait's function, for a type that implements the trait.
+        let f = self.trait_fn(ty, name, span)?;
+        Some((Callee::Fn(f), self.t.fns[f.index()].sig.clone()))
+    }
+
+    /// The function `name` of a trait `ty` implements, reporting when several have one.
+    fn trait_fn(&mut self, ty: Ty, name: Symbol, span: Span) -> Option<FnId> {
+        let ast = self.ast;
+        let candidates: Vec<FnId> = (0..self.t.traits.len())
+            .filter(|&t| self.implements(ty, TraitId(t as u32), None))
+            .filter_map(|t| {
+                self.t.traits[t]
+                    .fns
+                    .iter()
+                    .copied()
+                    .find(|&f| ast.function(f).name == name)
+            })
+            .collect();
+        if candidates.is_empty() && self.t.inferable.contains_key(&ty) {
+            return self.inferred_trait_fn(ty, name, span);
+        }
+        if candidates.len() > 1 {
+            let traits: Vec<String> = candidates
+                .iter()
+                .map(|f| {
+                    format!(
+                        "`{}`",
+                        self.name(self.t.traits[self.t.fn_traits[f].index()].name)
+                    )
+                })
+                .collect();
+            let first = self.name(self.t.traits[self.t.fn_traits[&candidates[0]].index()].name);
+            let message = format!(
+                "`{}` is a function of {}, which {} implements",
+                self.name(name),
+                traits.join(" and "),
+                self.show(ty)
+            );
+            let help = format!("say which with `{first}::{}(…)`", self.name(name));
+            self.error(span, message).help = Some(help);
+        }
+        candidates.first().copied()
+    }
+
+    /// For `x.f()` on an inferable parameter `T`, the function `f` of the one trait without
+    /// parameters that has one, recording that `T` needs that trait.
+    fn inferred_trait_fn(&mut self, ty: Ty, name: Symbol, span: Span) -> Option<FnId> {
+        let ast = self.ast;
+        let candidates: Vec<(TraitId, FnId)> = self
+            .t
+            .traits
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.params.is_empty())
+            .filter_map(|(i, t)| {
+                let f = t
+                    .fns
+                    .iter()
+                    .copied()
+                    .find(|&f| ast.function(f).name == name)?;
+                Some((TraitId(i as u32), f))
+            })
+            .collect();
+        match *candidates.as_slice() {
+            [] => None,
+            [(trait_id, f)] => {
+                self.infer_bound(ty, trait_id, span);
+                Some(f)
+            }
+            [(first, first_fn), ..] => {
+                let traits: Vec<String> = candidates
+                    .iter()
+                    .map(|&(t, _)| format!("`{}`", self.name(self.t.traits[t.index()].name)))
+                    .collect();
+                let param = self.t.types.display(ty, ast).to_string();
+                let message = format!(
+                    "`{}` is a function of {}, so `{param}` needs a bound saying which",
+                    self.name(name),
+                    traits.join(" and "),
+                );
+                let help = format!(
+                    "write `{param}: {}`, or another of them",
+                    self.name(self.t.traits[first.index()].name)
+                );
+                self.error(span, message).help = Some(help);
+                // Reported: carry on with the first, so nothing else is.
+                self.infer_bound(ty, first, span);
+                Some(first_fn)
+            }
+        }
+    }
+
+    /// Records that the inferable parameter `ty` needs `trait_id`, here, if it does not
+    /// already. Returns whether `ty` is inferable.
+    fn infer_bound(&mut self, ty: Ty, trait_id: TraitId, span: Span) -> bool {
+        if !self.t.inferable.contains_key(&ty) || !self.t.traits[trait_id.index()].params.is_empty()
+        {
+            return false;
+        }
+        let needs = self.inferred.entry(ty).or_default();
+        if !needs.iter().any(|&(t, _)| t == trait_id) {
+            needs.push((trait_id, span));
+        }
+        true
+    }
+
+    /// After every body: the trait bounds inferred for each parameter, followed through the
+    /// calls that pass it on, and checked at each call that gives a type (`spec/types.md`
+    /// §6).
+    fn check_inferred_bounds(&mut self) {
+        if self.inferred.is_empty() {
+            return;
+        }
+        let mut calls: Vec<(ExprId, FnId, Vec<Ty>)> = self
+            .t
+            .type_args
+            .iter()
+            .filter_map(|(&e, args)| match self.t.callees[e.index()] {
+                Some(Callee::Fn(g)) => Some((e, g, args.clone())),
+                _ => None,
+            })
+            .collect();
+        calls.sort_by_key(|c| c.0.index());
+        // A parameter passed on to one that needs a trait needs it too, through any number
+        // of calls: each call is an edge from the callee's parameter to the caller's.
+        let mut edges: FxHashMap<Ty, Vec<(Ty, Span)>> = FxHashMap::default();
+        for (e, g, args) in &calls {
+            for (&p, &arg) in self.t.fns[g.index()].generics.iter().zip(args) {
+                if arg != p && self.t.inferable.contains_key(&arg) {
+                    edges
+                        .entry(p)
+                        .or_default()
+                        .push((arg, self.ast.expr(*e).span));
+                }
+            }
+        }
+        let mut work: Vec<(Ty, TraitId)> = self
+            .inferred
+            .iter()
+            .flat_map(|(&p, needs)| needs.iter().map(move |&(t, _)| (p, t)))
+            .collect();
+        while let Some((p, t)) = work.pop() {
+            for &(arg, span) in edges.get(&p).into_iter().flatten() {
+                if !self.implements(arg, t, Some(&[])) {
+                    self.infer_bound(arg, t, span);
+                    work.push((arg, t));
+                }
+            }
+        }
+        for (e, g, args) in &calls {
+            let span = self.ast.expr(*e).span;
+            let generics = self.t.fns[g.index()].generics.clone();
+            for (&p, &arg) in generics.iter().zip(args) {
+                if self.t.inferable.contains_key(&arg) || self.t.types.is_wildcard(arg) {
+                    continue;
+                }
+                let needs = self.inferred.get(&p).cloned().unwrap_or_default();
+                for (t, at) in needs {
+                    if self.implements(arg, t, Some(&[])) {
+                        continue;
+                    }
+                    let trait_name = self.name(self.t.traits[t.index()].name).to_string();
+                    let param = self.t.types.display(p, self.ast).to_string();
+                    let message = format!(
+                        "`{}` needs `{param}: {trait_name}`, but {} does not implement `{trait_name}`",
+                        self.name(self.ast.function(*g).name),
+                        self.show(arg)
+                    );
+                    self.error(span, message)
+                        .labels
+                        .push((at, format!("`{param}: {trait_name}` is needed here")));
+                }
+            }
+        }
+    }
+
+    /// An operator on a type of the program's own, a call of the operator's trait's function
+    /// (`fn_index`, `0` for single-method traits) with `receiver` as receiver: trait `index`
+    /// in [`OPS`] (`std::ops` or `std::cmp`). `None` for a built-in type, for a comparable
+    /// enum without its own `impl Eq`, or when the trait's module is not used, leaving the
+    /// operator built in.
+    #[allow(clippy::too_many_arguments)]
+    fn operator(
+        &mut self,
+        id: ExprId,
+        index: usize,
+        fn_index: usize,
+        word: &'static str,
+        receiver: ExprId,
+        receiver_ty: Ty,
+        args: &[ExprId],
+        span: Span,
+    ) -> Option<Ty> {
+        let trait_id = TraitId(self.t.types.ops[index]?);
+        let base = self.t.types.deref(receiver_ty);
+        if !matches!(
+            self.t.types.kind(base),
+            TyKind::Struct(_) | TyKind::Param(_)
+        ) {
+            return None;
+        }
+        // Comparable enums (`Option<Int>`, plain enums) keep built-in `==`/`!=` unless they
+        // explicitly implement `Eq`.
+        if OPS[index].kind == OpKind::Eq
+            && self.t.types.is_comparable(base)
+            && !self
+                .t
+                .impls
+                .iter()
+                .any(|i| i.trait_id == trait_id && i.matches(&self.t.types, base, None).is_some())
+        {
+            return None;
+        }
+        let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
+        if !self.implements(base, trait_id, None) {
+            let message = format!(
+                "`{word}` cannot be applied to {}: it does not implement `{trait_name}`",
+                self.show(base)
+            );
+            let help = if self.t.types.as_param(base).is_some() {
+                format!(
+                    "bound it: `{}: {trait_name}`",
+                    self.show(base).trim_matches('`')
+                )
+            } else {
+                format!(
+                    "implement `std::{}::{trait_name}` for it",
+                    OPS[index].module
+                )
+            };
+            self.error(span, message).help = Some(help);
+            return Some(self.skip_args(args));
+        }
+        let f = self.t.traits[trait_id.index()].fns[fn_index];
+        let sig = self.t.fns[f.index()].sig.clone();
+        self.t.callees[id.index()] = Some(Callee::Fn(f));
+        self.t.receivers[id.index()] = sig.receiver;
+        if base != receiver_ty {
+            self.t.adjust[receiver.index()] = Adjust::Deref;
+        }
+        let errors = self.diagnostics.len();
+        let outer = self.operator.replace((word, span));
+        let ty = self.method_args(id, f, &sig, Some(base), None, args, span);
+        self.operator = outer;
+        // A side that does not fit leaves `Output` unknown: one error is enough.
+        Some(if self.diagnostics.len() > errors {
+            Ty::ERROR
+        } else {
+            ty
+        })
     }
 
     fn method_call(
@@ -2476,11 +5757,14 @@ impl Checker<'_> {
         if self.t.types.is_wildcard(base) {
             return self.skip_args(args);
         }
-        let Some((callee, sig)) = self.lookup_method(base, method) else {
+        let Some((callee, sig)) = self.lookup_method(base, method, span) else {
             let message = format!("{} has no method `{}`", self.show(base), self.name(method));
             self.error(span, message);
             return self.skip_args(args);
         };
+        if let Callee::Fn(f) = callee {
+            self.method_visible(f, span);
+        }
         if sig.receiver.is_none() {
             let message = format!(
                 "`{0}` is an associated function, not a method; call it as `{1}::{0}(…)`",
@@ -2495,7 +5779,97 @@ impl Checker<'_> {
         if base != receiver_ty {
             self.t.adjust[receiver.index()] = Adjust::Deref;
         }
-        self.check_args(&sig, None, args, span)
+        match callee {
+            Callee::Fn(f) => self.method_args(id, f, &sig, Some(base), None, args, span),
+            _ => self.check_args(&sig, None, args, span),
+        }
+    }
+
+    /// The arguments of a call `id` of the method or associated function `f` of `owner`'s
+    /// type, and the call's type. For a generic struct's method, `owner`'s type arguments
+    /// are the struct's; the method's own are inferred. `owner` is `None` for `Trait::f(…)`.
+    #[allow(clippy::too_many_arguments)]
+    fn method_args(
+        &mut self,
+        id: ExprId,
+        f: FnId,
+        sig: &Sig,
+        owner: Option<Ty>,
+        receiver: Option<Ty>,
+        args: &[ExprId],
+        span: Span,
+    ) -> Ty {
+        let generics = self.t.fns[f.index()].generics.clone();
+        if generics.is_empty() {
+            return self.check_args(sig, receiver, args, span);
+        }
+        // The struct's arguments, when `owner` is an instance rather than its definition;
+        // for a trait's function, `Self` is `owner`.
+        let mut known = vec![None; generics.len()];
+        if let Some(&trait_id) = self.t.fn_traits.get(&f) {
+            // `Trait::f(x)` names no type: `Self` is inferred from `x`.
+            known[0] = owner;
+            // A `Self` with one `impl` of a generic trait fixes its arguments before the
+            // call's are checked, so they are expected, and lent, as the `impl` takes them:
+            // `a += b` for an `impl AddAssign<ref Reg>` lends `b`.
+            let n = self.t.traits[trait_id.index()].params.len();
+            if n > 0
+                && let Some(owner) = owner
+                && let Some(only) = self.only_trait_args(owner, trait_id)
+            {
+                for (slot, arg) in known[1..=n].iter_mut().zip(only) {
+                    *slot = Some(arg);
+                }
+            }
+        } else if let Some(s) = owner.and_then(|o| self.struct_of(o)) {
+            let def = &self.t.types.structs[s.index()];
+            if def.template.is_some() {
+                for (slot, &arg) in known.iter_mut().zip(&def.args) {
+                    *slot = Some(arg);
+                }
+            }
+        }
+        let name = self.name(self.ast.function(f).name).to_string();
+        let mut found = self.infer(&generics, known, |this| {
+            this.check_args(sig, receiver, args, span);
+        });
+        // A generic trait's arguments the call leaves open are the only ones `Self`
+        // implements it with: `Oracle<4>` for a `Parity` with only that `impl`.
+        if let Some(&trait_id) = self.t.fn_traits.get(&f) {
+            let n = self.t.traits[trait_id.index()].params.len();
+            if found[1..=n].iter().any(Option::is_none)
+                && let Some(self_ty) = found[0]
+                && let Some(only) = self.only_trait_args(self_ty, trait_id)
+                && found[1..=n]
+                    .iter()
+                    .zip(&only)
+                    .all(|(f, &o)| f.is_none_or(|f| f == o))
+            {
+                for (slot, o) in found[1..=n].iter_mut().zip(only) {
+                    *slot = Some(o);
+                }
+            }
+        }
+        let type_args = self.settle(&generics, found, "call", span);
+        self.check_bounds(&generics, &type_args, &name, span);
+        let ret = self.t.types.subst(sig.ret, &generics, &type_args);
+        let ret = self.resolve_assoc(ret);
+        self.record_call(id, f, type_args);
+        ret
+    }
+
+    /// Records the type arguments of the call `id` of `f`. A call of a trait's function whose
+    /// `Self` has an `impl` calls that `impl`'s function, so its body is analysed like any
+    /// other's; through a bound, the `impl` is only known in each copy.
+    fn record_call(&mut self, id: ExprId, f: FnId, type_args: Vec<Ty>) {
+        if let Some((g, args)) = self.t.dispatch(&self.t.types, f, &type_args)
+            && g != f
+        {
+            self.t.callees[id.index()] = Some(Callee::Fn(g));
+            self.t.type_args.insert(id, args);
+            return;
+        }
+        self.t.type_args.insert(id, type_args);
     }
 
     /// Checks arguments against `sig`'s parameters (preceded by `receiver`, for
@@ -2518,6 +5892,7 @@ impl Checker<'_> {
         for (i, &arg) in args.iter().enumerate() {
             match params.get(i) {
                 Some(&param) => {
+                    let param = self.known(param);
                     self.expr(arg, Expect::Ty(param));
                 }
                 None => {
@@ -2630,6 +6005,10 @@ impl Checker<'_> {
                 let elem = self.measured_type(elem)?;
                 Ok(self.t.types.array(elem, len))
             }
+            TyKind::SizedArray(elem, len) => {
+                let elem = self.measured_type(elem)?;
+                Ok(self.t.types.sized_array(elem, len))
+            }
             TyKind::Tuple(elems) => {
                 let elems = elems
                     .iter()
@@ -2641,8 +6020,10 @@ impl Checker<'_> {
                 "a struct holding qubits cannot be counted; return its qubits in a tuple or array",
             ),
             TyKind::Ref { .. } => Err("references cannot be counted; return values"),
-            _ if self.t.types.is_printable(ty) => Ok(ty),
-            _ => Err("only classical values and qubits can be counted"),
+            _ if self.t.types.linearity(ty) == Kind::Copyable && self.t.types.is_printable(ty) => {
+                Ok(ty)
+            }
+            _ => Err("only copyable classical values and qubits can be counted"),
         }
     }
 
@@ -2652,6 +6033,379 @@ impl Checker<'_> {
         for &arg in args {
             let ty = self.expr(arg, Expect::None);
             self.require_printable(arg, ty);
+        }
+        Ty::UNIT
+    }
+
+    /// `Vec::new()` and `Vec::with_capacity(cap)`: element type from turbofish or expectation.
+    fn vec_ctor_call(
+        &mut self,
+        id: ExprId,
+        callee: ExprId,
+        with_capacity: bool,
+        args: &[ExprId],
+        expect: Expect,
+        span: Span,
+    ) -> Ty {
+        use prelude::StdOp;
+        let op = if with_capacity {
+            StdOp::VecWithCapacity
+        } else {
+            StdOp::VecNew
+        };
+        let given = self.ast.list(self.ast.path_args(callee)).to_vec();
+        let elem = if !given.is_empty() {
+            if given.len() != 1 {
+                self.error(span, "`Vec` takes 1 type argument");
+                self.skip_args(args);
+                return Ty::ERROR;
+            }
+            let e = self.resolve_type_arg(given[0]);
+            if !self.t.types.is_wildcard(e) && self.t.types.linearity(e) == Kind::Linear {
+                let message = format!(
+                    "a `Vec` holds classical values, not linear type {}",
+                    self.show(e)
+                );
+                self.error(span, message);
+            }
+            e
+        } else if let Some(exp) = expect.ty()
+            && let TyKind::Vec(e) = *self.t.types.kind(self.t.types.deref(exp))
+        {
+            e
+        } else {
+            self.error(
+                span,
+                "cannot infer the element type of `Vec`; write `Vec::<T>::new()` or annotate the variable",
+            );
+            self.skip_args(args);
+            return Ty::ERROR;
+        };
+        let vec_ty = self.t.types.vec_ty(elem);
+        let params = if with_capacity { vec![Ty::INT] } else { vec![] };
+        let sig = Sig::new(None, params, vec_ty, Reversible::Yes);
+        self.t.callees[id.index()] = Some(Callee::Builtin(Builtin::Std(op)));
+        self.check_args(&sig, None, args, span)
+    }
+
+    /// Free functions in `std::io`, `std::env`, and `std::fs` (`spec/std.md` §5–§6).
+    fn std_free_call(&mut self, id: ExprId, text: &str, args: &[ExprId], span: Span) -> Ty {
+        use prelude::StdOp::*;
+        let (op, params, ret) = match text {
+            "stdout" => (IoStdout, vec![], Ty::IO_STREAM),
+            "stderr" => (IoStderr, vec![], Ty::IO_STREAM),
+            "stdin" => (IoStdin, vec![], Ty::STDIN),
+            "var" => {
+                let ret = self.std_enum(vec![Ty::STRING]);
+                (EnvVar, vec![Ty::STRING], ret)
+            }
+            "args" => {
+                let ret = self.t.types.vec_ty(Ty::STRING);
+                (EnvArgs, vec![], ret)
+            }
+            "current_dir" => {
+                let ret = self.std_enum(vec![Ty::STRING, Ty::STRING]);
+                (EnvCurrentDir, vec![], ret)
+            }
+            "read_to_string" => {
+                let ret = self.std_enum(vec![Ty::STRING, Ty::STRING]);
+                (FsReadToString, vec![Ty::STRING], ret)
+            }
+            "read" => {
+                let bytes = self.t.types.vec_ty(Ty::U8);
+                let ret = self.std_enum(vec![bytes, Ty::STRING]);
+                (FsRead, vec![Ty::STRING], ret)
+            }
+            "write" => {
+                let ret = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                (FsWrite, vec![Ty::STRING, Ty::STRING], ret)
+            }
+            "write_bytes" => {
+                let bytes = self.t.types.vec_ty(Ty::U8);
+                let ref_bytes = self.t.types.reference(false, bytes);
+                let ret = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                (FsWriteBytes, vec![Ty::STRING, ref_bytes], ret)
+            }
+            "exists" => (FsExists, vec![Ty::STRING], Ty::BOOL),
+            "create_dir_all" => {
+                let ret = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                (FsCreateDirAll, vec![Ty::STRING], ret)
+            }
+            "remove_file" => {
+                let ret = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                (FsRemoveFile, vec![Ty::STRING], ret)
+            }
+            _ => unreachable!("unexpected std free function `{text}`"),
+        };
+        let sig = Sig::new(None, params, ret, Reversible::No);
+        self.t.callees[id.index()] = Some(Callee::Builtin(Builtin::Std(op)));
+        self.check_args(&sig, None, args, span)
+    }
+
+    /// Methods and associated functions on `Vec<T>`, `String`, `IoStream`, `Stdin`,
+    /// `TcpStream`, and `TcpListener` (`spec/std.md` §5–§6).
+    fn std_method(&mut self, ty: Ty, name: &str) -> Option<(prelude::StdOp, Sig)> {
+        use Reversible::*;
+        use prelude::StdOp::*;
+        match self.t.types.kind(ty).clone() {
+            TyKind::Vec(elem) => {
+                let ref_self = Some(OwnKind::Ref);
+                let mut_self = Some(OwnKind::Mut);
+                let (op, recv, params, ret) = match name {
+                    "len" => (VecLen, ref_self, vec![], Ty::INT),
+                    "is_empty" => (VecIsEmpty, ref_self, vec![], Ty::BOOL),
+                    "push" => (VecPush, mut_self, vec![elem], Ty::UNIT),
+                    "pop" => {
+                        let opt = self.std_enum(vec![elem]);
+                        (VecPop, mut_self, vec![], opt)
+                    }
+                    "get" => {
+                        let opt = self.std_enum(vec![elem]);
+                        (VecGet, ref_self, vec![Ty::INT], opt)
+                    }
+                    "set" => (VecSet, mut_self, vec![Ty::INT, elem], Ty::UNIT),
+                    "clear" => (VecClear, mut_self, vec![], Ty::UNIT),
+                    "extend" => {
+                        let ref_vec = self.t.types.reference(false, ty);
+                        (VecExtend, mut_self, vec![ref_vec], Ty::UNIT)
+                    }
+                    "clone" => (VecClone, ref_self, vec![], ty),
+                    _ => return None,
+                };
+                Some((op, Sig::new(recv, params, ret, Yes)))
+            }
+            TyKind::String => {
+                let ref_self = Some(OwnKind::Ref);
+                let (op, recv, params, ret) = match name {
+                    "len" => (StrLen, ref_self, vec![], Ty::INT),
+                    "is_empty" => (StrIsEmpty, ref_self, vec![], Ty::BOOL),
+                    "contains" => (StrContains, ref_self, vec![Ty::STRING], Ty::BOOL),
+                    "starts_with" => (StrStartsWith, ref_self, vec![Ty::STRING], Ty::BOOL),
+                    "ends_with" => (StrEndsWith, ref_self, vec![Ty::STRING], Ty::BOOL),
+                    "trim" => (StrTrim, ref_self, vec![], Ty::STRING),
+                    "split" => {
+                        let ret = self.t.types.vec_ty(Ty::STRING);
+                        (StrSplit, ref_self, vec![Ty::STRING], ret)
+                    }
+                    "lines" => {
+                        let ret = self.t.types.vec_ty(Ty::STRING);
+                        (StrLines, ref_self, vec![], ret)
+                    }
+                    "replace" => (
+                        StrReplace,
+                        ref_self,
+                        vec![Ty::STRING, Ty::STRING],
+                        Ty::STRING,
+                    ),
+                    "substring" => {
+                        let opt = self.std_enum(vec![Ty::STRING]);
+                        (StrSubstring, ref_self, vec![Ty::INT, Ty::INT], opt)
+                    }
+                    "find" => {
+                        let opt = self.std_enum(vec![Ty::INT]);
+                        (StrFind, ref_self, vec![Ty::STRING], opt)
+                    }
+                    "to_uppercase" => (StrToUpper, ref_self, vec![], Ty::STRING),
+                    "to_lowercase" => (StrToLower, ref_self, vec![], Ty::STRING),
+                    "as_bytes" => {
+                        let ret = self.t.types.vec_ty(Ty::U8);
+                        (StrAsBytes, ref_self, vec![], ret)
+                    }
+                    "parse_int" => {
+                        let res = self.std_enum(vec![Ty::INT, Ty::STRING]);
+                        (StrParseInt, ref_self, vec![], res)
+                    }
+                    "parse_float" => {
+                        let res = self.std_enum(vec![Ty::FLOAT, Ty::STRING]);
+                        (StrParseFloat, ref_self, vec![], res)
+                    }
+                    "repeat" => (StrRepeat, ref_self, vec![Ty::INT], Ty::STRING),
+                    "from_utf8" => {
+                        let bytes = self.t.types.vec_ty(Ty::U8);
+                        let ref_bytes = self.t.types.reference(false, bytes);
+                        let res = self.std_enum(vec![Ty::STRING, Ty::STRING]);
+                        (StrFromUtf8, None, vec![ref_bytes], res)
+                    }
+                    "join" => {
+                        let parts = self.t.types.vec_ty(Ty::STRING);
+                        let ref_parts = self.t.types.reference(false, parts);
+                        (StrJoin, None, vec![ref_parts, Ty::STRING], Ty::STRING)
+                    }
+                    _ => return None,
+                };
+                Some((op, Sig::new(recv, params, ret, Yes)))
+            }
+            TyKind::IoStream => {
+                let ref_self = Some(OwnKind::Ref);
+                let (op, params, ret) = match name {
+                    "lock" => (IoLock, vec![], Ty::IO_STREAM),
+                    "write" => {
+                        let res = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                        (IoWrite, vec![Ty::STRING], res)
+                    }
+                    "flush" => {
+                        let res = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                        (IoFlush, vec![], res)
+                    }
+                    _ => return None,
+                };
+                Some((op, Sig::new(ref_self, params, ret, No)))
+            }
+            TyKind::Stdin => {
+                let ref_self = Some(OwnKind::Ref);
+                let (op, ret) = match name {
+                    "read_line" => (IoReadLine, self.std_enum(vec![Ty::STRING, Ty::STRING])),
+                    "read_to_string" => {
+                        (IoReadToString, self.std_enum(vec![Ty::STRING, Ty::STRING]))
+                    }
+                    _ => return None,
+                };
+                Some((op, Sig::new(ref_self, vec![], ret, No)))
+            }
+            TyKind::TcpStream => {
+                let ref_self = Some(OwnKind::Ref);
+                let (op, recv, params, ret) = match name {
+                    "connect" => {
+                        let res = self.std_enum(vec![Ty::TCP_STREAM, Ty::STRING]);
+                        (NetTcpConnect, None, vec![Ty::STRING], res)
+                    }
+                    "read" => {
+                        let bytes = self.t.types.vec_ty(Ty::U8);
+                        let res = self.std_enum(vec![bytes, Ty::STRING]);
+                        (NetTcpRead, ref_self, vec![Ty::INT], res)
+                    }
+                    "read_to_string" => {
+                        let res = self.std_enum(vec![Ty::STRING, Ty::STRING]);
+                        (NetTcpReadToString, ref_self, vec![], res)
+                    }
+                    "write" => {
+                        let bytes = self.t.types.vec_ty(Ty::U8);
+                        let ref_bytes = self.t.types.reference(false, bytes);
+                        let res = self.std_enum(vec![Ty::INT, Ty::STRING]);
+                        (NetTcpWrite, ref_self, vec![ref_bytes], res)
+                    }
+                    "write_str" => {
+                        let res = self.std_enum(vec![Ty::INT, Ty::STRING]);
+                        (NetTcpWriteStr, ref_self, vec![Ty::STRING], res)
+                    }
+                    "flush" => {
+                        let res = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                        (NetTcpFlush, ref_self, vec![], res)
+                    }
+                    "shutdown" => {
+                        let res = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                        (NetTcpShutdown, ref_self, vec![], res)
+                    }
+                    "close" => (NetTcpClose, Some(OwnKind::Mv), vec![], Ty::UNIT),
+                    _ => return None,
+                };
+                Some((op, Sig::new(recv, params, ret, No)))
+            }
+            TyKind::TcpListener => {
+                let ref_self = Some(OwnKind::Ref);
+                let (op, recv, params, ret) = match name {
+                    "bind" => {
+                        let res = self.std_enum(vec![Ty::TCP_LISTENER, Ty::STRING]);
+                        (NetListenerBind, None, vec![Ty::STRING], res)
+                    }
+                    "local_addr" => {
+                        let res = self.std_enum(vec![Ty::STRING, Ty::STRING]);
+                        (NetListenerLocalAddr, ref_self, vec![], res)
+                    }
+                    "accept" => {
+                        let res = self.std_enum(vec![Ty::TCP_STREAM, Ty::STRING]);
+                        (NetListenerAccept, ref_self, vec![], res)
+                    }
+                    "close" => (NetListenerClose, Some(OwnKind::Mv), vec![], Ty::UNIT),
+                    _ => return None,
+                };
+                Some((op, Sig::new(recv, params, ret, No)))
+            }
+            _ => None,
+        }
+    }
+
+    /// `qasm("…")`: inline OpenQASM (`spec/interop.md` §4).
+    fn qasm_call(&mut self, id: ExprId, args: &[ExprId], span: Span) -> Ty {
+        self.t.callees[id.index()] = Some(Callee::Builtin(Builtin::Qasm));
+        if args.len() != 1 {
+            self.error(
+                span,
+                format!(
+                    "`qasm` takes 1 argument (a string literal), but {} {} given",
+                    args.len(),
+                    if args.len() == 1 { "was" } else { "were" }
+                ),
+            );
+            self.skip_args(args);
+            return Ty::UNIT;
+        }
+        let arg = args[0];
+        let ExprKind::Str(parts) = self.ast.expr(arg).kind else {
+            self.expr(arg, Expect::None);
+            self.error(self.ast.expr(arg).span, "`qasm` takes a string literal");
+            return Ty::UNIT;
+        };
+        self.t.expr_types[arg.index()] = Ty::STRING;
+        for part in self.ast.list(parts) {
+            let StrPart::Value { expr, spec } = *part else {
+                continue;
+            };
+            let pspan = self.ast.expr(expr).span;
+            if spec.is_some() {
+                self.error(
+                    pspan,
+                    "inline OpenQASM placeholders do not take format specs",
+                );
+            }
+            let ty = self.expr(expr, Expect::None);
+            if self.t.types.is_wildcard(ty) {
+                continue;
+            }
+            let is_qubit_mut = ty == Ty::QUBIT
+                || matches!(
+                    self.t.types.kind(ty),
+                    TyKind::Ref {
+                        mutable: true,
+                        inner: Ty::QUBIT,
+                    }
+                );
+            let is_qubit_ref = matches!(
+                self.t.types.kind(ty),
+                TyKind::Ref {
+                    mutable: false,
+                    inner: Ty::QUBIT,
+                }
+            );
+            if is_qubit_mut {
+                if !matches!(
+                    self.ast.expr(expr).kind,
+                    ExprKind::Name(_)
+                        | ExprKind::Field { .. }
+                        | ExprKind::TupleIndex { .. }
+                        | ExprKind::Index { .. }
+                ) {
+                    self.error(
+                        pspan,
+                        "inline OpenQASM qubit placeholders must name a qubit place",
+                    );
+                }
+            } else if is_qubit_ref {
+                self.error(
+                    pspan,
+                    "inline OpenQASM needs mutable access to qubits, not `ref Qubit`",
+                );
+            } else {
+                let inner = self.t.types.deref(ty);
+                if !(inner.is_float() || inner.is_integer() || matches!(inner, Ty::BIT | Ty::BOOL))
+                {
+                    let message = format!(
+                        "inline OpenQASM placeholder must be a `Qubit` or classical scalar, not {}",
+                        self.show(ty)
+                    );
+                    self.error(pspan, message);
+                }
+            }
         }
         Ty::UNIT
     }
@@ -2789,20 +6543,37 @@ impl Checker<'_> {
             return Ty::ERROR;
         };
         let ty = self.expr(arg, Expect::None);
-        match (ty, self.array_of(ty)) {
-            (Ty::QUBIT, _) => Ty::BIT,
-            (_, Some((Ty::QUBIT, len))) => self.t.types.array(Ty::BIT, len),
-            _ if self.t.types.is_wildcard(ty) => Ty::ERROR,
-            _ => {
-                let message = format!(
-                    "`measure` takes a qubit or an array of qubits, but this is {}",
-                    self.show(ty)
-                );
-                let span = self.ast.expr(arg).span;
-                self.error(span, message);
-                Ty::ERROR
-            }
+        // `measure(x)` for anything that implements `Measure`: the trait's function.
+        if let Some(m) = self.t.types.measure
+            && !self.t.types.is_measurable(ty)
+            && (self.implements(ty, TraitId(m), None) || self.infer_bound(ty, TraitId(m), span))
+        {
+            let f = self.t.traits[m as usize].fns[0];
+            self.t.callees[id.index()] = Some(Callee::Fn(f));
+            self.record_call(id, f, vec![ty]);
+            let result = self.t.traits[m as usize].assoc[0].0;
+            let ret = self.t.types.intern(TyKind::Assoc {
+                base: ty,
+                trait_index: m,
+                args: Box::new([]),
+                name: result,
+                copy: true,
+            });
+            return self.resolve_assoc(ret);
         }
+        if let Some(bits) = self.t.types.measured(ty) {
+            return bits;
+        }
+        if !self.t.types.is_wildcard(ty) {
+            let message = format!(
+                "`measure` takes a qubit or an array of qubits, but this is {}",
+                self.show(ty)
+            );
+            let span = self.ast.expr(arg).span;
+            self.error(span, message).help =
+                Some("a type of your own can measure with an `impl` of `Measure`".into());
+        }
+        Ty::ERROR
     }
 }
 
@@ -2821,4 +6592,10 @@ impl DiagnosticExt for Diagnostic {
 mod coverage;
 
 #[cfg(test)]
+mod generics;
+#[cfg(test)]
+mod modules;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod traits;

@@ -174,9 +174,9 @@ circuit fn d() -> Bit {
 }
 ```
 
-`circuit fn` may only be declared on a closed run's function. Once Noev has modules, a `pub`
-function is a circuit to other modules only if it is declared `circuit fn`
-([modules.md](modules.md) §5).
+`circuit fn` may only be declared on a closed run's function. Whether a run is a circuit is
+decided across modules as within one: a function in another module need not be declared
+`circuit fn` for a run that calls it to be one ([modules.md](modules.md) §5).
 
 ## 5. What the compiler reports
 

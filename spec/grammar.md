@@ -48,12 +48,15 @@ ordinary identifiers, so `let adj = build_graph(edges)` is valid.
 | `mv`    | it is followed by a place expression (`mv q`, `mv e.state`) or by `self` in a parameter list |
 | `rev`   | it is directly followed by `fn` or `circuit`                |
 | `circuit` | it is directly followed by `fn` (see [execution.md](execution.md) §4) |
+| `test`  | it starts an item and is directly followed by `fn` or `(fail…)` before `fn` ([testing.md](testing.md)) |
 | `adj`   | it is followed by a call (`adj s(q)`, `adj q.s()`)          |
 | `ctrl`  | it starts a statement and is followed by a place and, eventually, `{` |
 | `with`  | it starts a statement and is directly followed by `{`       |
 | `do`    | it directly follows the closing `}` of a `with` block       |
 | `within` | it directly follows an expectation value (see below)       |
-| `pkg`, `super` | they start a path and are followed by `::` (Reserved; see [modules.md](modules.md)) |
+| `pkg`, `super` | they start a path and are followed by `::` ([modules.md](modules.md)) |
+| `const` | it starts a generic parameter, after `<` or `,` ([types.md](types.md) §6) |
+| `where` | it follows a signature, before its body or `{`          |
 
 ### Literals
 
@@ -176,28 +179,39 @@ Terminals are quoted. `sep` is a line break (as defined above), `;` or `,` where
 
 ```ebnf
 program     = { item } ;
-item        = struct_def | enum_def | type_alias | fn_def | trait_def | impl_def | extern_def ;
+item        = [ vis ] ( struct_def | enum_def | type_alias | fn_def | trait_def | extern_def )
+            | impl_def | use_decl ;                     (* vis, use_decl: modules.md §9 *)
 
 type_alias  = "type" IDENT "=" type ;
 
-struct_def  = "struct" IDENT "{" { member ( sep | "," ) } "}" ;
+generics    = "<" generic { "," generic } [ "," ] ">" ;
+generic     = IDENT [ ":" bounds ] [ "=" type ]         (* a type parameter; `= type` on traits *)
+            | "const" IDENT ":" type [ "=" type_arg ] ; (* a size parameter: `const N: Int` *)
+bounds      = bound { "+" bound } ;
+bound       = path [ "<" bound_arg { "," bound_arg } [ "," ] ">" ] ;
+bound_arg   = type_arg | IDENT "=" type ;               (* `Measure<Result = Bit>` *)
+where_clause = "where" IDENT ":" bounds { "," IDENT ":" bounds } [ "," ] ;
+
+struct_def  = "struct" IDENT [ generics ] "{" { member ( sep | "," ) } "}" ;
 member      = field | fn_def ;
 field       = IDENT ":" type ;
 
-enum_def    = "enum" IDENT "{" { variant ( sep | "," ) } { fn_def sep } "}" ;
+enum_def    = "enum" IDENT [ generics ] "{" { variant ( sep | "," ) } { fn_def sep } "}" ;
 variant     = IDENT
             | IDENT "(" type { "," type } [ "," ] ")"            (* values *)
             | IDENT "{" field { ( sep | "," ) field } [ "," ] "}" ;  (* named fields *)
 
-fn_def      = [ "unsafe" ] [ "rev" ] [ "circuit" ] "fn" IDENT "(" [ params ] ")" [ "->" type ] block ;
+fn_def      = fn_sig block ;
 params      = ( receiver | param ) { "," param } [ "," ] ;
 receiver    = ( "mv" | "ref" | "mut" ) "self" ;
 param       = IDENT ":" type ;
 
-trait_def   = "trait" IDENT "{" { trait_item sep } "}" ;              (* Reserved *)
-trait_item  = fn_sig | fn_def | "type" IDENT ;
-fn_sig      = [ "unsafe" ] [ "rev" ] [ "circuit" ] "fn" IDENT "(" [ params ] ")" [ "->" type ] ;
-impl_def    = "impl" path "for" type "{" { impl_item sep } "}" ;     (* Reserved *)
+trait_def   = "trait" IDENT [ generics ] "{" { trait_item sep } "}" ;
+trait_item  = fn_sig | fn_def | "type" IDENT [ ":" bounds ] ;
+fn_sig      = [ "test" [ "(" "fail" [ "=" STRING ] ")" ] ]
+              [ "unsafe" ] [ "rev" ] [ "circuit" ] "fn" IDENT [ generics ]
+              "(" [ params ] ")" [ "->" type ] [ where_clause ] ;
+impl_def    = "impl" [ generics ] bound "for" type [ where_clause ] "{" { impl_item sep } "}" ;
 impl_item   = fn_def | "type" IDENT "=" type ;
 extern_def  = "extern" fn_sig | "extern" STRING "{" { fn_sig sep } "}" ;   (* Reserved *)
 ```
@@ -220,19 +234,24 @@ without one are **associated functions**, called as `Type::name(…)`.
 The receiver states how the method takes the value, using the same words as call sites:
 `mv self` takes ownership, `ref self` borrows to read, `mut self` borrows to change.
 
-`extern` declares host and C functions; see [interop.md](interop.md). Traits and
-`impl … for …` blocks are Reserved: their syntax is specified so that it can be
-parsed, but they need generics, which are not implemented yet. See [types.md](types.md) §6.
+`extern` declares host and C functions; see [interop.md](interop.md). Generics, traits and
+`impl … for …` blocks are described in [types.md](types.md) §6; they are specified for 0.5
+and not implemented yet.
 
 ### Types
 
 ```ebnf
-type        = path [ "<" type { "," type } [ "," ] ">" ]   (* Int, Float, Bool, Bit, Qubit, String, Self, struct name, Distribution<T> *)
-            | "ref" type                          (* shared reference *)
-            | "mut" type                          (* exclusive reference *)
+type        = path [ "<" type_arg { "," type_arg } [ "," ] ">" ] [ borrow_list ]
+                                                  (* Int, Qubit, Distribution<T>, Window[r] *)
+            | "ref" [ borrow_list ] type          (* shared reference, e.g. `ref[a, b] String` *)
+            | "mut" [ borrow_list ] type          (* exclusive reference, e.g. `mut[self.state] Qubit` *)
             | "(" ")"                             (* unit *)
             | "(" type "," [ type { "," type } [ "," ] ] ")"   (* tuple *)
-            | "[" type ";" INT "]" ;              (* array of fixed length *)
+            | "[" type ";" size "]" ;             (* array of fixed length *)
+borrow_list = "[" borrow_place { "," borrow_place } [ "," ] "]" ;
+borrow_place = ( IDENT | "self" ) { "." IDENT } ;
+size        = expr ;                              (* a length, a size parameter, or a sum: `N + 1` (types.md §6) *)
+type_arg    = type | INT | "{" expr "}" ;         (* `Register<8>` and `Register<{N + 1}>` give sizes *)
 ```
 
 ### Statements and blocks
@@ -244,7 +263,7 @@ stmt        = "let" [ "mut" ] pattern [ ":" type ] "=" expr
             | place assign_op expr
             | "return" [ expr ]
             | "break" | "continue"
-            | "assert" expr
+            | "assert" expr [ "," expr ]
             | expr ;
 
 pattern     = IDENT | "_"
@@ -279,7 +298,7 @@ match_expr  = "match" expr_no_struct "{" { arm ( "," | sep ) } "}" ;
 arm         = pattern "=>" expr ;
 
 ctrl_stmt   = "ctrl" place { "," place } block ;
-with_stmt   = "with" block "do" block ;          (* Reserved *)
+with_stmt   = "with" block "do" block ;
 unsafe_block = "unsafe" block ;
 ```
 
@@ -342,7 +361,8 @@ expectation = ( "<" prep "|" observable "|" prep ">"
               [ "within" unary ] ;                  (* the precision *)
 prep        = postfix ;                             (* a call or a ket *)
 observable  = binary ;                              (* without `|` or comparisons at top level *)
-path        = ( IDENT | "self" | "Self" ) { "::" IDENT } ;
+path        = ( IDENT | "self" | "Self" ) { "::" IDENT } [ "::" "<" type_arg { "," type_arg } [ "," ] ">" ] ;
+                                                  (* `swap::<Int>`: arguments given, not inferred *)
 field_init  = IDENT [ ":" expr ] ;                  (* `angle` is short for `angle: angle` *)
 
 place       = ( IDENT | "self" ) { "." IDENT | "." INT | "[" expr "]" } ;
@@ -542,5 +562,6 @@ fn main() {
   on single calls.
 - **Closures.** If added, the `|x| …` form can coexist with kets, because a ket contains
   only `0 1 + -` and ends in `>`. Not needed so far.
-- **Modules and imports.** Specified in [modules.md](modules.md); Reserved. Until then, one
-  `.nv` file is one program, and `main` is the entry point when one exists.
+- **Modules and imports.** Specified in [modules.md](modules.md). A `.nv` file on its own is
+  a package of one module, and `main` in a package's root module is the entry point when one
+  exists.

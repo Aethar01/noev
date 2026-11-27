@@ -42,8 +42,13 @@ fn corrected() -> Bit {
     mv b.measure()
 }
 
+// Kept for `noev build --emit=qir tests/run/feedback.nv` adaptive-profile QIR test.
 fn main() {
-    print(sample 500 { until_one() })
-    print(sample 500 { either_branch() })
-    print(sample 500 { corrected() })
+    let _ = sample 10 { until_one() }
+}
+
+test fn feedback_circuits() {
+    assert (sample 500 { until_one() }).count(1) == 500
+    assert (sample 500 { either_branch() }).count(1) == 500
+    assert (sample 500 { corrected() }).count(0) == 500
 }

@@ -7,7 +7,7 @@
 
 use crate::ast::*;
 use crate::diagnostic::Diagnostic;
-use crate::lexer::{lex, lex_range, scan_interpolation, scan_string};
+use crate::lexer::{lex_at, scan_interpolation, scan_string};
 use crate::span::Span;
 use crate::symbol::Symbol;
 use crate::token::{Token, TokenKind};
@@ -21,28 +21,39 @@ pub struct Parsed {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Lexes and parses `source`.
+/// Lexes and parses `source`, a file whose offsets start at 0.
 pub fn parse(source: &str) -> Parsed {
-    let lexed = lex(source);
-    let mut ast = Ast::default();
-    // The standard library's own names, so its types can be named in messages even when a
-    // program never mentions them.
-    for name in crate::ast::STD_NAMES {
-        ast.symbols.intern(name);
-    }
+    parse_at(source, 0)
+}
+
+/// Lexes and parses `source`, a file whose offsets start at `base` ([`crate::SourceMap`]), as
+/// a package with one module.
+pub fn parse_at(source: &str, base: u32) -> Parsed {
+    let mut ast = Ast::new();
+    let package = ast.add_package("main");
+    let root = ast.package(package).root;
+    let diagnostics = parse_module(&mut ast, root, source, base);
+    ast.collect_root();
+    Parsed { ast, diagnostics }
+}
+
+/// Lexes and parses `source`, a file whose offsets start at `base`, as the items of `module`.
+/// Once every module is parsed, [`Ast::collect_root`] gathers their items.
+pub fn parse_module(ast: &mut Ast, module: ModuleId, source: &str, base: u32) -> Vec<Diagnostic> {
+    let lexed = lex_at(source, base);
     let mut parser = Parser {
         source,
+        base,
         tokens: lexed.tokens,
         pos: 0,
-        ast,
+        ast: std::mem::take(ast),
         diagnostics: lexed.diagnostics,
         no_struct: false,
     };
-    parser.program();
-    Parsed {
-        ast: parser.ast,
-        diagnostics: parser.diagnostics,
-    }
+    let items = parser.program();
+    *ast = parser.ast;
+    ast.set_items(module, items);
+    parser.diagnostics
 }
 
 /// Binding strength of the binary operators between `|` and `*`, from loosest to tightest.
@@ -103,6 +114,9 @@ fn assign_op(kind: TokenKind) -> Option<AssignOp> {
 
 struct Parser<'a> {
     source: &'a str,
+    /// The offset of `source`'s first byte: spans are offsets, and `source` is indexed by
+    /// positions, which [`Parser::pos_of`] and [`Parser::offset_of`] convert between.
+    base: u32,
     tokens: Vec<Token>,
     pos: usize,
     ast: Ast,
@@ -112,7 +126,7 @@ struct Parser<'a> {
 }
 
 // Token access.
-impl Parser<'_> {
+impl<'a> Parser<'a> {
     fn nth(&self, n: usize) -> Token {
         self.tokens[(self.pos + n).min(self.tokens.len() - 1)]
     }
@@ -149,8 +163,18 @@ impl Parser<'_> {
         found
     }
 
-    fn text(&self, span: Span) -> &str {
-        span.text(self.source)
+    fn text(&self, span: Span) -> &'a str {
+        &self.source[self.pos_of(span.start)..self.pos_of(span.end)]
+    }
+
+    /// The position in `source` of the offset `offset`.
+    fn pos_of(&self, offset: u32) -> usize {
+        (offset - self.base) as usize
+    }
+
+    /// The offset of the position `index` in `source`.
+    fn offset_of(&self, index: usize) -> u32 {
+        index as u32 + self.base
     }
 
     /// Whether the token `n` ahead is the identifier `word` (for contextual keywords).
@@ -180,7 +204,8 @@ impl Parser<'_> {
     }
 
     fn intern(&mut self, span: Span) -> Symbol {
-        self.ast.symbols.intern(span.text(self.source))
+        let text = self.text(span);
+        self.ast.symbols.intern(text)
     }
 }
 
@@ -249,7 +274,7 @@ impl Parser<'_> {
             match self.kind() {
                 Eof => return,
                 Fn | Struct | Trait | Impl | Unsafe | Extern | Pub | Use if depth == 0 => return,
-                Ident if depth == 0 && self.at_fn_start() => return,
+                Ident if depth == 0 && (self.at_fn_start() || self.at_test_fn_start()) => return,
                 LParen | LBracket | LBrace => depth += 1,
                 RParen | RBracket | RBrace => depth = depth.saturating_sub(1),
                 _ => {}
@@ -268,7 +293,7 @@ impl Parser<'_> {
 
 // Items.
 impl Parser<'_> {
-    fn program(&mut self) {
+    fn program(&mut self) -> List<ItemId> {
         let mark = self.ast.mark::<ItemId>();
         loop {
             self.skip_separators();
@@ -283,53 +308,171 @@ impl Parser<'_> {
                 }
             }
         }
-        self.ast.root = self.ast.finish(mark);
+        self.ast.finish(mark)
     }
 
     fn at_fn_start(&self) -> bool {
+        self.at_fn_start_at(0)
+    }
+
+    fn at_fn_start_at(&self, offset: usize) -> bool {
         use TokenKind::*;
-        match self.kind() {
+        match self.nth(offset).kind {
             Fn | Unsafe => true,
             Ident => {
-                (self.nth_is_word(0, "rev")
-                    && (self.nth(1).kind == Fn
-                        || (self.nth_is_word(1, "circuit") && self.nth(2).kind == Fn)))
-                    || (self.nth_is_word(0, "circuit") && self.nth(1).kind == Fn)
+                (self.nth_is_word(offset, "rev")
+                    && (self.nth(offset + 1).kind == Fn
+                        || (self.nth_is_word(offset + 1, "circuit")
+                            && self.nth(offset + 2).kind == Fn)))
+                    || (self.nth_is_word(offset, "circuit") && self.nth(offset + 1).kind == Fn)
             }
             _ => false,
         }
     }
 
-    /// Reports `pub`, which needs modules, and skips it so the item is still parsed.
-    fn skip_pub(&mut self) {
-        if self.at(TokenKind::Pub) {
-            let span = self.bump().span;
-            self.error(
-                span,
-                "`pub` is not supported yet: every program is one module",
-            )
-            .with_help_mut("see spec/modules.md for what is planned");
+    /// Whether the current position starts a `test [ (fail [= "..."]) ] fn …` item
+    /// (`spec/testing.md`).
+    fn at_test_fn_start(&self) -> bool {
+        if !self.nth_is_word(0, "test") {
+            return false;
+        }
+        if self.at_fn_start_at(1) {
+            return true;
+        }
+        if self.nth(1).kind != TokenKind::LParen {
+            return false;
+        }
+        // Scan past `(…)` to see if a function signature follows.
+        let mut i = 2;
+        loop {
+            match self.nth(i).kind {
+                TokenKind::RParen => return self.at_fn_start_at(i + 1),
+                TokenKind::Eof | TokenKind::LBrace | TokenKind::Newline => return false,
+                _ => i += 1,
+            }
+        }
+    }
+
+    /// Parses `test` or `test(fail)` or `test(fail = "…")` before a function declaration.
+    fn parse_test_prefix(&mut self) -> TestKind {
+        self.bump(); // `test`
+        if !self.eat(TokenKind::LParen) {
+            return TestKind::Pass;
+        }
+        if !self.nth_is_word(0, "fail") {
+            self.expected("`fail`");
+            while !matches!(self.kind(), TokenKind::RParen | TokenKind::Eof) {
+                self.bump();
+            }
+            self.eat(TokenKind::RParen);
+            return TestKind::Pass;
+        }
+        self.bump(); // `fail`
+        let expected = if self.eat(TokenKind::Eq) {
+            if self.at(TokenKind::Str) {
+                let start = self.span();
+                self.bump();
+                let parts = self.string_parts(start);
+                let text: String = self
+                    .ast
+                    .list(parts)
+                    .iter()
+                    .map(|part| match part {
+                        StrPart::Text(t) => self.ast.name(*t).to_string(),
+                        StrPart::Value { .. } => String::new(),
+                    })
+                    .collect();
+                if self
+                    .ast
+                    .list(parts)
+                    .iter()
+                    .any(|p| matches!(p, StrPart::Value { .. }))
+                {
+                    self.error(start, "expected failure message cannot interpolate values");
+                }
+                Some(self.ast.symbols.intern(&text))
+            } else {
+                self.expected("a string literal");
+                None
+            }
+        } else {
+            None
+        };
+        self.expect(TokenKind::RParen, "`)`");
+        TestKind::Fail(expected)
+    }
+
+    /// `pub`, `pub(pkg)`, `pub(super)`, `pub(self)` or `pub(in path)`, if there is one
+    /// (`spec/modules.md` §4). After `pub`, a `(` always starts a visibility.
+    fn vis(&mut self) -> Vis {
+        if !self.eat(TokenKind::Pub) {
+            return Vis::Private;
+        }
+        if !self.eat(TokenKind::LParen) {
+            return Vis::Pub;
+        }
+        let vis = if self.eat(TokenKind::SelfValue) {
+            Vis::Private
+        } else if self.nth_is_word(0, "pkg") {
+            self.bump();
+            Vis::Pkg
+        } else if self.nth_is_word(0, "super") {
+            self.bump();
+            Vis::Super
+        } else if self.eat(TokenKind::In) {
+            let start = self.span();
+            let path = self.path_segments();
+            Vis::In {
+                path,
+                span: start.to(self.prev_span()),
+            }
+        } else {
+            self.expected("`pkg`, `super`, `self` or `in` and a module's path");
+            while !matches!(self.kind(), TokenKind::RParen | TokenKind::Eof) {
+                self.bump();
+            }
+            Vis::Pub
+        };
+        self.expect(TokenKind::RParen, "`)`");
+        vis
+    }
+
+    /// Parses a visibility where none is allowed, and reports it.
+    fn no_vis(&mut self, what: &str) {
+        let start = self.span();
+        self.vis();
+        if self.span() != start {
+            let span = start.to(self.prev_span());
+            let message = format!("{what} cannot be marked `pub`");
+            self.error(span, message);
         }
     }
 
     fn item(&mut self) -> Option<ItemId> {
-        self.skip_pub();
         let start = self.span();
+        let vis = self.vis();
+        if self.at(TokenKind::Impl) && self.span() != start {
+            let span = start.to(self.prev_span());
+            self.error(span, "an `impl` block cannot be marked `pub`")
+                .with_help_mut("mark its functions instead");
+        }
         if self.at(TokenKind::Use) {
-            self.error(
-                start,
-                "`use` is not supported yet: every program is one module",
-            )
-            .with_help_mut("see spec/modules.md for what is planned");
-            self.recover_statement();
+            let imports = self.use_decl();
             return Some(self.ast.push_item(Item {
-                kind: ItemKind::Error,
+                kind: ItemKind::Use(imports),
+                vis,
                 span: start.to(self.prev_span()),
             }));
         }
         let kind = match self.kind() {
-            _ if self.at_fn_start() => ItemKind::Fn(self.fn_decl(true)),
-            TokenKind::Struct => self.struct_def(),
+            _ if self.at_test_fn_start() => {
+                let test = self.parse_test_prefix();
+                let f = self.fn_decl(true, vis);
+                self.ast.function_mut(f).test = test;
+                ItemKind::Fn(f)
+            }
+            _ if self.at_fn_start() => ItemKind::Fn(self.fn_decl(true, vis)),
+            TokenKind::Struct => self.struct_def(false),
             TokenKind::Enum => self.enum_def(),
             TokenKind::Type => {
                 self.bump();
@@ -345,25 +488,165 @@ impl Parser<'_> {
             TokenKind::Trait => self.trait_def(),
             TokenKind::Impl => self.impl_def(),
             TokenKind::Extern => {
-                let span = self.span();
-                self.error(span, "`extern` functions are not supported yet")
-                    .with_help_mut("see spec/interop.md for what is planned");
                 self.bump();
-                // Read the declaration so it is not reported again as a broken item.
-                if self.at_fn_start() {
-                    self.fn_decl(false);
+                if self.at(TokenKind::Str) {
+                    let abi_span = self.span();
+                    let abi_text = self.text(abi_span);
+                    self.bump();
+                    if abi_text != "\"C\"" {
+                        self.error(
+                            abi_span,
+                            format!("unsupported extern ABI {abi_text}; only `\"C\"` is supported"),
+                        );
+                    }
+                    self.skip_newlines();
+                    match self.kind() {
+                        TokenKind::LBrace => self.extern_c_block(vis),
+                        TokenKind::Struct => self.struct_def(true),
+                        _ if self.at_fn_start() => {
+                            let f = self.fn_decl(true, vis);
+                            let decl = self.ast.function_mut(f);
+                            decl.extern_kind = ExternKind::CExport;
+                            decl.span = start.to(decl.span);
+                            ItemKind::Fn(f)
+                        }
+                        _ => {
+                            self.expected("`{`, `struct`, or `fn` after `extern \"C\"`");
+                            self.recover_item();
+                            return Some(self.ast.push_item(Item {
+                                kind: ItemKind::Error,
+                                vis,
+                                span: start.to(self.prev_span()),
+                            }));
+                        }
+                    }
                 } else {
-                    self.recover_item();
+                    if !self.at_fn_start() {
+                        self.expected("`fn` or `\"C\"` after `extern`");
+                        self.recover_item();
+                        return Some(self.ast.push_item(Item {
+                            kind: ItemKind::Error,
+                            vis,
+                            span: start.to(self.prev_span()),
+                        }));
+                    }
+                    let f = self.fn_decl(false, vis);
+                    let decl = self.ast.function_mut(f);
+                    decl.extern_kind = ExternKind::Host;
+                    decl.span = start.to(decl.span);
+                    if let Some(body) = decl.body {
+                        let body_span = self.ast.block(body).span;
+                        self.error(body_span, "an `extern fn` cannot have a body")
+                            .with_help_mut(
+                                "host functions are provided by the host program (`spec/interop.md` §2)",
+                            );
+                        self.ast.function_mut(f).body = None;
+                    }
+                    ItemKind::Fn(f)
                 }
-                return Some(self.ast.push_item(Item {
-                    kind: ItemKind::Error,
-                    span: start.to(self.prev_span()),
-                }));
             }
             _ => return None,
         };
         let span = start.to(self.prev_span());
-        Some(self.ast.push_item(Item { kind, span }))
+        Some(self.ast.push_item(Item { kind, vis, span }))
+    }
+
+    /// `use tree`, with the tree's braces flattened into one import per name.
+    fn use_decl(&mut self) -> List<Import> {
+        self.bump();
+        let mark = self.ast.mark::<Import>();
+        let mut prefix = Vec::new();
+        self.use_tree(&mut prefix, false);
+        self.ast.finish(mark)
+    }
+
+    /// One tree of a `use`, after `prefix`: `a::b`, `a::b as c`, `a::*`, `a::{…}`, or `self`
+    /// directly inside braces.
+    fn use_tree(&mut self, prefix: &mut Vec<Symbol>, in_braces: bool) {
+        use TokenKind::*;
+        let start = self.span();
+        let depth = prefix.len();
+        loop {
+            let span = self.span();
+            match self.kind() {
+                SelfValue if in_braces && prefix.len() == depth => {
+                    // `a::{self}` imports the module `a` itself.
+                    self.bump();
+                    let alias = self.use_alias();
+                    self.push_import(prefix, alias, false, start);
+                    break;
+                }
+                Ident => {
+                    self.bump();
+                    let symbol = self.intern(span);
+                    prefix.push(symbol);
+                }
+                _ => {
+                    self.expected("a name to import");
+                    self.recover_use();
+                    break;
+                }
+            }
+            if !self.eat(ColonColon) {
+                let alias = self.use_alias();
+                self.push_import(prefix, alias, false, start);
+                break;
+            }
+            if self.eat(Star) {
+                self.push_import(prefix, None, true, start);
+                break;
+            }
+            if self.eat(LBrace) {
+                loop {
+                    self.skip_newlines();
+                    if matches!(self.kind(), RBrace | Eof) {
+                        break;
+                    }
+                    self.use_tree(prefix, true);
+                    self.skip_newlines();
+                    if !self.eat(Comma) {
+                        break;
+                    }
+                }
+                self.skip_newlines();
+                self.expect(RBrace, "`}` or `,`");
+                break;
+            }
+        }
+        prefix.truncate(depth);
+    }
+
+    /// `as name` or `as _` after an imported name.
+    fn use_alias(&mut self) -> Option<Symbol> {
+        if !self.eat(TokenKind::As) {
+            return None;
+        }
+        let (name, _) = self.name("a name to import it as");
+        Some(name)
+    }
+
+    fn push_import(&mut self, path: &[Symbol], alias: Option<Symbol>, glob: bool, start: Span) {
+        let mark = self.ast.mark::<Symbol>();
+        for &segment in path {
+            self.ast.push_to(segment);
+        }
+        let path = self.ast.finish(mark);
+        let span = start.to(self.prev_span());
+        self.ast.push_to(Import {
+            path,
+            alias,
+            glob,
+            span,
+        });
+    }
+
+    /// Skips the rest of a broken `use` tree, up to a `,` or `}` of its braces or the end of
+    /// the statement.
+    fn recover_use(&mut self) {
+        use TokenKind::*;
+        while !matches!(self.kind(), Comma | RBrace | Newline | Semi | Eof) {
+            self.bump();
+        }
     }
 
     fn name(&mut self, what: &str) -> (Symbol, Span) {
@@ -393,8 +676,8 @@ impl Parser<'_> {
     }
 
     /// `[unsafe] [rev] [circuit] fn name(params) [-> type] block`, or without the block when
-    /// `needs_body` is false (trait declarations).
-    fn fn_decl(&mut self, needs_body: bool) -> FnId {
+    /// `needs_body` is false (trait declarations), visible as `vis` says.
+    fn fn_decl(&mut self, needs_body: bool, vis: Vis) -> FnId {
         let start = self.span();
         let is_unsafe = self.eat(TokenKind::Unsafe);
         let is_rev = self.nth_is_word(0, "rev");
@@ -407,6 +690,7 @@ impl Parser<'_> {
         }
         self.expect(TokenKind::Fn, "`fn`");
         let (name, name_span) = self.name("a function name");
+        let mut generics = self.generics();
 
         let mut receiver = None;
         let mark = self.ast.mark::<Param>();
@@ -432,6 +716,7 @@ impl Parser<'_> {
             self.skip_newlines();
             self.ty()
         });
+        generics.wheres = self.where_clause();
         let body = if needs_body || self.at(TokenKind::LBrace) {
             self.skip_newlines();
             Some(self.block())
@@ -442,9 +727,13 @@ impl Parser<'_> {
         self.ast.push_fn(FnDecl {
             name,
             name_span,
+            generics,
+            vis,
             is_unsafe,
             is_rev,
             is_circuit,
+            test: TestKind::None,
+            extern_kind: ExternKind::None,
             receiver,
             params,
             ret,
@@ -492,9 +781,45 @@ impl Parser<'_> {
         }
     }
 
-    fn struct_def(&mut self) -> ItemKind {
+    fn extern_c_block(&mut self, block_vis: Vis) -> ItemKind {
+        self.bump(); // `{`
+        let mark = self.ast.mark::<FnId>();
+        loop {
+            while matches!(self.kind(), TokenKind::Newline | TokenKind::Semi) {
+                self.bump();
+            }
+            if matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            let fn_vis = self.vis();
+            let eff_vis = if matches!(fn_vis, Vis::Private) {
+                block_vis
+            } else {
+                fn_vis
+            };
+            if self.at_fn_start() {
+                let f = self.fn_decl(false, eff_vis);
+                let decl = self.ast.function_mut(f);
+                decl.extern_kind = ExternKind::CImport;
+                if let Some(body) = decl.body {
+                    let body_span = self.ast.block(body).span;
+                    self.error(body_span, "an `extern \"C\"` import cannot have a body");
+                    self.ast.function_mut(f).body = None;
+                }
+                self.ast.push_to(f);
+            } else {
+                self.expected("`fn` inside `extern \"C\"` block");
+                self.recover_member();
+            }
+        }
+        self.expect(TokenKind::RBrace, "`}`");
+        ItemKind::ExternBlock(self.ast.finish(mark))
+    }
+
+    fn struct_def(&mut self, is_extern_c: bool) -> ItemKind {
         self.bump();
         let (name, name_span) = self.name("a struct name");
+        let generics = self.generics();
         let field_mark = self.ast.mark::<FieldDecl>();
         let method_mark = self.ast.mark::<FnId>();
         self.skip_newlines();
@@ -509,17 +834,22 @@ impl Parser<'_> {
                 if matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
                     break;
                 }
-                self.skip_pub();
+                let start = self.span();
+                let vis = self.vis();
                 if self.at_fn_start() {
-                    let method = self.fn_decl(true);
+                    let method = self.fn_decl(true, vis);
                     self.ast.push_to(method);
                 } else if self.at(TokenKind::Ident) {
-                    let start = self.span();
                     let (name, _) = self.name("a field name");
                     self.expect(TokenKind::Colon, "`:` and the field's type");
                     let ty = self.ty();
                     let span = start.to(self.prev_span());
-                    self.ast.push_to(FieldDecl { name, ty, span });
+                    self.ast.push_to(FieldDecl {
+                        name,
+                        vis,
+                        ty,
+                        span,
+                    });
                 } else {
                     self.expected("a field or `fn`");
                     self.recover_member();
@@ -530,14 +860,17 @@ impl Parser<'_> {
         ItemKind::Struct {
             name,
             name_span,
+            generics,
             fields: self.ast.finish(field_mark),
             methods: self.ast.finish(method_mark),
+            is_extern_c,
         }
     }
 
     fn enum_def(&mut self) -> ItemKind {
         self.bump();
         let (name, name_span) = self.name("an enum name");
+        let generics = self.generics();
         let variant_mark = self.ast.mark::<VariantDecl>();
         let method_mark = self.ast.mark::<FnId>();
         self.skip_newlines();
@@ -552,11 +885,17 @@ impl Parser<'_> {
                 if matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
                     break;
                 }
-                self.skip_pub();
+                let start = self.span();
+                let vis = self.vis();
                 if self.at_fn_start() {
-                    let method = self.fn_decl(true);
+                    let method = self.fn_decl(true, vis);
                     self.ast.push_to(method);
                 } else if self.at(TokenKind::Ident) {
+                    if self.span() != start {
+                        let span = start.to(self.prev_span());
+                        self.error(span, "a variant cannot be marked `pub`")
+                            .with_help_mut("a variant is as visible as its enum");
+                    }
                     let variant = self.variant();
                     self.ast.push_to(variant);
                 } else {
@@ -569,6 +908,7 @@ impl Parser<'_> {
         ItemKind::Enum {
             name,
             name_span,
+            generics,
             variants: self.ast.finish(variant_mark),
             methods: self.ast.finish(method_mark),
         }
@@ -603,11 +943,17 @@ impl Parser<'_> {
                     break;
                 }
                 let field_start = self.span();
+                self.no_vis("a variant's field");
                 let (name, _) = self.name("a field name");
                 self.expect(TokenKind::Colon, "`:` and the field's type");
                 let ty = self.ty();
                 let span = field_start.to(self.prev_span());
-                self.ast.push_to(FieldDecl { name, ty, span });
+                self.ast.push_to(FieldDecl {
+                    name,
+                    vis: Vis::Private,
+                    ty,
+                    span,
+                });
             }
             self.expect(TokenKind::RBrace, "`}`");
             VariantData::Fields(self.ast.finish(mark))
@@ -623,9 +969,10 @@ impl Parser<'_> {
 
     fn trait_def(&mut self) -> ItemKind {
         self.bump();
-        let (name, _) = self.name("a trait name");
+        let (name, name_span) = self.name("a trait name");
+        let generics = self.generics();
         let fn_mark = self.ast.mark::<FnId>();
-        let type_mark = self.ast.mark::<Symbol>();
+        let type_mark = self.ast.mark::<AssocType>();
         self.skip_newlines();
         if self.expect(TokenKind::LBrace, "`{`") {
             loop {
@@ -634,11 +981,16 @@ impl Parser<'_> {
                     break;
                 }
                 if self.at_fn_start() {
-                    let f = self.fn_decl(false);
+                    let f = self.fn_decl(false, Vis::Private);
                     self.ast.push_to(f);
                 } else if self.eat(TokenKind::Type) {
                     let (name, _) = self.name("an associated type name");
-                    self.ast.push_to(name);
+                    let bounds = if self.eat(TokenKind::Colon) {
+                        self.bounds()
+                    } else {
+                        List::default()
+                    };
+                    self.ast.push_to(AssocType { name, bounds });
                 } else {
                     self.expected("`fn` or `type`");
                     self.recover_member();
@@ -648,6 +1000,8 @@ impl Parser<'_> {
         }
         ItemKind::Trait {
             name,
+            name_span,
+            generics,
             fns: self.ast.finish(fn_mark),
             types: self.ast.finish(type_mark),
         }
@@ -655,9 +1009,11 @@ impl Parser<'_> {
 
     fn impl_def(&mut self) -> ItemKind {
         self.bump();
-        let trait_path = self.path_segments();
+        let mut generics = self.generics();
+        let bound = self.bound();
         self.expect(TokenKind::For, "`for`");
         let ty = self.ty();
+        generics.wheres = self.where_clause();
         let fn_mark = self.ast.mark::<FnId>();
         let alias_mark = self.ast.mark::<TypeAlias>();
         self.skip_newlines();
@@ -668,7 +1024,7 @@ impl Parser<'_> {
                     break;
                 }
                 if self.at_fn_start() {
-                    let f = self.fn_decl(true);
+                    let f = self.fn_decl(true, Vis::Private);
                     self.ast.push_to(f);
                 } else if self.eat(TokenKind::Type) {
                     let (name, _) = self.name("an associated type name");
@@ -683,7 +1039,8 @@ impl Parser<'_> {
             self.expect(TokenKind::RBrace, "`}`");
         }
         ItemKind::Impl {
-            trait_path,
+            generics,
+            bound,
             ty,
             fns: self.ast.finish(fn_mark),
             types: self.ast.finish(alias_mark),
@@ -706,7 +1063,164 @@ impl Parser<'_> {
                 self.expected("a name");
                 break;
             }
+            // `swap::<Int>`: the arguments are not a segment.
+            if self.at(TokenKind::ColonColon) && self.nth(1).kind == TokenKind::Lt {
+                break;
+            }
             if !self.eat(TokenKind::ColonColon) {
+                break;
+            }
+        }
+        self.ast.finish(mark)
+    }
+
+    /// `<T: Bound, const N: Int>` after a name, if there is one.
+    fn generics(&mut self) -> Generics {
+        use TokenKind::*;
+        if !self.eat(Lt) {
+            return Generics::default();
+        }
+        let mark = self.ast.mark::<GenericParam>();
+        while !matches!(self.kind(), Gt | Shr | Eof) {
+            let start = self.span();
+            let param = if self.nth_is_word(0, "const") && self.nth(1).kind == Ident {
+                self.bump();
+                let (name, _) = self.name("a size parameter's name");
+                self.expect(Colon, "`:` and the size's type, `Int`");
+                let ty = self.ty();
+                let default = if self.eat(Eq) {
+                    Some(self.type_arg())
+                } else {
+                    None
+                };
+                GenericParam {
+                    name,
+                    kind: GenericKind::Size { ty, default },
+                    span: start.to(self.prev_span()),
+                }
+            } else {
+                let (name, _) = self.name("a type parameter's name");
+                let bounds = if self.eat(Colon) {
+                    self.bounds()
+                } else {
+                    List::default()
+                };
+                let default = if self.eat(Eq) { Some(self.ty()) } else { None };
+                GenericParam {
+                    name,
+                    kind: GenericKind::Type { bounds, default },
+                    span: start.to(self.prev_span()),
+                }
+            };
+            self.ast.push_to(param);
+            if !self.eat(Comma) {
+                break;
+            }
+        }
+        self.close_angle();
+        Generics {
+            params: self.ast.finish(mark),
+            wheres: List::default(),
+        }
+    }
+
+    /// `Bound + Bound + …`.
+    fn bounds(&mut self) -> List<Bound> {
+        let mark = self.ast.mark::<Bound>();
+        loop {
+            let bound = self.bound();
+            self.ast.push_to(bound);
+            if !self.eat(TokenKind::Plus) {
+                break;
+            }
+        }
+        self.ast.finish(mark)
+    }
+
+    /// A trait and its arguments: `Measure`, `Oracle<4>`, `Measure<Result = Bit>`.
+    fn bound(&mut self) -> Bound {
+        use TokenKind::*;
+        let start = self.span();
+        let path = self.path_segments();
+        let mark = self.ast.mark::<BoundArg>();
+        if self.eat(Lt) {
+            while !matches!(self.kind(), Gt | Shr | Eof) {
+                let arg = if self.at(Ident) && self.nth(1).kind == Eq {
+                    let (name, _) = self.name("an associated type's name");
+                    self.bump();
+                    BoundArg::Assoc {
+                        name,
+                        ty: self.ty(),
+                    }
+                } else {
+                    BoundArg::Type(self.type_arg())
+                };
+                self.ast.push_to(arg);
+                if !self.eat(Comma) {
+                    break;
+                }
+            }
+            self.close_angle();
+        }
+        Bound {
+            path,
+            args: self.ast.finish(mark),
+            span: start.to(self.prev_span()),
+        }
+    }
+
+    /// A type, or a size given as a number: the `8` of `Register<8>`.
+    fn type_arg(&mut self) -> TypeId {
+        let start = self.span();
+        if self.at(TokenKind::Int) {
+            self.bump();
+            let len = self.int_value(start).unwrap_or(0);
+            return self.ast.push_type(TypeExpr {
+                kind: TypeKind::Size(len),
+                span: start,
+            });
+        }
+        // `Reg<{N + 1}>`: a size computed from size parameters, in braces so its `+` is not
+        // read as part of the type.
+        if self.eat(TokenKind::LBrace) {
+            let expr = self.expr();
+            self.expect(TokenKind::RBrace, "`}`");
+            return self.ast.push_type(TypeExpr {
+                kind: TypeKind::SizeExpr(expr),
+                span: start.to(self.prev_span()),
+            });
+        }
+        self.ty()
+    }
+
+    /// `where T: Bound, U: Bound` after a signature, if there is one, on the same line or
+    /// the next.
+    fn where_clause(&mut self) -> List<WherePred> {
+        use TokenKind::*;
+        let next_line = self.at(Newline) && self.nth_is_word(1, "where");
+        if !next_line && !self.nth_is_word(0, "where") {
+            return List::default();
+        }
+        if next_line {
+            self.bump();
+        }
+        self.bump();
+        let mark = self.ast.mark::<WherePred>();
+        loop {
+            self.skip_newlines();
+            if !self.at(Ident) {
+                break;
+            }
+            let start = self.span();
+            let (name, _) = self.name("a parameter's name");
+            self.expect(Colon, "`:` and its bounds");
+            let bounds = self.bounds();
+            self.ast.push_to(WherePred {
+                name,
+                bounds,
+                span: start.to(self.prev_span()),
+            });
+            if !self.eat(Comma) {
                 break;
             }
         }
@@ -722,8 +1236,17 @@ impl Parser<'_> {
         let kind = match self.kind() {
             Ref | Mut => {
                 let mutable = self.bump().kind == Mut;
+                let borrows = if self.starts_borrow_list() {
+                    self.borrow_list()
+                } else {
+                    List::default()
+                };
                 let inner = self.ty();
-                TypeKind::Ref { mutable, inner }
+                TypeKind::Ref {
+                    mutable,
+                    borrows,
+                    inner,
+                }
             }
             LParen => {
                 self.bump();
@@ -750,22 +1273,61 @@ impl Parser<'_> {
                 let elem = self.ty();
                 self.expect(Semi, "`;` and the array's length");
                 let len_span = self.span();
-                let len = if self.eat(Int) {
-                    self.int_value(len_span).unwrap_or(0)
+                let simple = self.nth(1).kind == RBracket;
+                let len = if simple && self.eat(Int) {
+                    Len::Int(self.int_value(len_span).unwrap_or(0))
+                } else if simple && self.at(Ident) {
+                    Len::Param(self.name("a size").0)
+                } else if matches!(self.kind(), Int | Ident | LParen) {
+                    // `N + 1`, `2 * N`: the checker reads it as a size.
+                    Len::Expr(self.expr())
                 } else {
                     self.expected("the array's length");
-                    0
+                    Len::Int(0)
                 };
                 self.expect(RBracket, "`]`");
                 TypeKind::Array { elem, len }
             }
+            Extern => {
+                self.bump();
+                if self.at(Str) {
+                    let abi_span = self.span();
+                    let abi_text = self.text(abi_span);
+                    self.bump();
+                    if abi_text != "\"C\"" {
+                        self.error(
+                            abi_span,
+                            format!("unsupported extern ABI {abi_text}; only `\"C\"` is supported"),
+                        );
+                    }
+                } else {
+                    self.expected("`\"C\"` after `extern`");
+                }
+                self.expect(Fn, "`fn`");
+                let mark = self.ast.mark::<TypeId>();
+                if self.expect(LParen, "`(`") {
+                    while !matches!(self.kind(), RParen | Eof) {
+                        let p = self.ty();
+                        self.ast.push_to(p);
+                        if !self.eat(Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(RParen, "`)`");
+                }
+                let ret = self.eat(Arrow).then(|| self.ty());
+                TypeKind::ExternCFn {
+                    params: self.ast.finish(mark),
+                    ret,
+                }
+            }
             Ident | SelfType => {
                 let path = self.path_segments();
-                if self.at(Lt) {
+                let base = if self.at(Lt) {
                     self.bump();
                     let mark = self.ast.mark::<TypeId>();
                     while !matches!(self.kind(), Gt | Shr | Eof) {
-                        let arg = self.ty();
+                        let arg = self.type_arg();
                         self.ast.push_to(arg);
                         if !self.eat(Comma) {
                             break;
@@ -778,6 +1340,17 @@ impl Parser<'_> {
                     }
                 } else {
                     TypeKind::Path(path)
+                };
+                if self.at(LBracket) {
+                    let inner_span = start.to(self.prev_span());
+                    let inner = self.ast.push_type(TypeExpr {
+                        kind: base,
+                        span: inner_span,
+                    });
+                    let borrows = self.borrow_list();
+                    TypeKind::Borrowed { inner, borrows }
+                } else {
+                    base
                 }
             }
             _ => {
@@ -787,6 +1360,61 @@ impl Parser<'_> {
         };
         let span = start.to(self.prev_span());
         self.ast.push_type(TypeExpr { kind, span })
+    }
+
+    /// Whether `[` after `ref` or `mut` begins a borrow list (`ref[a, b] T`) rather than an
+    /// array type (`ref [T; N]`): a borrow list has no `;` at depth 0 before its `]`.
+    fn starts_borrow_list(&self) -> bool {
+        use TokenKind::*;
+        if !self.at(LBracket) {
+            return false;
+        }
+        let mut i = self.pos + 1;
+        let mut depth = 0u32;
+        while let Some(tok) = self.tokens.get(i) {
+            match tok.kind {
+                LBracket | LParen | LBrace => depth += 1,
+                RBracket if depth == 0 => return true,
+                RBracket | RParen | RBrace => depth = depth.saturating_sub(1),
+                Semi if depth == 0 => return false,
+                Eof => return false,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// `[a, b]` or `[self.state]`: places a returned reference may borrow from.
+    fn borrow_list(&mut self) -> List<BorrowPlace> {
+        use TokenKind::*;
+        self.expect(LBracket, "`[`");
+        let mark = self.ast.mark::<BorrowPlace>();
+        while !matches!(self.kind(), RBracket | Eof) {
+            let start = self.span();
+            let root = if self.eat(SelfValue) {
+                self.ast.symbols.intern("self")
+            } else {
+                self.name("a parameter name or `self`").0
+            };
+            let fields_mark = self.ast.mark::<Symbol>();
+            while self.eat(Dot) {
+                let (field, _) = self.name("a field name");
+                self.ast.push_to(field);
+            }
+            let fields = self.ast.finish(fields_mark);
+            let span = start.to(self.prev_span());
+            self.ast.push_to(BorrowPlace { root, fields, span });
+            if !self.eat(Comma) {
+                break;
+            }
+        }
+        let list = self.ast.finish(mark);
+        if list.is_empty() {
+            self.expected("a parameter name or `self`");
+        }
+        self.expect(RBracket, "`]`");
+        list
     }
 
     /// Consumes a `>` closing type arguments. In `A<B<C>>` the lexer sees `>>`, so it is
@@ -1036,7 +1664,9 @@ impl Parser<'_> {
             }
             Assert => {
                 self.bump();
-                StmtKind::Assert(self.expr())
+                let cond = self.expr();
+                let msg = self.eat(Comma).then(|| self.expr());
+                StmtKind::Assert { cond, msg }
             }
             _ => {
                 let expr = self.expr();
@@ -1422,8 +2052,13 @@ impl Parser<'_> {
             Ket => {
                 self.bump();
                 let parts = self.ket_parts(start);
+                let text = self.text(start);
+                let inner = &text[1..text.len().saturating_sub(1)];
+                let zero =
+                    parts.is_empty() && !inner.is_empty() && inner.bytes().all(|b| b == b'0');
                 ExprKind::Ket {
                     qubits: self.qubits(start),
+                    zero,
                     parts,
                 }
             }
@@ -1490,15 +2125,50 @@ impl Parser<'_> {
     }
 
     fn path_expr(&mut self) -> ExprId {
+        use TokenKind::*;
         let start = self.span();
-        let segments = self.path_segments();
+        let segs = self.path_segments();
+        let mut syms: Vec<Symbol> = self.ast.list(segs).to_vec();
+        // `swap::<Int>` or `Vec::<Int>::new`: arguments given, not inferred.
+        let mut args = None;
+        if self.at(ColonColon) && self.nth(1).kind == Lt {
+            self.bump();
+            self.bump();
+            let mark = self.ast.mark::<TypeId>();
+            while !matches!(self.kind(), Gt | Shr | Eof) {
+                let arg = self.type_arg();
+                self.ast.push_to(arg);
+                if !self.eat(Comma) {
+                    break;
+                }
+            }
+            self.close_angle();
+            args = Some(self.ast.finish(mark));
+            // `Vec::<Int>::new`: trailing `::segment` after turbofish type arguments.
+            if self.eat(ColonColon) {
+                let tail = self.path_segments();
+                syms.extend_from_slice(self.ast.list(tail));
+            }
+        }
+        let mark = self.ast.mark::<Symbol>();
+        for s in syms {
+            self.ast.push_to(s);
+        }
+        let segments = self.ast.finish(mark);
         let kind = match self.ast.list(segments) {
-            [single] if !crate::ast::BARE_VARIANTS.contains(&self.ast.name(*single)) => {
+            [single]
+                if args.is_none()
+                    && !crate::ast::BARE_VARIANTS.contains(&self.ast.name(*single)) =>
+            {
                 ExprKind::Name(*single)
             }
             _ => ExprKind::Path(segments),
         };
-        self.push(kind, start)
+        let expr = self.push(kind, start);
+        if let Some(args) = args {
+            self.ast.set_path_args(expr, args);
+        }
+        expr
     }
 
     fn struct_lit(&mut self, path: ExprId) -> ExprId {
@@ -1715,7 +2385,7 @@ impl Parser<'_> {
     fn bra(&mut self) -> ExprId {
         let bra = self.bump().span;
         // `<0|+>`: a ket's labels straight after, so an amplitude.
-        if let Some(end) = self.ket_rest(bra.end as usize) {
+        if let Some(end) = self.ket_rest(bra.end) {
             let ket_span = Span::new(bra.end - 1, end);
             self.skip_to(end);
             let bra_prep = self.state_prep(bra);
@@ -1750,7 +2420,7 @@ impl Parser<'_> {
             );
         }
         // `<0| H |prep()>`: a transition value to a preparation.
-        if self.ket_rest(self.span().end as usize).is_none() {
+        if self.ket_rest(self.span().end).is_none() {
             self.bump();
             let ket = self.postfix();
             self.expect(TokenKind::Gt, "`>` to close the transition value");
@@ -1758,11 +2428,10 @@ impl Parser<'_> {
             return self.overlap(bra_prep, ket, Some(operand), bra);
         }
         let ket = self.closing_ket();
-        let source = self.source;
-        let bra_state = &source[bra.start as usize + 1..bra.end as usize - 1];
+        let bra_state = &self.text(bra)[1..bra.len() as usize - 1];
         // `<0| H |1>`: a transition value.
         if let Some(ket) = ket {
-            let ket_state = &source[ket.start as usize + 1..ket.end as usize - 1];
+            let ket_state = &self.text(ket)[1..ket.len() as usize - 1];
             if bra_state != ket_state {
                 let bra_prep = self.state_prep(bra);
                 let ket_prep = self.state_prep(ket);
@@ -1791,8 +2460,11 @@ impl Parser<'_> {
                 .with_help_mut("prepare the state in a function, as in `<prep(b)| H |prep(b)>`");
             ExprKind::Error
         } else {
+            let inner = &text[1..text.len().saturating_sub(1)];
+            let zero = !inner.is_empty() && inner.bytes().all(|b| b == b'0');
             ExprKind::Ket {
                 qubits: self.qubits(span),
+                zero,
                 parts: List::default(),
             }
         };
@@ -1819,12 +2491,13 @@ impl Parser<'_> {
         )
     }
 
-    /// The end of a ket's labels and `>` starting at byte `start`, if the source has them
+    /// The end of a ket's labels and `>` starting at offset `start`, if the source has them
     /// there: what closes `<φ|` in `<φ|00>`.
-    fn ket_rest(&self, start: usize) -> Option<u32> {
+    fn ket_rest(&self, start: u32) -> Option<u32> {
         let bytes = self.source.as_bytes();
+        let start = self.pos_of(start);
         let len = crate::state::scan(bytes.get(start..)?);
-        (len > 0 && bytes.get(start + len) == Some(&b'>')).then_some((start + len + 1) as u32)
+        (len > 0 && bytes.get(start + len) == Some(&b'>')).then(|| self.offset_of(start + len + 1))
     }
 
     /// Skips the tokens before byte `end`, which a ket read from the source covers.
@@ -1869,8 +2542,8 @@ impl Parser<'_> {
         }
         let mark = self.ast.mark::<KetPart>();
         let bytes = self.source.as_bytes();
-        let mut pos = span.start as usize + 1;
-        let end = span.end as usize - 1;
+        let mut pos = self.pos_of(span.start) + 1;
+        let end = self.pos_of(span.end) - 1;
         while pos < end {
             if let Some((label, len)) = crate::state::label(&bytes[pos..end]) {
                 self.ast.push_to(KetPart::Label(label));
@@ -1880,7 +2553,7 @@ impl Parser<'_> {
             let close = crate::lexer::scan_interpolation(bytes, pos)
                 .unwrap_or(end)
                 .min(end);
-            let expr = self.sub_expr(pos as u32 + 1, close as u32 - 1);
+            let expr = self.sub_expr(self.offset_of(pos) + 1, self.offset_of(close) - 1);
             self.ast.push_to(KetPart::Value(expr));
             pos = close;
         }
@@ -1893,15 +2566,16 @@ impl Parser<'_> {
     fn closing_ket(&mut self) -> Option<Span> {
         let pipe = self.bump().span;
         let bytes = self.source.as_bytes();
-        let end = pipe.end as usize + crate::state::scan(&bytes[pipe.end as usize..]);
-        if end == pipe.end as usize || bytes.get(end) != Some(&b'>') {
+        let from = self.pos_of(pipe.end);
+        let end = from + crate::state::scan(&bytes[from..]);
+        if end == from || bytes.get(end) != Some(&b'>') {
             self.error(
                 pipe,
                 "expected the closing ket, such as `|0>`, after the observable",
             );
             return None;
         }
-        let end = end as u32 + 1;
+        let end = self.offset_of(end) + 1;
         while self.span().start < end && !self.at(TokenKind::Eof) {
             self.bump();
         }
@@ -1919,7 +2593,7 @@ impl Parser<'_> {
         let bra_end = self.pos;
         // `<bell()|00>`: an amplitude, with the ket's labels read from the source.
         if self.at(TokenKind::Pipe)
-            && let Some(end) = self.ket_rest(self.span().end as usize)
+            && let Some(end) = self.ket_rest(self.span().end)
         {
             let ket_span = Span::new(self.span().start, end);
             self.skip_to(end);
@@ -1986,8 +2660,8 @@ impl Parser<'_> {
     fn string_parts(&mut self, span: Span) -> List<StrPart> {
         let mark = self.ast.mark::<StrPart>();
         let bytes = self.source.as_bytes();
-        let start = span.start as usize + 1;
-        let end = (span.end as usize).saturating_sub(1).max(start);
+        let start = self.pos_of(span.start) + 1;
+        let end = self.pos_of(span.end).saturating_sub(1).max(start);
         let mut text = String::new();
         let mut pos = start;
         while pos < end {
@@ -2054,10 +2728,10 @@ impl Parser<'_> {
                     }
                     _ => {
                         let end = close.map_or(pos + 2, |c| c + 1);
-                        self.error(Span::new(pos as u32, end as u32), "invalid Unicode escape")
-                            .with_help_mut(
-                                "write it as `\\u{1F600}`, with 1 to 6 hexadecimal digits",
-                            );
+                        let at = Span::new(self.offset_of(pos), self.offset_of(end));
+                        self.error(at, "invalid Unicode escape").with_help_mut(
+                            "write it as `\\u{1F600}`, with 1 to 6 hexadecimal digits",
+                        );
                         return end;
                     }
                 }
@@ -2067,7 +2741,7 @@ impl Parser<'_> {
                     .chars()
                     .next()
                     .map_or(0, char::len_utf8);
-                let at = Span::new(pos as u32, (pos + 1 + len) as u32);
+                let at = Span::new(self.offset_of(pos), self.offset_of(pos + 1 + len));
                 self.error(at, "unknown escape")
                     .with_help_mut("the escapes are \\n, \\t, \\r, \\0, \\\\, \\\" and \\u{…}");
                 return pos + 1 + len;
@@ -2081,7 +2755,7 @@ impl Parser<'_> {
     /// optional format spec after a top-level `:`.
     fn interpolation(&mut self, start: usize, end: usize) -> Option<StrPart> {
         let bytes = self.source.as_bytes();
-        let span = Span::new(start as u32 - 1, end as u32 + 1);
+        let span = Span::new(self.offset_of(start) - 1, self.offset_of(end) + 1);
         // The spec starts at the first `:` outside brackets and nested strings that is not
         // part of `::`.
         let mut depth = 0usize;
@@ -2113,14 +2787,15 @@ impl Parser<'_> {
                 .with_help_mut("write `{{` for a literal brace");
             return None;
         }
-        let expr = self.sub_expr(start as u32, expr_end as u32);
+        let expr = self.sub_expr(self.offset_of(start), self.offset_of(expr_end));
         let spec = colon.and_then(|c| self.format_spec(c + 1, end));
         Some(StrPart::Value { expr, spec })
     }
 
-    /// Parses the source from `start` to `end` as one expression.
+    /// Parses the source from offset `start` to offset `end` as one expression.
     fn sub_expr(&mut self, start: u32, end: u32) -> ExprId {
-        let mut lexed = lex_range(self.source, start, end);
+        let text = &self.source[self.pos_of(start)..self.pos_of(end)];
+        let mut lexed = lex_at(text, start);
         lexed.tokens.retain(|t| t.kind != TokenKind::Newline);
         self.diagnostics.extend(lexed.diagnostics);
         let saved_tokens = std::mem::replace(&mut self.tokens, lexed.tokens);
@@ -2139,7 +2814,7 @@ impl Parser<'_> {
     /// `[[fill] align] ["+"] ["0"] [width] ["." precision] [type]`.
     fn format_spec(&mut self, start: usize, end: usize) -> Option<FormatSpec> {
         let text = &self.source[start..end];
-        let span = Span::new(start as u32, end as u32);
+        let span = Span::new(self.offset_of(start), self.offset_of(end));
         let mut chars = text.chars().peekable();
         let align_of = |c: char| match c {
             '<' => Some(Align::Left),

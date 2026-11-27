@@ -7,6 +7,252 @@ before 1.0.
 
 ## [Unreleased]
 
+### Spec
+
+- 0.5 is planned in `docs/PLAN.md`: modules, generics, native code, interop and backends.
+- Quantum integers are dropped from the plan: a library can define one on generics, size
+  parameters and `rev` methods. Operator traits stay under "not yet" in `spec/types.md` §6.
+- Modules follow Rust: glob imports, `pub(pkg)`, `pub(super)` and `pub(in path)`, and a small
+  prelude, so `State`, `amplitudes`, `fft`, `ifft`, `P` and `PX` will need a `use`.
+- C interop follows Rust: arrays by reference, `extern "C" struct` for C layout, and
+  `extern "C" fn` callbacks. Host functions can call back into the program.
+- Bounds are inferred from bodies within a package, `Copy` included: a body that copies or
+  drops a `T` needs `T: Copy`, one that calls `x.measure()` needs `T: Measure`, and needs
+  follow calls. A call giving a type without what a function needs is an error at the call,
+  pointing at the line that needs it. A bound written is a promise, as are a library's `pub`
+  functions' bounds, so copying a `T: Measure` is still N001.
+- A type can implement a generic trait several times with different arguments; a call picks
+  the `impl` by the arguments inferred from it, or by the type's only `impl` or bound when
+  they leave one open, and is an error otherwise. A generic trait's associated types depend
+  on its arguments (`Scale<Int>` and `Scale<Float>` can each give a type its own `Out`).
+- Operator traits: `+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `<<`, `>>`, unary `-` and `~`,
+  and their compound assignments (`+=`, … `>>=`) on a program's own types call `std::ops`
+  traits; `==`, `!=`, `<`, `<=`, `>`, `>=` call `std::cmp::{Eq, Ord}` (lending both sides).
+  Trailing trait parameters can have defaults (`trait Add<Rhs = Self>`,
+  `trait Pad<const N: Int = 1>`), so `impl Add for V` and `T: Add<Output = T>` omit `Rhs`.
+  Built-in types implement the traits by their built-in operators.
+- `with`/`do` and automatic release (`spec/ownership.md` §8–9): `with { … } do { … }` runs a
+  reversible `with` block (which may allocate ancillas), runs `do` with every linear place
+  `with` allocated, acted on or read held `ref`-lent, then inverts `with` and releases its
+  ancillas automatically; under `ctrl`, only `do` takes the outer controls. Qubits proven to
+  be in `|0>` (untouched `|0>` literals/aggregates, or a `Qubit` after `reset`) release
+  automatically on scope exit without N003. `tests/run/qint.nv` adds a reversible in-place
+  `QInt += QInt` using `with`/`do`.
+- Lifetimes (`spec/ownership.md` §5, `spec/grammar.md` §3): Polonius-style non-lexical,
+  path-sensitive lifetimes (lends live only along paths that use them again, accepting
+  conditional early borrow returns); two-phase receiver lends (`c.add(c.get())`,
+  `e.rotate_by(e.angle)`); field-level method lends inferred within a package (`ctrl p.a {
+  p.flip_b() }`, disjoint `p.a_mut()` / `p.b_mut()`); references stored in structs and enums
+  (`Window`, `MutWindow`, `Option<ref Qubit>`); and place-based borrow annotations
+  (`ref[a, b] String`, `mut[self.state] Qubit`, `Window[r]`), inferred within a package and
+  required on a library's `pub` functions and trait signatures where elision does not decide.
+- Runtime C ABI (`spec/runtime.md` §4, §6): added `noev-runtime::cabi` with QIR-shaped
+  `extern "C"` entry points (`NoevRuntime`, `NoevQubit`, tagged `NoevResult`, `noev_qis_*`
+  core gates, `noev_rt_qubit_*`, `noev_rt_ctrl_*`, `noev_rt_adj_*`, `noev_rt_with_*`,
+  `noev_rt_amplitudes`, `noev_rt_zero_amplitude`, `noev_rt_expectation_exact`,
+  `noev_rt_sample_run`, `noev_rt_write`, `noev_rt_assert`), and moved the interpreter
+  (`Machine`) onto this C ABI.
+- Cranelift code generator (`spec/runtime.md` §2, §7): added `noev-codegen` behind the
+  optional `cranelift` feature (enabled by default; `--no-default-features` still builds
+  without `cranelift` or `ketrs`), wired `noev build --emit=object|binary` (`binary` is now
+  the default) linking against `libnoev_runtime.a`, added a Cranelift throughput benchmark
+  (`noev-codegen/benches/compile`), and verified all 39 `tests/run/*.nv` programs compiled
+  to native binaries against the interpreter.
+- QIR 1.0 export (`spec/runtime.md` §4, §7): added `noev-runtime::qir` emitting QIR 1.0
+  LLVM IR (Base Profile for straight-line circuits, Adaptive Profile for mid-circuit
+  measurement, `reset`, `if`, and `while`), decomposing `U`, `P`, matrix unitaries, and
+  arbitrary multi-controlled gates into standard QIR QIS intrinsics with zero extra ancillas;
+  wired `noev build --emit=qir` and `noev export --format=qir` (working without optional
+  features), with `ketrs` statevector fidelity verification and a QIR benchmark.
+- LLVM code generator (`spec/runtime.md` §2, §4, §7): refactored `noev-codegen` behind a
+  shared `CodeGenerator` trait and target-independent layout/analysis, added `LlvmCodegen`
+  behind the optional `llvm` feature (pure-Rust opaque-pointer LLVM IR emitter + dynamic
+  `libLLVM` C API / `llc` driver with `-O2` optimization), added `--codegen=cranelift|llvm`,
+  `--emit=llvm-ir`, and `--qir-runtime` (emitting `__quantum__qis__*` / `__quantum__rt__*`
+  calls for linking against external QIR runtimes), verified all 39 `tests/run/*.nv` programs
+  compiled with LLVM `-O2` against the interpreter plus end-to-end C QIR shim linking, and
+  added LLVM IR and `-O2` object benchmarks alongside Cranelift.
+- Built-in test system (`spec/testing.md`, `spec/grammar.md`): added contextual
+  `test fn name()`, `test(fail) fn name()`, and `test(fail = "…") fn name()` syntax;
+  added lazy optional failure messages on `assert cond, "message"`; added `noev test`
+  with single-file, package (`src/` unit tests + `tests/*.nv` integration tests), and
+  directory discovery, `--list`, positional `FILTER`, `--seed`, `--backend`, `--nocapture`,
+  and native `--compile` / `--codegen=cranelift|llvm` test runner binaries; migrated the
+  `tests/run/` conformance suite to `test fn` suites.
+- Targets and backends (`spec/runtime.md` §3–§5, `spec/modules.md` §6): added the
+  `std::backend` module (`Backend` trait, `Target`, `Level`, `Capabilities`, `Circuit`,
+  `Instruction`, `Op`, `GateKind`, `Shots`, `ShotCount`, `BackendError`) and enforced that
+  `impl Backend` types and methods cannot hold or act on qubits; added `TargetSpec`
+  descriptions for `ketrs`, `export`, `.toml` files, and plug-ins with compile-time
+  capability checking (`read_state`, circuit-only level, qubit limit, non-universal gate
+  sets, and `foreign_while_live`); added `--backend` on `check`, `build`, and `run`,
+  `[target] backend` in `noev.toml`, and `noev target fetch | list | show` with local TOML
+  caching; added the backend plug-in C ABI (`include/noev_backend.h` and dynamic loading
+  in both `noev run` and compiled standalone binaries via `--backend` / `NOEV_BACKEND`),
+  plus end-to-end C plug-in tests and a target benchmark.
+- Standard library for backends (`spec/std.md` §5–§6, `spec/modules.md` §6): added
+  affine `Vec<T>` in the prelude (`new`, `with_capacity`, `len`, `is_empty`, `push`, `pop`,
+  `get`, `set`, `v[i]`/`v[i] = x`, `clear`, `extend`, `clone`, `==`, formatting, and
+  `Vec::<T>::new()` turbofish); added `String` methods (`len`, `is_empty`, `contains`,
+  `starts_with`, `ends_with`, `trim`, `split`, `lines`, `replace`, `substring`, `find`,
+  `to_uppercase`, `to_lowercase`, `as_bytes`, `String::from_utf8`, `parse_int`,
+  `parse_float`, `repeat`, `String::join`, and `+` concatenation); added `std::io`
+  (`stdout`, `stderr`, `stdin`, `IoStream::{lock, write, flush}`, `Stdin::{read_line,
+  read_to_string}`), `std::env` (`var`, `args`, `current_dir`), `std::fs`
+  (`read_to_string`, `read`, `write`, `write_bytes`, `exists`, `create_dir_all`,
+  `remove_file`), and `std::net` (`TcpStream`, `TcpListener`) across sema, IR
+  (`Stmt::StdCall`), runtime (`std_ops`, `noev_rt_std_call`), Cranelift, and LLVM, with UI
+  tests, an end-to-end run test, and a `std_ops` benchmark.
+- Larger matrix gates (`spec/core.md` §1): generalized `r.unitary(m)` to arbitrary
+  `[Qubit; N]` registers (`1 <= N <= 10`, `[[Complex; 2^N]; 2^N]`); implemented recursive
+  Quantum Shannon Decomposition (`unitary::decompose_n`: Cosine–Sine Decomposition via
+  two-stage complex Hermitian Jacobi, demultiplexing, and Walsh–Hadamard Gray-code
+  uniformly controlled rotations with CNOT cancellation, bottoming out in 2-qubit KAK) with
+  exact global phase so `adj`, `ctrl`, circuits, OpenQASM 3 export, QIR export, `ketrs`,
+  Cranelift, and LLVM all work uniformly; added 3- and 4-qubit unit/run/export tests and a
+  `unitary` decomposition benchmark.
+- Inline OpenQASM (`spec/interop.md` §4, `spec/ownership.md` §11): added the `unsafe`
+  built-in `qasm("…")` for hardware-specific OpenQASM 3 statements with interpolated `{q}`
+  qubit places (mut-lent, checking N002/N005/N018 and clearing `|0>`-tracking) and classical
+  scalar placeholders (`Float`, `f32`, `Int`, sized integers, `Bit`, `Bool`); requires
+  `unsafe` (N019) and is irreversible (N013); records into circuits and exports verbatim in
+  `noev export` (rejecting QIR export/ABI cleanly); simulates via `ketrs::qasm::parse` on
+  both gate-level sessions and circuits, across the interpreter, Cranelift, and LLVM
+  backends, with UI/run/export tests and C ABI benchmarks.
+- C and C++ interop, both ways (`spec/interop.md` §1, §3–§6): added `extern "C" { fn … }`
+  imports (N019 outside `unsafe`, N013 in reversible contexts), `extern "C" struct` with
+  C layout, `ref`/`mut` array and struct parameters, `extern "C" fn` exports/callbacks and
+  `extern "C" fn(…) -> …` function pointers across syntax, sema, IR, and both Cranelift and
+  LLVM code generators (System V struct classification, `byval`/`sret` for >16B structs,
+  checked `Int <-> int64_t`, `--link`/`-l` in `noev build`); added the C/C++ embedding API
+  (`include/noev.h`, `crates/noev-c` / `libnoev_c.a`) with re-entrant callbacks, UI tests,
+  end-to-end C99/C++17 & dual-codegen integration tests, and a C embedding benchmark.
+- Python bindings (`spec/interop.md` §1, §2): added `crates/noev-py` (PyO3 + maturin,
+  configured in `pyproject.toml`) and the `python/noev` package with type stubs
+  (`_noev.pyi`, `py.typed`), exposing `Program`, `Runtime`, `HostContext`, `Observable`,
+  `Struct`, `Enum`, `Distribution`, and structured exceptions (`NoevError`, `CompileError`,
+  `ValidationError`, `RuntimeError`) with arbitrary-precision `Int`, load-time arity checks,
+  re-entrant callbacks, and SciPy VQE tests plus a Python throughput benchmark.
+- Rust embedding API (`spec/interop.md` §1, §2, §4, §5): added `extern fn` host-function
+  declarations in syntax/sema/IR (enforcing classical copyable, reference-free boundary
+  types, N013 irreversibility, and measurement-tainted circuit classification), host dispatch
+  and re-entrant callbacks in `noev-runtime::host`, and a safe zero-`unsafe` Rust embedding
+  library in `noev` (`Program::compile_file` / `compile_source`, `Runtime::new` /
+  `with_backend`, `.host_fn`, `.host_fn_with_context`, `.validate`, `.call`, `HostContext`,
+  `Bit`, `Complex`, `C32`, `Observable`, `Value`), with UI tests, integration tests (including
+  VQE, re-entrant callbacks, and `--no-default-features`), and an embedding benchmark.
+- Arithmetic in sizes: `[Qubit; N + 1]`, `[Bit; 2 * N]` and `Reg<{N + 1}>`, compared after
+  normalising and solved by calls (`[Qubit; 5]` for `[Qubit; N + 1]` makes `N` 4), so a
+  quantum integer can be a library type (`tests/run/qint.nv`). A call also infers a parameter
+  that only a bound's associated type fixes (`U` in `T: Add<T, Output = U>`), and index
+  proofs know a size is never negative. Sizes can subtract (`[Qubit; N - 1]`): a signature
+  with one requires it to be at least 0, which each call proves from the sizes it gives and
+  the facts where it is (N024).
+- Being a circuit is decided across modules and packages by the compiler, as within one;
+  only reversibility needs a declaration (`rev fn`) to cross a module.
+- Backends are libraries implementing `std::backend::Backend`, in Noev, Rust or C. Every
+  backend has a target description with its capabilities, so a program cannot tell a
+  simulator from a quantum computer; what used to be "simulators only" is now "backends that
+  can read the state".
+
+### Compiler
+
+- Spans are offsets into a source map in which each file has its own range, so diagnostics
+  find their file and can point into several files (`spec/modules.md` §8). The lexer, parser
+  and lowering take a file's starting offset (`lex_at`, `parse_at`).
+- `pub`, `pub(pkg)`, `pub(super)`, `pub(self)` and `pub(in path)` are parsed on items, fields
+  and methods, and `use` trees with braces, `self`, `*` and `as`, flattened into one import
+  per name. `pub` on a variant or an `impl` block is an error, as in Rust.
+
+- Packages: `noev check`, `build`, `run` and `export` take a `.nv` file or a package
+  directory (the current one by default). A package has a `noev.toml` and `src/main.nv` or
+  `src/lib.nv`; every `.nv` file under `src/` is a module, and dependencies are other package
+  directories, given by `path`.
+- Names are resolved per module, as in Rust: a module sees its own items, its imports, then
+  its glob imports, then its dependencies, then the prelude. `use` (with globs and
+  re-exports), paths through `pkg`, `super`, `self`, modules and packages, and the
+  visibility of items are checked. Imports resolve in any order, and a chain of re-exports
+  in one pass.
+- Fields and methods are private to their module unless marked: other modules cannot read
+  a private field, create a struct with one, or call a private method.
+- A function without `rev` is reversible only inside its own package; from another package a
+  call to it in reversible code or under `adj` is N013 or N014, with a note saying why. A
+  library's `pub` function that acts on qubits and is reversible only by inference gets a
+  warning.
+- **Breaking:** the prelude no longer has `State` (now `std::state`), `amplitudes`
+  (`std::debug`), `fft` and `ifft` (`std::fourier`), or `P` and `PX` (`std::observables`).
+  Using one without its `use` is an error whose help gives the line to add.
+- Functions outside a package's root module are named by their path in the IR (`ansatz::ry_layer`,
+  `qlib::flip`), and `fn main` is only the one in the root module.
+
+- Generics are parsed: type and size parameters (`<T: Copy, const N: Int>`) on
+  functions, structs, enums and traits, `where` clauses, generic `impl`s with bounds such as
+  `Measure<Result = Bit>`, size parameters as array lengths, sizes as type arguments
+  (`Register<8>`) and `swap::<Int>`.
+- Generic functions, structs and enums with type parameters: a plain `T` takes classical
+  values and qubits alike and is moved and consumed like a qubit (N001 and N003 say so and
+  suggest `T: Copy`); `T: Copy` lets a body copy and drop. Type arguments are inferred from
+  arguments, fields and expected types, or given with `::<…>`; each generic function is
+  compiled once per list of type arguments (`unwrap_or<Int>` in the IR). `Option` and
+  `Result` are instances of generic definitions like any other.
+- Traits and `impl`s: default functions, generic `impl`s (`impl<T: Shape> Shape for
+  Pair<T>`), calls on concrete types and through bounds (`T: Shape`), and `rev` trait
+  functions, which every `impl` must keep and generic code can invert with `adj`. An `impl`
+  must provide every function without a default, with the trait's signature, be in the
+  package of the trait or the type, and not give a trait twice for one type. A call through a
+  trait function not declared `rev` through a bound is irreversible, and runs shot by shot;
+  on a known type the call reaches the `impl`'s function, whose reversibility is inferred.
+  `Trait::f(x)` names the trait, and is needed when two traits of a type share a name.
+- Reversibility, preparations and printing are inferred in time linear in the program:
+  each function is looked at again only when one it calls changes, instead of every
+  function on every pass. A chain of 2000 functions declared last to first, the first
+  irreversible, took 95 ms to check for ownership and now takes 2.5 ms.
+- A generic function calling itself infers its own type parameters (`f(s, n - 1)` inside
+  `f<T>`), which used to be "cannot tell what `T` is".
+- Associated types: `type Result: Copy` in a trait, `type Result = Bit` in each `impl`,
+  `T::Result` and `Self::Result` in signatures, and bounds that fix one
+  (`T: Readout<Result = Bit>`), checked at each call.
+- `Measure` is a trait in the prelude: a struct measures to a classical result by an
+  `impl` (`Experiment` to `ExperimentResult`), and `x.measure()`, `measure(x)` and generic
+  code with `T: Measure` measure it. Qubits implement it with the built-in measurement,
+  and tuples and arrays of measurable types by measuring each element.
+- Size parameters: `const N: Int` on functions, structs and `impl`s, `[T; N]`, `N` as an
+  `Int` value and `[|0>; N]`. Sizes are inferred from arguments (`[Qubit; 4]` for
+  `[Qubit; N]`) or given (`fresh::<4>()`, `Reg<4>`), and each size gets its own copy.
+  Indices into a qubit array of length `N` are proven against `N` (N017, N018): `for i in
+  0..N - 1` proves `r[i + 1]` in range, and `N - 1 - i` is at least 0 inside `0..N`.
+- Type and size arguments that a call's arguments leave unknown are inferred from the type
+  expected of the call: `let r: [Qubit; 2] = fresh()`, `let x: Option<Int> = none()`.
+- An `impl` for a generic type (`impl<const N: Int> Measure for Reg<N>`) finds its own
+  associated types in its signatures.
+- Generic traits: `trait Oracle<const N: Int>`, `trait Scale<T>`, bounds such as
+  `T: Oracle<N>`, and one type implementing a trait with several arguments (`impl Oracle<2>
+  for Flip` and `impl Oracle<3> for Flip`), the call picking by its arguments, or the only
+  `impl` or bound when they leave it open. Defaults see the trait's parameters. The IR names
+  each `impl`'s functions with the arguments: `<Flip as Oracle<2>>::apply`. Associated
+  types in generic traits are not supported yet.
+- Inferred bounds: a generic function whose parameter has no bound written, and that other
+  packages cannot call, infers `T: Copy` when its body only checks with `T` copyable (the
+  copy or drop that needs it is shown at a call that gives a qubit), and the trait of a
+  method called on a `T` (`x.area()`) or of a bound it is passed to; needs follow calls,
+  through recursion too, and are checked at each call once every body is. A method two
+  traits share needs the bound written.
+
+- ketrs 0.2.0. Noev uses none of its new features (symmetric MPS, batched MPS
+  expectations), and nothing changes for programs.
+
+### Tools
+
+- The tree-sitter grammar and Neovim highlights know visibilities, `use` and generics; an
+  `impl` of a trait named by one identifier parses again.
+- The language server checks a file in a package with the rest of the package, reading open
+  documents from the editor; it rechecks the package's other open files when one changes, and
+  go to definition and diagnostic notes can point into other files.
+- `noev build --emit=plan` says a function calling a trait's function that is not `rev fn`
+  is not a circuit because the `impl` may measure, instead of claiming a measurement result is
+  passed to it, and finds each file's lines once, so long programs no longer take quadratic
+  time (a chain of 4000 functions: 356 ms to 51 ms).
+
 ## [0.4.2] - 2026-11-08
 
 ### Spec

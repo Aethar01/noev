@@ -7,11 +7,11 @@
 
 use std::fmt;
 
-use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli};
+use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli, StdOp};
 use noev_sema::ty::Width;
 use noev_sema::{Ty, TyKind, Types};
 use noev_syntax::Span;
-pub use noev_syntax::ast::{Align, FormatKind, FormatSpec};
+pub use noev_syntax::ast::{Align, ExternKind, FormatKind, FormatSpec};
 
 macro_rules! index {
     ($($(#[$doc:meta])* $name:ident;)*) => {$(
@@ -37,6 +37,17 @@ index! {
     Block;
 }
 
+/// A `test fn` entry lowered from the root package (`spec/testing.md`).
+#[derive(Clone, Debug)]
+pub struct TestFn {
+    /// Module-qualified test name (e.g. `bell_correlation` or `ansatz::ry_norm`).
+    pub name: String,
+    /// The lowered function to execute (takes 0 params, returns `()`).
+    pub func: FuncId,
+    /// `None` for `test fn`, `Some(None)` for `test(fail)`, `Some(Some(s))` for `test(fail = "s")`.
+    pub expect_fail: Option<Option<String>>,
+}
+
 /// A lowered program.
 #[derive(Clone, Debug)]
 pub struct Program {
@@ -44,6 +55,8 @@ pub struct Program {
     pub functions: Vec<Function>,
     /// `main`, if the program has one.
     pub main: Option<FuncId>,
+    /// Every `test fn` declared in the root package, in declaration order.
+    pub tests: Vec<TestFn>,
     /// The program's types.
     pub types: Types,
     /// Struct names, indexed like [`Types::structs`].
@@ -72,6 +85,25 @@ pub struct Function {
     /// Whether repeated runs of it can be computed once and sampled: a circuit whose control
     /// flow does not depend on measurement results (`spec/execution.md` §4).
     pub sampled: bool,
+    /// Whether this is a host `extern fn`, an `extern "C"` import, or an `extern "C" fn` export.
+    pub extern_kind: ExternKind,
+}
+
+impl Function {
+    /// Whether this function is a host `extern fn` declaration (`spec/interop.md` §2).
+    pub fn is_host_extern(&self) -> bool {
+        self.extern_kind == ExternKind::Host
+    }
+
+    /// Whether this function is an `extern "C"` import (`spec/interop.md` §3).
+    pub fn is_c_import(&self) -> bool {
+        self.extern_kind == ExternKind::CImport
+    }
+
+    /// Whether this function is an `extern "C" fn` callable from C (`spec/interop.md` §3).
+    pub fn is_c_export(&self) -> bool {
+        self.extern_kind == ExternKind::CExport
+    }
 }
 
 /// A local's type, and its source name if it has one.
@@ -238,6 +270,8 @@ pub enum Rvalue {
     Variant(u32, Vec<Operand>),
     /// The variant number of an enum value, as an `Int`.
     Tag(Operand),
+    /// Address of an `extern "C" fn` as a C function pointer value (`spec/interop.md` §3).
+    FnPtr(FuncId),
 }
 
 /// A piece of a string being built.
@@ -247,6 +281,17 @@ pub enum FormatPart {
     Text(String),
     /// A value, formatted according to its type and spec.
     Value(Operand, Ty, Option<FormatSpec>),
+}
+
+/// A piece of an inline OpenQASM snippet (`Stmt::Qasm`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum QasmPart {
+    /// Literal OpenQASM text.
+    Text(String),
+    /// A qubit placeholder indexing into `Stmt::Qasm::qubits`.
+    Qubit(usize),
+    /// A classical scalar placeholder formatted into OpenQASM text at run time.
+    Value(Operand, Ty),
 }
 
 /// A statement.
@@ -259,6 +304,22 @@ pub enum Stmt {
         stderr: bool,
         /// The values and their types.
         args: Vec<(Operand, Ty)>,
+    },
+    /// Emit inline OpenQASM 3 statements (`unsafe { qasm("…") }`).
+    Qasm {
+        /// The interleaved text, qubit, and classical scalar parts.
+        parts: Vec<QasmPart>,
+        /// Distinct qubit places referenced by [`QasmPart::Qubit`] indices.
+        qubits: Vec<Place>,
+    },
+    /// Call a built-in standard-library operation (`Vec<T>`, `String`, `std::{io, env, fs, net}`).
+    StdCall {
+        /// Which operation to run.
+        op: StdOp,
+        /// Evaluated arguments and their dereferenced types.
+        args: Vec<(Operand, Ty)>,
+        /// Optional destination place and its type (`None` when the return value is discarded).
+        dest: Option<(Place, Ty)>,
     },
     /// `place = value`.
     Assign(Place, Rvalue),
@@ -306,6 +367,14 @@ pub enum Stmt {
     CtrlPush(Vec<Place>),
     /// Remove the controls added by the matching [`Stmt::CtrlPush`].
     CtrlPop,
+    /// Begin a `with` block: record gates and allocated qubits so [`Stmt::WithEnd`] can
+    /// uncompute and release them.
+    WithStart,
+    /// End the `with` block and begin the `do` block (restoring enclosing controls).
+    WithDo,
+    /// End the `do` block: invert the recorded `with` gates and release every qubit
+    /// allocated in `with`.
+    WithEnd,
     /// `dest = sample shots { … }`, with the block made into `func`: the distribution of
     /// `func(args)`'s results over `shots` runs, with returned qubits measured at the end of each.
     Sample {
@@ -442,10 +511,23 @@ pub enum Terminator {
     Assert {
         /// A `Bool`.
         cond: Operand,
+        /// Optional failure message (`String`), evaluated only when `cond` is false.
+        msg: Option<Operand>,
         /// Where to continue.
         next: Block,
         /// The `assert` statement, for the error message.
         span: Span,
+    },
+    /// Call an `extern "C" fn(…) -> …` function pointer value (`spec/interop.md` §3).
+    CallIndirect {
+        /// Function pointer operand.
+        callee: Operand,
+        /// Its arguments.
+        args: Vec<Operand>,
+        /// Where the return value goes.
+        dest: Place,
+        /// Where to continue afterwards.
+        next: Block,
     },
     /// Return `Local(0)` to the caller.
     Return,
@@ -486,6 +568,11 @@ impl Program {
             }
             TyKind::Array(elem, len) => format!("[{}; {len}]", self.type_name(*elem)),
             TyKind::Distribution(elem) => format!("Distribution<{}>", self.type_name(*elem)),
+            TyKind::Vec(elem) => format!("Vec<{}>", self.type_name(*elem)),
+            TyKind::IoStream => "IoStream".into(),
+            TyKind::Stdin => "Stdin".into(),
+            TyKind::TcpStream => "TcpStream".into(),
+            TyKind::TcpListener => "TcpListener".into(),
             TyKind::Struct(id) => self.struct_names[id.index()].clone(),
             TyKind::Ref { mutable, inner } => {
                 format!(
@@ -494,6 +581,25 @@ impl Program {
                     self.type_name(*inner)
                 )
             }
+            TyKind::ExternCFn { params, ret } => {
+                let ps: Vec<String> = params.iter().map(|&t| self.type_name(t)).collect();
+                if *ret == Ty::UNIT {
+                    format!("extern \"C\" fn({})", ps.join(", "))
+                } else {
+                    format!(
+                        "extern \"C\" fn({}) -> {}",
+                        ps.join(", "),
+                        self.type_name(*ret)
+                    )
+                }
+            }
+            // Lowering replaces every type parameter and resolves every associated type; this
+            // is only reached by a bug.
+            TyKind::Param(_)
+            | TyKind::Assoc { .. }
+            | TyKind::SizedArray(..)
+            | TyKind::Size(_)
+            | TyKind::SizeSum { .. } => "{parameter}".into(),
         }
     }
 }
@@ -515,13 +621,44 @@ impl Program {
         let params: Vec<String> = (1..=function.params)
             .map(|i| format!("_{i}: {}", self.type_name(function.locals[i].ty)))
             .collect();
-        writeln!(
-            f,
-            "fn {}({}) -> {} {{",
-            function.name,
-            params.join(", "),
-            self.type_name(function.locals[0].ty)
-        )?;
+        match function.extern_kind {
+            ExternKind::Host => {
+                return writeln!(
+                    f,
+                    "extern fn {}({}) -> {}",
+                    function.name,
+                    params.join(", "),
+                    self.type_name(function.locals[0].ty)
+                );
+            }
+            ExternKind::CImport => {
+                return writeln!(
+                    f,
+                    "extern \"C\" fn {}({}) -> {}",
+                    function.name,
+                    params.join(", "),
+                    self.type_name(function.locals[0].ty)
+                );
+            }
+            ExternKind::CExport => {
+                writeln!(
+                    f,
+                    "extern \"C\" fn {}({}) -> {} {{",
+                    function.name,
+                    params.join(", "),
+                    self.type_name(function.locals[0].ty)
+                )?;
+            }
+            ExternKind::None => {
+                writeln!(
+                    f,
+                    "fn {}({}) -> {} {{",
+                    function.name,
+                    params.join(", "),
+                    self.type_name(function.locals[0].ty)
+                )?;
+            }
+        }
         for (i, local) in function.locals.iter().enumerate().skip(function.params + 1) {
             let name = local
                 .name
@@ -582,6 +719,9 @@ impl Program {
                 format!("ctrl push {}", places.join(", "))
             }
             Stmt::CtrlPop => "ctrl pop".into(),
+            Stmt::WithStart => "with start".into(),
+            Stmt::WithDo => "with do".into(),
+            Stmt::WithEnd => "with end".into(),
             Stmt::Sample {
                 dest,
                 func,
@@ -605,6 +745,27 @@ impl Program {
                     if *stderr { "eprint" } else { "print" },
                     args.join(", ")
                 )
+            }
+            Stmt::Qasm { parts, qubits } => {
+                let qs: Vec<String> = qubits.iter().map(place_text).collect();
+                let ps: Vec<String> = parts
+                    .iter()
+                    .map(|p| match p {
+                        QasmPart::Text(t) => format!("\"{}\"", t.escape_debug()),
+                        QasmPart::Qubit(i) => format!("${i}"),
+                        QasmPart::Value(op, _) => format!("{{{}}}", operand_text(op)),
+                    })
+                    .collect();
+                format!("qasm [{}] [{}]", ps.join(", "), qs.join(", "))
+            }
+            Stmt::StdCall { op, args, dest } => {
+                let args: Vec<String> = args.iter().map(|(a, _)| operand_text(a)).collect();
+                match dest {
+                    Some((d, _)) => {
+                        format!("{} = {}({})", place_text(d), op.name(), args.join(", "))
+                    }
+                    None => format!("{}({})", op.name(), args.join(", ")),
+                }
             }
             Stmt::Overlap {
                 dest,
@@ -712,6 +873,7 @@ impl Program {
                     operand_text(bit)
                 )
             }
+            Rvalue::FnPtr(func) => format!("fnptr({})", self.function_name(*func)),
         }
     }
 
@@ -783,8 +945,31 @@ impl Program {
                     next.0
                 )
             }
-            Terminator::Assert { cond, next, .. } => {
-                format!("assert {} -> bb{}", operand_text(cond), next.0)
+            Terminator::Assert {
+                cond, msg, next, ..
+            } => match msg {
+                Some(m) => format!(
+                    "assert {}, {} -> bb{}",
+                    operand_text(cond),
+                    operand_text(m),
+                    next.0
+                ),
+                None => format!("assert {} -> bb{}", operand_text(cond), next.0),
+            },
+            Terminator::CallIndirect {
+                callee,
+                args,
+                dest,
+                next,
+            } => {
+                let args: Vec<String> = args.iter().map(operand_text).collect();
+                format!(
+                    "{} = ({})({}) -> bb{}",
+                    place_text(dest),
+                    operand_text(callee),
+                    args.join(", "),
+                    next.0
+                )
             }
             Terminator::Return => "return".into(),
             Terminator::Unreachable => "unreachable".into(),

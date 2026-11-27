@@ -204,6 +204,86 @@ fn errors(source: &str) -> Vec<String> {
         .collect()
 }
 
+/// Each import of the first item, which must be a `use`, as `path`, `path as alias` or
+/// `path::*`.
+fn imports(source: &str) -> Vec<String> {
+    let parsed = parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ast = &parsed.ast;
+    let ItemKind::Use(imports) = ast.item(ast.list(ast.root)[0]).kind else {
+        panic!("not a `use`");
+    };
+    ast.list(imports)
+        .iter()
+        .map(|i| {
+            let path: Vec<&str> = ast.list(i.path).iter().map(|&s| ast.name(s)).collect();
+            let mut text = path.join("::");
+            if i.glob {
+                text.push_str("::*");
+            }
+            if let Some(alias) = i.alias {
+                text = format!("{text} as {}", ast.name(alias));
+            }
+            text
+        })
+        .collect()
+}
+
+#[test]
+fn use_trees_are_flattened() {
+    assert_eq!(imports("use std::observables::P"), ["std::observables::P"]);
+    assert_eq!(
+        imports("use qlib::qft::qft as fourier"),
+        ["qlib::qft::qft as fourier"]
+    );
+    assert_eq!(imports("use pkg::ansatz::*"), ["pkg::ansatz::*"]);
+    assert_eq!(
+        imports("use std::observables::{self, P, PX as X}"),
+        [
+            "std::observables",
+            "std::observables::P",
+            "std::observables::PX as X"
+        ]
+    );
+    assert_eq!(
+        imports("use a::{b::{c, d::*}, e as _,\n f,\n}"),
+        ["a::b::c", "a::b::d::*", "a::e as _", "a::f"]
+    );
+    assert_eq!(imports("use super::helpers"), ["super::helpers"]);
+}
+
+#[test]
+fn visibilities() {
+    let parsed = parse(
+        "pub struct R {\n pub(pkg) size: Int\n qubits: Qubit\n pub(super) fn new() {}\n}\n\
+         pub(in pkg::a) fn f() {}\npub(self) fn g() {}\npub use a::b",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ast = &parsed.ast;
+    let items: Vec<&Item> = ast.list(ast.root).iter().map(|&i| ast.item(i)).collect();
+    assert_eq!(items[0].vis, Vis::Pub);
+    let ItemKind::Struct {
+        fields, methods, ..
+    } = items[0].kind
+    else {
+        panic!("not a struct");
+    };
+    let fields: Vec<Vis> = ast.list(fields).iter().map(|f| f.vis).collect();
+    assert_eq!(fields, [Vis::Pkg, Vis::Private]);
+    assert_eq!(ast.function(ast.list(methods)[0]).vis, Vis::Super);
+    let Vis::In { path, .. } = items[1].vis else {
+        panic!("not `pub(in …)`");
+    };
+    let path: Vec<&str> = ast.list(path).iter().map(|&s| ast.name(s)).collect();
+    assert_eq!(path, ["pkg", "a"]);
+    let ItemKind::Fn(f) = items[1].kind else {
+        panic!("not a function");
+    };
+    assert_eq!(ast.function(f).vis, items[1].vis);
+    assert_eq!(items[2].vis, Vis::Private);
+    assert_eq!(items[3].vis, Vis::Pub);
+}
+
 #[test]
 fn arithmetic_precedence() {
     assert_eq!(expr("a + b * c"), "(+ a (* b c))");
@@ -400,19 +480,44 @@ fn helpful_errors() {
     );
     assert_eq!(
         errors("extern fn f(x: Float) -> Float\nfn g() {}"),
-        ["`extern` functions are not supported yet"]
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        errors(
+            "extern \"C\" { fn erf(x: Float) -> Float }\n\
+             extern \"C\" struct Point { x: Float, y: Float }\n\
+             extern \"C\" fn cb(x: Float) -> Float { x }\n\
+             fn use_fp(f: extern \"C\" fn(Float) -> Float) {}"
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        errors("extern \"Fortran\" { fn f() }"),
+        ["unsupported extern ABI \"Fortran\"; only `\"C\"` is supported"]
     );
     assert_eq!(
         errors("fn f(x: Int) -> Float { x as Float }"),
         ["Noev has no `as` casts"]
     );
     assert_eq!(
-        errors("pub fn f() {}"),
-        ["`pub` is not supported yet: every program is one module"]
+        errors("pub impl Shape for S {}"),
+        ["an `impl` block cannot be marked `pub`"]
     );
     assert_eq!(
-        errors("use std::observables::P\nfn f() {}"),
-        ["`use` is not supported yet: every program is one module"]
+        errors("enum E { pub A }"),
+        ["a variant cannot be marked `pub`"]
+    );
+    assert_eq!(
+        errors("enum E { A { pub x: Int } }"),
+        ["a variant's field cannot be marked `pub`"]
+    );
+    assert_eq!(
+        errors("pub(crate) fn f() {}"),
+        ["expected `pkg`, `super`, `self` or `in` and a module's path, found `crate`"]
+    );
+    assert_eq!(
+        errors("use a::{b, 3}"),
+        ["expected a name to import, found `3`"]
     );
     assert_eq!(
         errors("fn g() { let extern = 1 }"),
@@ -529,4 +634,220 @@ fn enums() {
         .collect();
     assert_eq!(kinds, ["Success(1)", "Retry{1}", "Failed"]);
     assert_eq!(methods.len(), 1);
+}
+
+/// A generic parameter list as text: `T: A + B<X = Y>` and `const N` for each.
+fn generics_text(ast: &Ast, generics: Generics) -> String {
+    let bound_text = |b: &Bound| {
+        let path: Vec<&str> = ast.list(b.path).iter().map(|&s| ast.name(s)).collect();
+        let args: Vec<String> = ast
+            .list(b.args)
+            .iter()
+            .map(|a| match *a {
+                BoundArg::Type(t) => format!("{:?}", ast.ty(t).kind).chars().take(4).collect(),
+                BoundArg::Assoc { name, .. } => format!("{} = _", ast.name(name)),
+            })
+            .collect();
+        if args.is_empty() {
+            path.join("::")
+        } else {
+            format!("{}<{}>", path.join("::"), args.join(", "))
+        }
+    };
+    let bounds_text = |l: List<Bound>| {
+        ast.list(l)
+            .iter()
+            .map(bound_text)
+            .collect::<Vec<_>>()
+            .join(" + ")
+    };
+    let mut parts: Vec<String> = ast
+        .list(generics.params)
+        .iter()
+        .map(|p| match p.kind {
+            GenericKind::Size { default, .. } => {
+                if default.is_some() {
+                    format!("const {} = _", ast.name(p.name))
+                } else {
+                    format!("const {}", ast.name(p.name))
+                }
+            }
+            GenericKind::Type { bounds, default } if bounds.is_empty() => {
+                if default.is_some() {
+                    format!("{} = _", ast.name(p.name))
+                } else {
+                    ast.name(p.name).to_string()
+                }
+            }
+            GenericKind::Type { bounds, default } => {
+                let base = format!("{}: {}", ast.name(p.name), bounds_text(bounds));
+                if default.is_some() {
+                    format!("{base} = _")
+                } else {
+                    base
+                }
+            }
+        })
+        .collect();
+    for w in ast.list(generics.wheres) {
+        parts.push(format!(
+            "where {}: {}",
+            ast.name(w.name),
+            bounds_text(w.bounds)
+        ));
+    }
+    parts.join(", ")
+}
+
+#[test]
+fn generic_items() {
+    let parsed = parse(
+        "fn zip<T, U: Copy + Measure<Result = Bit>, const N: Int>(a: [T; N]) -> [T; N]\n\
+         where\n T: Copy,\n{ mv a }\n\
+         struct Pair<T, U> { a: T, b: U }\n\
+         enum Option<T> { Some(T), None }\n\
+         trait Oracle<const N: Int> {\n type Result: Copy\n rev fn apply(ref self, r: mut [Qubit; N])\n}\n\
+         impl<T: Measure> Oracle<4> for Pair<T, T> where T: Copy {}",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ast = &parsed.ast;
+    let items: Vec<&Item> = ast.list(ast.root).iter().map(|&i| ast.item(i)).collect();
+    let ItemKind::Fn(f) = items[0].kind else {
+        panic!()
+    };
+    assert_eq!(
+        generics_text(ast, ast.function(f).generics),
+        "T, U: Copy + Measure<Result = _>, const N, where T: Copy"
+    );
+    let ItemKind::Struct { generics, .. } = items[1].kind else {
+        panic!()
+    };
+    assert_eq!(generics_text(ast, generics), "T, U");
+    let ItemKind::Enum { generics, .. } = items[2].kind else {
+        panic!()
+    };
+    assert_eq!(generics_text(ast, generics), "T");
+    let ItemKind::Trait {
+        generics, types, ..
+    } = items[3].kind
+    else {
+        panic!()
+    };
+    assert_eq!(generics_text(ast, generics), "const N");
+    assert_eq!(ast.name(ast.list(types)[0].name), "Result");
+    let ItemKind::Impl {
+        generics,
+        bound,
+        ty,
+        ..
+    } = items[4].kind
+    else {
+        panic!()
+    };
+    assert_eq!(generics_text(ast, generics), "T: Measure, where T: Copy");
+    assert_eq!(ast.list(bound.args).len(), 1);
+    assert!(matches!(ast.ty(ty).kind, TypeKind::Generic { .. }));
+}
+
+#[test]
+fn sizes_and_type_arguments() {
+    let parsed = parse("fn f(r: [Qubit; N], g: Register<8>) { swap::<Int>((1, 2))\n qft::<8>(r) }");
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ast = &parsed.ast;
+    let lens: Vec<Len> = ast
+        .all_types()
+        .iter()
+        .filter_map(|t| match t.kind {
+            TypeKind::Array { len, .. } => Some(len),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(lens[..], [Len::Param(n)] if ast.name(n) == "N"));
+    assert!(ast.all_types().iter().any(|t| t.kind == TypeKind::Size(8)));
+    let mut given: Vec<(String, usize)> = ast
+        .all_path_args()
+        .map(|(e, args)| match ast.expr(e).kind {
+            ExprKind::Path(p) => (ast.name(ast.list(p)[0]).to_string(), args.len()),
+            _ => panic!("not a path"),
+        })
+        .collect();
+    given.sort();
+    assert_eq!(given, [("qft".to_string(), 1), ("swap".to_string(), 1)]);
+    // `const` and `where` are still names elsewhere.
+    assert!(
+        parse("fn f() { let const = 1\n let where = const }")
+            .diagnostics
+            .is_empty()
+    );
+}
+
+#[test]
+fn borrow_annotations() {
+    let src = "
+        fn pick(a: ref String, b: ref String) -> ref[a, b] String { a }
+        fn slice(a: ref [Qubit; 4]) -> ref[a] [Qubit; 4] { a }
+        fn plain(a: ref [Qubit; 4]) -> ref [Qubit; 4] { a }
+        fn win(q: ref Qubit) -> Window[q] { Window { q } }
+        fn pair<T>(a: ref T, b: ref T) -> PairRef<T>[a, b] { PairRef { a, b } }
+        struct S {
+            state: Qubit,
+            fn get(mut self) -> mut[self.state] Qubit { mut self.state }
+        }
+    ";
+    let parsed = parse(src);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ast = &parsed.ast;
+    let fns = ast.all_fns();
+    // pick: ref[a, b] String
+    let TypeKind::Ref {
+        mutable: false,
+        borrows,
+        ..
+    } = ast.ty(fns[0].ret.unwrap()).kind
+    else {
+        panic!("expected ref[a, b]");
+    };
+    let names: Vec<&str> = ast.list(borrows).iter().map(|p| ast.name(p.root)).collect();
+    assert_eq!(names, ["a", "b"]);
+    // slice: ref[a] [Qubit; 4]
+    let TypeKind::Ref { borrows, inner, .. } = ast.ty(fns[1].ret.unwrap()).kind else {
+        panic!("expected ref[a] [Qubit; 4]");
+    };
+    assert_eq!(ast.list(borrows).len(), 1);
+    assert!(matches!(ast.ty(inner).kind, TypeKind::Array { .. }));
+    // plain: ref [Qubit; 4] (array, not a borrow list)
+    let TypeKind::Ref { borrows, inner, .. } = ast.ty(fns[2].ret.unwrap()).kind else {
+        panic!("expected ref [Qubit; 4]");
+    };
+    assert!(borrows.is_empty());
+    assert!(matches!(ast.ty(inner).kind, TypeKind::Array { .. }));
+    // win: Window[q]
+    let TypeKind::Borrowed { inner, borrows } = ast.ty(fns[3].ret.unwrap()).kind else {
+        panic!("expected Window[q]");
+    };
+    assert!(matches!(ast.ty(inner).kind, TypeKind::Path(_)));
+    assert_eq!(ast.name(ast.list(borrows)[0].root), "q");
+    // pair: PairRef<T>[a, b]
+    let TypeKind::Borrowed { inner, borrows } = ast.ty(fns[4].ret.unwrap()).kind else {
+        panic!("expected PairRef<T>[a, b]");
+    };
+    assert!(matches!(ast.ty(inner).kind, TypeKind::Generic { .. }));
+    assert_eq!(ast.list(borrows).len(), 2);
+    // get: mut[self.state] Qubit
+    let TypeKind::Ref {
+        mutable: true,
+        borrows,
+        ..
+    } = ast.ty(fns[5].ret.unwrap()).kind
+    else {
+        panic!("expected mut[self.state]");
+    };
+    let place = ast.list(borrows)[0];
+    assert_eq!(ast.name(place.root), "self");
+    let fields: Vec<&str> = ast
+        .list(place.fields)
+        .iter()
+        .map(|&s| ast.name(s))
+        .collect();
+    assert_eq!(fields, ["state"]);
 }

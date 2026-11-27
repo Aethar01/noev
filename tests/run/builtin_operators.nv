@@ -1,0 +1,36 @@
+// Built-in types implement `std::ops` by their built-in operators (spec/types.md §6), so
+// generic code bound on an operator trait can be given numbers.
+
+use std::cmp::{Eq, Ord}
+use std::ops::{Add, AddAssign, BitAnd, BitNot, BitXor, Mul, Neg, Shl}
+
+fn sum3<T: Add<Output = T>>(a: T, b: T, c: T) -> T { mv a + mv b + mv c }
+fn scale<T: Mul<Float, Output = T>>(x: T, k: Float) -> T { mv x * k }
+fn negate<T: Neg<Output = T>>(x: T) -> T { -(mv x) }
+fn bump<T: AddAssign>(x: mut T, by: T) { x += mv by }
+fn mask<T: Copy + BitAnd<Output = T> + BitXor<Output = T> + BitNot<Output = T>>(a: T, b: T) -> T {
+    ~(a & b) ^ (a & b)
+}
+fn shift<T: Shl<Int, Output = T>>(a: T, n: Int) -> T { mv a << n }
+fn same<T: Eq>(a: ref T, b: ref T) -> Bool { a == b and not (a != b) }
+fn ordered<T: Ord>(a: ref T, b: ref T) -> (Bool, Bool, Bool, Bool) {
+    (a < b, a <= b, a > b, a >= b)
+}
+
+test fn builtin_operator_traits() {
+    assert sum3(1, 2, 3) == 6
+    assert sum3(1.5, 2.0, 0.25) == 3.75
+    assert scale(2.0, 1.5) == 3.0
+    assert negate(5) == -5
+    let mut n = 40
+    bump(mut n, 2)
+    assert n == 42
+    assert Add::add(1, 2) * Mul::mul(2, 3) == 18
+    assert mask(5, 3) == -1
+    assert shift(3, 4) == 48
+    assert same(7, 7)
+    assert same("ok", "ok")
+    assert same([0, 1], [0, 1])
+    assert ordered(2, 5) == (true, true, false, false)
+    assert ordered(3.0, 3.0) == (false, true, false, true)
+}

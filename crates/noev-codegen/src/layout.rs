@@ -1,0 +1,365 @@
+//! Target-independent memory layout for concrete Noev types in native compiled code,
+//! shared by both Cranelift and LLVM code generators.
+
+use std::collections::HashMap;
+
+use noev_ir::Program;
+use noev_sema::{Ty, TyKind};
+
+/// Register-sized scalar representation of a concrete Noev type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarKind {
+    /// 8-bit integer (`Bool`, `Bit`, `i8`, `u8`).
+    I8,
+    /// 16-bit integer (`i16`, `u16`).
+    I16,
+    /// 32-bit integer (`i32`, `u32`).
+    I32,
+    /// 64-bit integer (`i64`, `u64`, tagged `Int`, `String`, `Observable`, `Distribution`).
+    I64,
+    /// Native pointer (`Qubit` handle, `ref T`, `mut T`).
+    Ptr,
+    /// 32-bit IEEE 754 float (`f32`).
+    F32,
+    /// 64-bit IEEE 754 float (`Float` / `f64`).
+    F64,
+}
+
+/// Computed memory layout for one concrete [`Ty`].
+#[derive(Clone, Debug)]
+pub struct TypeLayout {
+    /// Total byte size (rounded up to `align`; `0` for ZSTs like `()`).
+    pub size: u32,
+    /// Byte alignment (power of two, >= 1).
+    pub align: u32,
+    /// Scalar register kind when this value fits in a single register (`None` for
+    /// aggregates like `Complex`, `c32`, tuples, arrays, structs, enums, and ZSTs).
+    pub scalar: Option<ScalarKind>,
+    /// For `Tuple`, `Complex`, `c32`, and `Struct` (non-enum): byte offset of each field.
+    pub fields: Vec<u32>,
+    /// For `Enum`: for each variant, byte offsets of its payload fields (from enum base).
+    pub enum_variants: Vec<Vec<u32>>,
+}
+
+/// Cache of [`TypeLayout`]s for a [`Program`].
+pub struct LayoutCache<'p> {
+    program: &'p Program,
+    ptr_bytes: u32,
+    cache: HashMap<Ty, TypeLayout>,
+}
+
+impl<'p> LayoutCache<'p> {
+    /// Creates a new layout cache for `program` targeting pointers of `ptr_bytes` width.
+    pub fn new(program: &'p Program, ptr_bytes: u32) -> Self {
+        Self {
+            program,
+            ptr_bytes,
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Returns the layout of `ty`, computing and caching it if needed.
+    pub fn layout(&mut self, ty: Ty) -> TypeLayout {
+        if let Some(l) = self.cache.get(&ty) {
+            return l.clone();
+        }
+        let computed = self.compute(ty);
+        self.cache.insert(ty, computed.clone());
+        computed
+    }
+
+    /// Returns the alignment shift (`log2(align)`) for stack-slot alignment.
+    #[cfg(feature = "cranelift")]
+    pub fn align_shift(align: u32) -> u8 {
+        align.max(1).trailing_zeros() as u8
+    }
+
+    /// Packs a list of argument types into a contiguous struct-like buffer (for thunks),
+    /// returning `(total_size, max_align, field_offsets)`.
+    pub fn pack_types(&mut self, tys: &[Ty]) -> (u32, u32, Vec<u32>) {
+        let mut offset = 0u32;
+        let mut max_align = 1u32;
+        let mut offsets = Vec::with_capacity(tys.len());
+        for &ty in tys {
+            let l = self.layout(ty);
+            offset = align_to(offset, l.align);
+            offsets.push(offset);
+            offset = offset.checked_add(l.size).expect("layout size overflow");
+            max_align = max_align.max(l.align);
+        }
+        (align_to(offset, max_align), max_align, offsets)
+    }
+
+    /// Collects the byte offset of every `Qubit` leaf inside `ty`, in declaration/element order.
+    pub fn qubit_offsets(&mut self, ty: Ty) -> Vec<u32> {
+        let mut out = Vec::new();
+        self.collect_qubits(ty, 0, &mut out);
+        out
+    }
+
+    fn collect_qubits(&mut self, ty: Ty, base: u32, out: &mut Vec<u32>) {
+        match self.program.types.kind(ty).clone() {
+            TyKind::Qubit => out.push(base),
+            TyKind::Tuple(elems) => {
+                let l = self.layout(ty);
+                for (i, &elem) in elems.iter().enumerate() {
+                    self.collect_qubits(elem, base + l.fields[i], out);
+                }
+            }
+            TyKind::Array(elem, len) => {
+                let elem_size = self.layout(elem).size;
+                for i in 0..len {
+                    self.collect_qubits(elem, base + (i as u32) * elem_size, out);
+                }
+            }
+            TyKind::Struct(id) if self.program.types.structs[id.index()].variants.is_none() => {
+                let l = self.layout(ty);
+                let fields: Vec<Ty> = self.program.types.structs[id.index()]
+                    .fields
+                    .iter()
+                    .map(|&(_, t)| t)
+                    .collect();
+                for (i, fty) in fields.into_iter().enumerate() {
+                    self.collect_qubits(fty, base + l.fields[i], out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn compute(&mut self, ty: Ty) -> TypeLayout {
+        let ptr_b = self.ptr_bytes;
+        let scalar = |size: u32, align: u32, kind: ScalarKind| TypeLayout {
+            size,
+            align,
+            scalar: Some(kind),
+            fields: Vec::new(),
+            enum_variants: Vec::new(),
+        };
+        match self.program.types.kind(ty).clone() {
+            TyKind::Unit | TyKind::Never | TyKind::Error => TypeLayout {
+                size: 0,
+                align: 1,
+                scalar: None,
+                fields: Vec::new(),
+                enum_variants: Vec::new(),
+            },
+            TyKind::Bool | TyKind::Bit | TyKind::I8 | TyKind::U8 => scalar(1, 1, ScalarKind::I8),
+            TyKind::I16 | TyKind::U16 => scalar(2, 2, ScalarKind::I16),
+            TyKind::I32 | TyKind::U32 => scalar(4, 4, ScalarKind::I32),
+            TyKind::I64
+            | TyKind::U64
+            | TyKind::Int
+            | TyKind::String
+            | TyKind::Observable
+            | TyKind::Distribution(_)
+            | TyKind::Vec(_)
+            | TyKind::IoStream
+            | TyKind::Stdin
+            | TyKind::TcpStream
+            | TyKind::TcpListener => scalar(8, 8, ScalarKind::I64),
+            TyKind::Qubit | TyKind::Ref { .. } | TyKind::ExternCFn { .. } => {
+                scalar(ptr_b, ptr_b, ScalarKind::Ptr)
+            }
+            TyKind::F32 => scalar(4, 4, ScalarKind::F32),
+            TyKind::Float => scalar(8, 8, ScalarKind::F64),
+            TyKind::Complex => TypeLayout {
+                size: 16,
+                align: 8,
+                scalar: None,
+                fields: vec![0, 8],
+                enum_variants: Vec::new(),
+            },
+            TyKind::C32 => TypeLayout {
+                size: 8,
+                align: 4,
+                scalar: None,
+                fields: vec![0, 4],
+                enum_variants: Vec::new(),
+            },
+            TyKind::Tuple(elems) => {
+                let (size, align, fields) = self.pack_types(&elems);
+                TypeLayout {
+                    size,
+                    align,
+                    scalar: None,
+                    fields,
+                    enum_variants: Vec::new(),
+                }
+            }
+            TyKind::Array(elem, len) => {
+                let el = self.layout(elem);
+                let size = el
+                    .size
+                    .checked_mul(u32::try_from(len).expect("array fits in u32"))
+                    .expect("array byte size overflow");
+                TypeLayout {
+                    size,
+                    align: el.align,
+                    scalar: None,
+                    fields: Vec::new(),
+                    enum_variants: Vec::new(),
+                }
+            }
+            TyKind::Struct(id) => {
+                let def = self.program.types.structs[id.index()].clone();
+                if let Some(variants) = def.variants {
+                    let mut max_align = 4u32;
+                    let mut max_size = 4u32;
+                    let mut enum_variants = Vec::with_capacity(variants.len());
+                    for v in &variants {
+                        let mut off = 4u32;
+                        let mut v_offsets = Vec::with_capacity(v.data.len());
+                        for &fty in &v.data {
+                            let fl = self.layout(fty);
+                            off = align_to(off, fl.align);
+                            v_offsets.push(off);
+                            off = off.checked_add(fl.size).expect("enum variant overflow");
+                            max_align = max_align.max(fl.align);
+                        }
+                        max_size = max_size.max(off);
+                        enum_variants.push(v_offsets);
+                    }
+                    TypeLayout {
+                        size: align_to(max_size, max_align),
+                        align: max_align,
+                        scalar: None,
+                        fields: Vec::new(),
+                        enum_variants,
+                    }
+                } else {
+                    let field_tys: Vec<Ty> = def.fields.iter().map(|&(_, t)| t).collect();
+                    let (size, align, fields) = self.pack_types(&field_tys);
+                    TypeLayout {
+                        size,
+                        align,
+                        scalar: None,
+                        fields,
+                        enum_variants: Vec::new(),
+                    }
+                }
+            }
+            TyKind::Param(_)
+            | TyKind::Assoc { .. }
+            | TyKind::SizedArray(..)
+            | TyKind::Size(_)
+            | TyKind::SizeSum { .. } => {
+                panic!("unmonomorphised type reached codegen: {:?}", ty)
+            }
+        }
+    }
+}
+
+/// How a C ABI parameter or return value is passed on x86_64 System V (`spec/interop.md` §3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CAbiArg {
+    /// Void (`()`).
+    Void,
+    /// Passed in a single register (`Int` is converted to/from `I64`).
+    Scalar(ScalarKind),
+    /// Small `extern "C" struct` (<= 16 bytes) split into 1 or 2 register chunks
+    /// (`I8`/`I16`/`I32`/`I64`/`F32`/`F64`).
+    DirectChunks(Vec<ScalarKind>),
+    /// Large `extern "C" struct` (> 16 bytes): passed via stack `byval` / `StructArgument`,
+    /// returned via hidden `sret` / `StructReturn` pointer.
+    Indirect {
+        /// Byte size.
+        size: u32,
+        /// Byte alignment.
+        align: u32,
+    },
+}
+
+impl LayoutCache<'_> {
+    /// Classifies `ty` for the platform C ABI (x86_64 System V).
+    pub fn c_abi_arg(&mut self, ty: Ty) -> CAbiArg {
+        let l = self.layout(ty);
+        if l.size == 0 {
+            return CAbiArg::Void;
+        }
+        if let Some(sk) = l.scalar {
+            return CAbiArg::Scalar(sk);
+        }
+        if l.size > 16 {
+            return CAbiArg::Indirect {
+                size: l.size,
+                align: l.align,
+            };
+        }
+        // Classify each 8-byte eightbyte (0..8, 8..16): if every leaf in an eightbyte is
+        // float (`F32`/`F64`), it is SSE; if any leaf is integer/ptr, it is INTEGER.
+        let mut leaves: Vec<(u32, u32, bool)> = Vec::new(); // (offset, size, is_float)
+        self.collect_c_leaves(ty, 0, &mut leaves);
+        let num_chunks = if l.size <= 8 { 1 } else { 2 };
+        let mut chunks = Vec::with_capacity(num_chunks);
+        for chunk_idx in 0..num_chunks {
+            let start = (chunk_idx as u32) * 8;
+            let end = (start + 8).min(l.size);
+            let chunk_bytes = end - start;
+            let mut has_int = false;
+            let mut has_float = false;
+            for &(off, sz, is_f) in &leaves {
+                if off < end && off + sz > start {
+                    if is_f {
+                        has_float = true;
+                    } else {
+                        has_int = true;
+                    }
+                }
+            }
+            let kind = if has_float && !has_int {
+                if chunk_bytes <= 4 {
+                    ScalarKind::F32
+                } else {
+                    ScalarKind::F64
+                }
+            } else if chunk_bytes <= 1 {
+                ScalarKind::I8
+            } else if chunk_bytes <= 2 {
+                ScalarKind::I16
+            } else if chunk_bytes <= 4 {
+                ScalarKind::I32
+            } else {
+                ScalarKind::I64
+            };
+            chunks.push(kind);
+        }
+        CAbiArg::DirectChunks(chunks)
+    }
+
+    fn collect_c_leaves(&mut self, ty: Ty, base: u32, out: &mut Vec<(u32, u32, bool)>) {
+        match self.program.types.kind(ty).clone() {
+            TyKind::F32 => out.push((base, 4, true)),
+            TyKind::Float => out.push((base, 8, true)),
+            TyKind::Array(elem, len) => {
+                let el = self.layout(elem);
+                for i in 0..len {
+                    self.collect_c_leaves(elem, base + (i as u32) * el.size, out);
+                }
+            }
+            TyKind::Struct(id) if self.program.types.structs[id.index()].variants.is_none() => {
+                let l = self.layout(ty);
+                let fields: Vec<Ty> = self.program.types.structs[id.index()]
+                    .fields
+                    .iter()
+                    .map(|&(_, t)| t)
+                    .collect();
+                for (i, fty) in fields.into_iter().enumerate() {
+                    self.collect_c_leaves(fty, base + l.fields[i], out);
+                }
+            }
+            _ => {
+                let l = self.layout(ty);
+                if l.size > 0 {
+                    out.push((base, l.size, false));
+                }
+            }
+        }
+    }
+}
+
+/// Rounds `offset` up to the next multiple of `align` (a power of two).
+pub fn align_to(offset: u32, align: u32) -> u32 {
+    let a = align.max(1);
+    (offset + a - 1) & !(a - 1)
+}

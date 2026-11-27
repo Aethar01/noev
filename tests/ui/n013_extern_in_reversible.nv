@@ -1,0 +1,20 @@
+// N013: foreign host calls are not reversible, so they are rejected in reversible contexts
+// (`spec/interop.md` §4).
+
+extern fn host_step(x: Float) -> Float
+
+rev fn in_rev_fn(q: mut Qubit, x: Float) {
+    let y = host_step(x)            //~ N013
+    q.ry(y)
+}
+
+fn in_ctrl_block(x: Float) {
+    let a = |+>
+    let b = |0>
+    ctrl a {
+        let y = host_step(x)        //~ N013
+        b.ry(y)
+    }
+    mv a.discard()
+    mv b.discard()
+}

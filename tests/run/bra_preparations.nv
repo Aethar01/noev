@@ -19,9 +19,13 @@ fn tilted(theta: Float) -> Qubit {
     mv q
 }
 
-fn main() {
-    print(sample 100 { <bell()| bell() }, sample 100 { <bell()| other_bell() })
-    print(sample 100 { <tilted(1.2)| tilted(1.2) })
+test fn bra_preparations() {
+    let same = sample 100 { <bell()| bell() }
+    let orth = sample 100 { <bell()| other_bell() }
+    assert same.count(true) == 100
+    assert orth.count(false) == 100
+    let tilt = sample 100 { <tilted(1.2)| tilted(1.2) }
+    assert tilt.count(true) == 100
     let q = tilted(Float::PI)
-    print(<1| mv q)
+    assert <1| mv q
 }

@@ -1,0 +1,85 @@
+// `with`/`do` compute-use-uncompute and automatic release of |0⟩ qubits (spec/ownership.md §8–9).
+
+use std::debug::amplitudes
+
+fn majority(a: mut Qubit, b: mut Qubit, c: mut Qubit) {
+    ctrl c { b.x(); a.x() }
+    ctrl a, b { c.x() }
+}
+
+// 3-controlled X using an ancilla allocated in `with`, uncomputed and released automatically.
+rev fn cccx(a: ref Qubit, b: ref Qubit, c: ref Qubit, target: mut Qubit) {
+    with {
+        let anc = |0>
+        ctrl a, b { anc.x() }
+    } do {
+        ctrl anc, c { target.x() }
+    }
+}
+
+fn auto_release_check() -> Bit {
+    let _unused = |0>
+    let _reg = [|0>; 3]
+    let _opt = Some(|0>)
+    let [kept, _] = |00>
+    kept.x()
+    let flipped = |+>
+    flipped.reset()
+    mv kept.measure()
+}
+
+test fn with_do_and_auto_release() {
+    // 1. Conjugation with `majority`: out flips iff majority(a, b, c) == 1, inputs restored.
+    let a = |1>
+    let b = |0>
+    let c = |1>
+    let out = |0>
+    with { majority(a, b, c) } do { ctrl c { out.x() } }
+    assert (mv a.measure(), mv b.measure(), mv c.measure()) == (1, 0, 1)
+    assert mv out.measure() == 1
+
+    // 2. Ancilla uncomputation on a superposition: |11+0> -> (|1100> + |1111>) / sqrt(2).
+    let r = |11+0>
+    cccx(r[0], r[1], r[2], r[3])
+    let amps = amplitudes(ref r)
+    assert amps[12].abs() > 0.7 and amps[15].abs() > 0.7
+    adj cccx(r[0], r[1], r[2], r[3])
+    assert <11+0| mv r
+
+    // 3. `with`/`do` under `ctrl`: only fires when control is |1>.
+    let ctrl_off = |0>
+    let ctrl_on = |1>
+    let xs = |111>
+    let t1 = |0>
+    let t2 = |0>
+    ctrl ctrl_off { cccx(xs[0], xs[1], xs[2], t1) }
+    ctrl ctrl_on { cccx(xs[0], xs[1], xs[2], t2) }
+    assert mv t1.measure() == 0
+    assert mv t2.measure() == 1
+    mv xs.measure()
+    mv ctrl_on.discard()
+
+    // 4. `with`/`do` returning a value from `do` (measuring a separate qubit).
+    let src = |1>
+    let got = with {
+        let anc = |0>
+        ctrl src { anc.x() }
+    } do {
+        let dst = |0>
+        ctrl anc { dst.x() }
+        mv dst.measure()
+    }
+    assert got == 1
+    assert mv src.measure() == 1
+
+    // 5. `with`/`do` inside a `sample` circuit.
+    let dist = sample 20 {
+        let q = |1110>
+        cccx(q[0], q[1], q[2], q[3])
+        mv q.measure()
+    }
+    assert dist.most_likely() == [1, 1, 1, 1]
+
+    // 6. Automatic release of untouched |0⟩ and `reset` qubits.
+    assert auto_release_check() == 1
+}

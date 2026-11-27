@@ -1,0 +1,98 @@
+// Pure-Noev `std::backend::Backend` implementation and generic dispatch (`spec/runtime.md` §3).
+use std::backend::{
+    Backend, BackendError, Capabilities, Circuit, GateKind, Instruction, Level, Op, ShotCount,
+    Shots, Target,
+}
+
+struct MockQpu {
+    name: String
+    max_qubits: Int
+}
+
+impl Backend for MockQpu {
+    fn target(ref self) -> Target {
+        let mut gates = Vec::<String>::new()
+        gates.push("h")
+        gates.push("x")
+        Target {
+            name: self.name,
+            level: Level::Circuit,
+            qubits: self.max_qubits,
+            gates: mv gates,
+            coupling: Vec::<(Int, Int)>::new(),
+            capabilities: Capabilities {
+                read_state: false,
+                check_release: false,
+                exact_expectations: false,
+                sample_state: false,
+                foreign_while_live: true,
+            },
+        }
+    }
+
+    fn run(mut self, circuit: ref Circuit, shots: Int) -> Result<Shots, BackendError> {
+        if circuit.qubits > self.max_qubits {
+            return Err(BackendError {
+                message: "circuit exceeds target qubits",
+            })
+        }
+        let half = shots / 2
+        let mut counts = Vec::<ShotCount>::new()
+        counts.push(ShotCount { bits: 0, count: half })
+        counts.push(ShotCount { bits: 3, count: shots - half })
+        Ok(Shots { counts: mv counts })
+    }
+}
+
+fn make_bell_circuit() -> Circuit {
+    let mut insts = Vec::<Instruction>::new()
+    let mut t0 = Vec::<Int>::new()
+    t0.push(0)
+    insts.push(Instruction::Gate(Op {
+        gate: GateKind::H,
+        adjoint: false,
+        params: Vec::<Float>::new(),
+        controls: Vec::<Int>::new(),
+        targets: mv t0,
+    }))
+    let mut ctrls = Vec::<Int>::new()
+    ctrls.push(0)
+    let mut t1 = Vec::<Int>::new()
+    t1.push(1)
+    insts.push(Instruction::Gate(Op {
+        gate: GateKind::X,
+        adjoint: false,
+        params: Vec::<Float>::new(),
+        controls: mv ctrls,
+        targets: mv t1,
+    }))
+    insts.push(Instruction::Measure { qubit: 0, clbit: 0 })
+    insts.push(Instruction::Measure { qubit: 1, clbit: 1 })
+    Circuit {
+        qubits: 2,
+        clbits: 2,
+        instructions: mv insts,
+    }
+}
+
+fn dispatch<B: Backend>(backend: mut B, circuit: ref Circuit, shots: Int) -> String {
+    let t = backend.target()
+    let head = "target={t.name} qubits={t.qubits} gates={t.gates.len()}"
+    match backend.run(circuit, shots) {
+        Ok(res) => {
+            let c0 = res.counts[0]
+            let c1 = res.counts[1]
+            "{head} entries={res.counts.len()} ops={circuit.instructions.len()} [{c0.bits}:{c0.count},{c1.bits}:{c1.count}]"
+        }
+        Err(e) => "{head} err={e.message}",
+    }
+}
+
+test fn std_backend_trait_dispatch() {
+    let circuit = make_bell_circuit()
+    let mut ok_qpu = MockQpu { name: "mock_qpu", max_qubits: 5 }
+    assert dispatch(mut ok_qpu, ref circuit, 100) == "target=mock_qpu qubits=5 gates=2 entries=2 ops=4 [0:50,3:50]"
+
+    let mut tiny_qpu = MockQpu { name: "tiny_qpu", max_qubits: 1 }
+    assert dispatch(mut tiny_qpu, ref circuit, 100) == "target=tiny_qpu qubits=1 gates=2 err=circuit exceeds target qubits"
+}

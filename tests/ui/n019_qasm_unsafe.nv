@@ -1,0 +1,7 @@
+// N019: inline OpenQASM (`qasm("…")`) requires `unsafe` (`spec/interop.md` §4).
+
+fn main() {
+    let q = |0>
+    qasm("sx {q};")                 //~ N019
+    mv q.discard()
+}

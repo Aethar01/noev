@@ -1,21 +1,31 @@
 //! Linear integer facts, and proofs that array indices differ or are in range
 //! (`spec/ownership.md` §10).
 //!
-//! Indices are linear forms: integer variables times constants, plus a constant. Facts come
-//! from loop bounds, `if` conditions and `assert`. Proofs use difference constraints
+//! Indices are linear forms: integer variables times constants, plus a constant. A variable
+//! is a local or a size parameter, whose value is fixed in each copy of a generic function.
+//! Facts come from loop bounds, `if` conditions and `assert`. Proofs use difference constraints
 //! (`v - w ≤ c`) and shortest paths between them, the standard technique for removing bounds
 //! checks.
 
 use noev_syntax::ast::{Ast, BinaryOp, ExprId, ExprKind, UnaryOp};
 
 use crate::check::{LocalId, Res, Typed};
-use crate::ty::Ty;
+use crate::ty::{Ty, Types};
+
+/// A variable of a linear form. Sizes sort first, so forms read `N - 1 - i`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Var {
+    /// A size parameter, `N` of `const N: Int`.
+    Size(Ty),
+    /// An `Int` local.
+    Local(LocalId),
+}
 
 /// `Σ coefficient × variable + constant`, with terms sorted by variable and no zero
 /// coefficients, so equal forms compare equal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Linear {
-    terms: Vec<(LocalId, i64)>,
+    terms: Vec<(Var, i64)>,
     constant: i64,
 }
 
@@ -27,9 +37,9 @@ impl Linear {
         }
     }
 
-    fn var(local: LocalId) -> Self {
+    fn var(var: Var) -> Self {
         Linear {
-            terms: vec![(local, 1)],
+            terms: vec![(var, 1)],
             constant: 0,
         }
     }
@@ -40,7 +50,7 @@ impl Linear {
     }
 
     /// The variables and their coefficients, sorted by variable.
-    pub fn terms(&self) -> &[(LocalId, i64)] {
+    pub fn terms(&self) -> &[(Var, i64)] {
         &self.terms
     }
 
@@ -51,7 +61,7 @@ impl Linear {
 
     /// Whether `local` appears in the form.
     pub fn mentions(&self, local: LocalId) -> bool {
-        self.terms.iter().any(|&(l, _)| l == local)
+        self.terms.iter().any(|&(v, _)| v == Var::Local(local))
     }
 
     fn scale(&self, k: i64) -> Option<Self> {
@@ -102,12 +112,54 @@ pub fn constant_form(value: i64) -> Linear {
     Linear::constant(value)
 }
 
+/// The form of a size: a size parameter, or a sum of them (`N + 1`). `None` if it does not
+/// fit.
+pub fn size_form(types: &Types, size: Ty) -> Option<Linear> {
+    let (constant, terms) = types.size_parts(size)?;
+    let mut form = Linear::constant(constant);
+    for (p, k) in terms {
+        form = form.add(&Linear::var(Var::Size(p)).scale(i64::try_from(k).ok()?)?)?;
+    }
+    Some(form)
+}
+
+/// The form of `size` with the size parameters `from` replaced by the sizes `to`: what a
+/// callee's `N - 1` is at a call. `None` if it does not fit.
+pub fn size_form_in(types: &Types, size: Ty, from: &[Ty], to: &[Ty]) -> Option<Linear> {
+    let (constant, terms) = types.size_parts(size)?;
+    let mut form = Linear::constant(constant);
+    for (p, k) in terms {
+        let part = match from.iter().position(|&q| q == p) {
+            Some(i) => size_form(types, *to.get(i)?)?,
+            None => Linear::var(Var::Size(p)),
+        };
+        form = form.add(&part.scale(i64::try_from(k).ok()?)?)?;
+    }
+    Some(form)
+}
+
+/// Whether the facts prove `form ≥ 0`.
+pub fn at_least_zero(facts: &[Fact], form: &Linear) -> bool {
+    match form.as_constant() {
+        Some(c) => c >= 0,
+        None => below(facts, &Linear::constant(-1), form),
+    }
+}
+
+/// The fact `form ≥ 0`, as a function knows of the sizes its signature subtracts in.
+pub fn assume_at_least_zero(form: &Linear) -> Option<Fact> {
+    Some(Fact::NonPositive(Linear::constant(0).sub(form)?))
+}
+
 /// The linear form of an integer expression, if it has one.
 pub fn linear(ast: &Ast, typed: &Typed, id: ExprId) -> Option<Linear> {
     match ast.expr(id).kind {
         ExprKind::Int(value) => Some(Linear::constant(i64::try_from(value).ok()?)),
         ExprKind::Name(_) => match typed.res[id.index()] {
-            Res::Local(local) if typed.local(local).ty == Ty::INT => Some(Linear::var(local)),
+            Res::Local(local) if typed.local(local).ty == Ty::INT => {
+                Some(Linear::var(Var::Local(local)))
+            }
+            Res::Size(size) => Some(Linear::var(Var::Size(size))),
             _ => None,
         },
         ExprKind::Unary {
@@ -210,7 +262,7 @@ pub fn facts_from(ast: &Ast, typed: &Typed, cond: ExprId, positive: bool, out: &
 
 /// The facts a `for v in start..end` loop establishes inside its body.
 pub fn loop_facts(var: LocalId, start: Option<Linear>, end: Option<Linear>, out: &mut Vec<Fact>) {
-    let v = Linear::var(var);
+    let v = Linear::var(Var::Local(var));
     if let Some(f) = start.and_then(|s| s.sub(&v)) {
         out.push(Fact::NonPositive(f));
     }
@@ -222,7 +274,7 @@ pub fn loop_facts(var: LocalId, start: Option<Linear>, end: Option<Linear>, out:
 /// Shortest paths over the difference constraints of a set of facts: `bound(u, v)` is the
 /// tightest known upper bound on `v - u`. Node 0 stands for the constant zero.
 struct Bounds {
-    nodes: Vec<LocalId>,
+    nodes: Vec<Var>,
     dist: Vec<Option<i64>>,
     /// The facts contradict each other, so the code is unreachable and anything holds.
     contradictory: bool,
@@ -230,8 +282,8 @@ struct Bounds {
 
 impl Bounds {
     fn new(facts: &[Fact], extra: &[&Linear]) -> Self {
-        let mut nodes: Vec<LocalId> = Vec::new();
-        let add_node = |l: LocalId, nodes: &mut Vec<LocalId>| {
+        let mut nodes: Vec<Var> = Vec::new();
+        let add_node = |l: Var, nodes: &mut Vec<Var>| {
             if !nodes.contains(&l) {
                 nodes.push(l);
             }
@@ -256,6 +308,12 @@ impl Bounds {
         };
         for i in 0..n {
             bounds.dist[i * n + i] = Some(0);
+        }
+        // A size is never negative: `0 - N ≤ 0`.
+        for (i, &v) in bounds.nodes.iter().enumerate() {
+            if matches!(v, Var::Size(_)) {
+                bounds.dist[(i + 1) * n] = Some(0);
+            }
         }
         for fact in facts {
             let Fact::NonPositive(f) = fact else { continue };
@@ -295,7 +353,7 @@ impl Bounds {
         bounds
     }
 
-    fn node(&self, local: LocalId) -> usize {
+    fn node(&self, local: Var) -> usize {
         self.nodes
             .iter()
             .position(|&l| l == local)
@@ -303,9 +361,9 @@ impl Bounds {
     }
 
     /// The tightest known upper bound on `to - from` (`None` for zero).
-    fn bound(&self, from: Option<LocalId>, to: Option<LocalId>) -> Option<i64> {
+    fn bound(&self, from: Option<Var>, to: Option<Var>) -> Option<i64> {
         let n = self.nodes.len() + 1;
-        let index = |l: Option<LocalId>| l.map_or(0, |l| self.node(l));
+        let index = |l: Option<Var>| l.map_or(0, |l| self.node(l));
         self.dist[index(from) * n + index(to)]
     }
 
@@ -362,6 +420,31 @@ pub fn differ(facts: &[Fact], x: &Linear, y: &Linear) -> bool {
     bounds.bound(v, w).is_some_and(|b| b < c) || bounds.bound(w, v).is_some_and(|b| b <= -1 - c)
 }
 
+/// Whether the facts prove `x < y`, for an index into an array whose length is a size
+/// parameter.
+pub fn below(facts: &[Fact], x: &Linear, y: &Linear) -> bool {
+    // x − y ≤ −1, where x − y = v − w + c and either variable may be absent.
+    let Some(d) = x.sub(y) else { return false };
+    if let Some(c) = d.as_constant() {
+        return c <= -1;
+    }
+    let bounds = Bounds::new(facts, &[&d]);
+    if bounds.contradictory {
+        return true;
+    }
+    let (v, w) = match d.terms.as_slice() {
+        [(v, 1)] => (Some(*v), None),
+        [(w, -1)] => (None, Some(*w)),
+        [(a, 1), (b, -1)] | [(b, -1), (a, 1)] => (Some(*a), Some(*b)),
+        _ => return bounds.interval(&d).1.is_some_and(|hi| hi <= -1),
+    };
+    // bound(w, v) is the tightest upper bound on v − w.
+    bounds
+        .bound(w, v)
+        .and_then(|b| b.checked_add(d.constant))
+        .is_some_and(|hi| hi <= -1)
+}
+
 /// Where `form` is known to lie, for bounds checks. `None` means unbounded on that side.
 pub fn interval(facts: &[Fact], form: &Linear) -> (Option<i64>, Option<i64>) {
     let bounds = Bounds::new(facts, &[form]);
@@ -376,7 +459,7 @@ mod tests {
     use super::*;
 
     fn var(i: u32) -> Linear {
-        Linear::var(LocalId::from_index(i as usize))
+        Linear::var(Var::Local(LocalId::from_index(i as usize)))
     }
 
     fn c(v: i64) -> Linear {
@@ -422,5 +505,20 @@ mod tests {
         let form = i.scale(2).unwrap().add(&c(1)).unwrap();
         assert_eq!(interval(&facts, &form), (Some(1), Some(5)));
         assert_eq!(interval(&[], &i), (None, None));
+    }
+
+    #[test]
+    fn symbolic_lengths() {
+        let (i, n) = (var(0), Linear::var(Var::Size(Ty::INT)));
+        let mut facts = Vec::new();
+        // for i in 0..n - 1: i + 1 < n, and i < n.
+        loop_facts(LocalId::from_index(0), Some(c(0)), n.sub(&c(1)), &mut facts);
+        assert!(below(&facts, &i.add(&c(1)).unwrap(), &n));
+        assert!(below(&facts, &i, &n));
+        assert!(!below(&facts, &i.add(&c(2)).unwrap(), &n));
+        assert!(!below(&[], &c(0), &n));
+        // n - 1 - i ≥ 0, that is -1 < n - 1 - i.
+        let mirror = n.sub(&c(1)).unwrap().sub(&i).unwrap();
+        assert!(below(&facts, &c(-1), &mirror));
     }
 }

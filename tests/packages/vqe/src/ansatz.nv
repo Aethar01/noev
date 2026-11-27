@@ -1,0 +1,11 @@
+pub struct Layer {
+    pub depth: Int
+}
+
+pub fn prepare(layer: Layer) -> Qubit {
+    let q = |0>
+    for i in 0..layer.depth {
+        q.x()
+    }
+    mv q
+}

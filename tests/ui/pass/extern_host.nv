@@ -1,0 +1,32 @@
+// Host `extern fn` declarations with classical copyable types (`spec/interop.md` §1, §2).
+
+struct Params {
+    theta: Float,
+    step: Int,
+}
+
+extern fn minimize_step(energy: Float, theta: Float) -> Float
+extern fn score(p: Params, weights: [Float; 2], pair: (Int, Bit), obs: Observable) -> (Float, Bool)
+extern fn log_msg(msg: String)
+
+fn ansatz(theta: Float) -> Qubit {
+    let q = |0>
+    q.ry(theta)
+    mv q
+}
+
+fn vqe() -> Float {
+    let mut theta = 0.1
+    for i in 0..10 {
+        let e = <ansatz(theta)| Z(0) |ansatz(theta)>
+        theta = minimize_step(e, theta)
+    }
+    log_msg("done")
+    <ansatz(theta)| Z(0) |ansatz(theta)>
+}
+
+fn use_other_types(p: Params) -> (Float, Bool) {
+    let q = |1>
+    let b = mv q.measure()
+    score(p, [1.0, 2.0], (42, b), Z(0))
+}

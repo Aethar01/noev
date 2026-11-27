@@ -1,0 +1,21 @@
+// N013: `extern "C"` calls and C function pointers are not reversible (`spec/interop.md` §4).
+
+extern "C" {
+    fn erf(x: Float) -> Float
+}
+
+rev fn in_rev(q: mut Qubit, x: Float) {
+    let y = unsafe { erf(x) }       //~ N013
+    q.ry(y)
+}
+
+fn in_ctrl(f: extern "C" fn(Float) -> Float, x: Float) {
+    let a = |+>
+    let b = |0>
+    ctrl a {
+        let y = unsafe { f(x) }     //~ N013
+        b.ry(y)
+    }
+    mv a.discard()
+    mv b.discard()
+}

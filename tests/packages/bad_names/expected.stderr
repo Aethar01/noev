@@ -1,0 +1,2 @@
+bad_names/noev.toml:1:1: error: bad_names/src/my-dir is not a valid module name: a module is named as Noev code writes it, such as `ladder.nv` or `circuits/`
+bad_names/noev.toml:2:8: error: `bad-names` is not a valid package name: it must be a name Noev code can write, such as `quantum_tools`

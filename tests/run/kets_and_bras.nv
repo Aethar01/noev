@@ -1,17 +1,18 @@
 // Kets read left to right; bras measure in their own basis.
 
-fn main() {
+test fn kets_and_bras() {
     let r = |101>
-    print(mv r.measure())
+    assert mv r.measure() == [1, 0, 1]
     let plus = |+>
     let minus = |->
-    print(<+| mv plus, <+| mv minus)
+    assert <+| mv plus
+    assert not (<+| mv minus)
     let pair = |1+>
-    print(<1+| mv pair)
+    assert <1+| mv pair
     // A label in parentheses is one qubit: the Y basis's |+i⟩ and |−i⟩.
     let y = |(+i)(-i)>
-    print(<(+i)(-i)| mv y)
+    assert <(+i)(-i)| mv y
     let turned = |(+i)>
     turned.s()
-    print(<-| mv turned)
+    assert <-| mv turned
 }

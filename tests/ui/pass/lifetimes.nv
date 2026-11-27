@@ -1,0 +1,204 @@
+// Step 6 lifetimes: Polonius-style NLL, two-phase receiver lends, field-level method
+// lends, references in structs and enums, and place-based borrow annotations.
+
+struct Pair {
+    a: Qubit
+    b: Qubit
+
+    fn flip_b(mut self) {
+        self.b.x()
+    }
+
+    fn flip_b_via_helper(mut self) {
+        self.flip_b()
+    }
+
+    fn a_mut(mut self) -> mut[self.a] Qubit {
+        mut self.a
+    }
+
+    fn b_mut(mut self) -> mut[self.b] Qubit {
+        mut self.b
+    }
+}
+
+struct Window {
+    q: ref Qubit
+}
+
+struct MutWindow {
+    q: mut Qubit
+}
+
+struct PairRef<T> {
+    a: ref T
+    b: ref T
+}
+
+struct Counter {
+    n: Int
+
+    fn get(ref self) -> Int {
+        self.n
+    }
+
+    fn add(mut self, delta: Int) {
+        self.n += delta
+    }
+}
+
+struct Rotator {
+    q: Qubit
+    angle: Float
+
+    fn rotate_by(mut self, theta: Float) {
+        self.q.ry(theta)
+    }
+}
+
+// NLL: lend ends at its last use, not at the end of the block.
+fn nll_last_use() -> Bit {
+    let q = |0>
+    let r = ref q
+    ctrl r {}
+    q.x()
+    mv q.measure()
+}
+
+// NLL: unused reference dies immediately.
+fn nll_dead_ref() -> Bit {
+    let q = |0>
+    let _r = ref q
+    mv q.measure()
+}
+
+// NLL: loop-local reference does not carry across iterations.
+fn nll_loop_local() {
+    let q = |0>
+    for i in 0..3 {
+        let r = ref q
+        ctrl r {}
+        q.x()
+    }
+    mv q.discard()
+}
+
+// NLL: reassigning a reference variable releases the previous lend.
+fn nll_reassign() -> (Bit, Bit) {
+    let a = |0>
+    let b = |1>
+    let mut r = ref a
+    ctrl r {}
+    r = ref b
+    let ba = mv a.measure()
+    ctrl r {}
+    let bb = mv b.measure()
+    (ba, bb)
+}
+
+// Polonius-style path sensitivity: conditional early return of a borrow leaves the
+// fallthrough path free to use the referent again.
+fn polonius_conditional_return(a: mut Qubit, flag: Bool) -> mut Qubit {
+    let r = mut a
+    if flag {
+        return r
+    }
+    a.h()
+    a
+}
+
+// Two-phase receiver lends: call arguments are evaluated before a `mut` receiver's lend starts.
+fn two_phase() {
+    let mut c = Counter { n: 5 }
+    c.add(c.get())
+    let mut r = Rotator { q: |0>, angle: 1.5 }
+    r.rotate_by(r.angle)
+    mv r.q.discard()
+}
+
+// Field-level method lends: disjoint fields can be lent across method calls and `ctrl`.
+fn field_level_methods() {
+    let p = Pair { a: |+>, b: |0> }
+    ctrl p.a { p.flip_b() }
+    ctrl p.a { p.flip_b_via_helper() }
+    let a = p.a_mut()
+    let b = p.b_mut()
+    swap(a, b)
+    mv p.a.discard()
+    mv p.b.discard()
+}
+
+// Place-based borrow annotations and package-local inference.
+fn pick_str(a: ref String, b: ref String, first: Bool) -> ref[a, b] String {
+    if first { a } else { b }
+}
+
+// Inferred within a package: only `a` is borrowed, so `b` is released on return!
+fn first_of(a: ref Qubit, b: ref Qubit) -> ref Qubit {
+    a
+}
+
+fn inferred_releases_other() {
+    let a = |0>
+    let b = |0>
+    let r = first_of(a, b)
+    b.x()
+    ctrl r {}
+    mv a.discard()
+    mv b.discard()
+}
+
+// Structs and enums holding references, plus `Window[r]` and `PairRef<T>[a, b]`.
+fn make_window(q: ref Qubit) -> Window[q] {
+    Window { q }
+}
+
+fn unwrap_window(w: Window) -> ref[w] Qubit {
+    w.q
+}
+
+fn make_pair_ref<T>(a: ref T, b: ref T) -> PairRef<T>[a, b] {
+    PairRef { a, b }
+}
+
+fn structs_and_enums_with_refs() {
+    let a = |0>
+    let b = |1>
+    let w = make_window(a)
+    let r = unwrap_window(w)
+    ctrl r {}
+    a.x()
+
+    let mw = MutWindow { q: mut a }
+    let mw2 = mv mw
+    mw2.q.h()
+
+    let opt: Option<ref Qubit> = Some(ref a)
+    match opt {
+        Some(q) => ctrl q {},
+        None => {}
+    }
+    a.x()
+
+    let pr = make_pair_ref(ref a, ref b)
+    ctrl pr.a, pr.b {}
+    mv a.discard()
+    mv b.discard()
+}
+
+fn main() {
+    let _ = nll_last_use()
+    let _ = nll_dead_ref()
+    nll_loop_local()
+    let _ = nll_reassign()
+    let q = |0>
+    let _ = polonius_conditional_return(q, false)
+    mv q.discard()
+    two_phase()
+    field_level_methods()
+    let s1 = "left"
+    let s2 = "right"
+    let _ = pick_str(ref s1, ref s2, true)
+    inferred_releases_other()
+    structs_and_enums_with_refs()
+}

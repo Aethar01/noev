@@ -1,0 +1,12 @@
+// Items from modules of this package, by import, glob and path, and from a dependency.
+use pkg::ansatz::{prepare, Layer}
+use hamiltonians::ising::*
+use qlib::gates::flip as invert
+
+fn main() {
+    let layer = Layer { depth: 2 }
+    let q = prepare(layer)
+    invert(q)
+    print("{mv q.measure()} {coupling()} {hamiltonians::ising::Bond::Strong.weight()}")
+    print(qlib::version())
+}

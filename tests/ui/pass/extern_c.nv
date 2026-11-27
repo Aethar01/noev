@@ -1,0 +1,36 @@
+// Valid `extern "C"` imports, structs, callbacks, and function pointers (`spec/interop.md` §3).
+
+extern "C" struct Point {
+    x: Float,
+    y: Float,
+}
+
+extern "C" {
+    fn erf(x: Float) -> Float
+    fn normalize3(v: mut [Float; 3])
+    fn point_scale(p: mut Point, s: Float)
+    fn minimize(cost: extern "C" fn(Float) -> Float, start: Float) -> Float
+}
+
+fn ansatz(theta: Float) -> Qubit {
+    let q = |0>
+    q.ry(theta)
+    mv q
+}
+
+extern "C" fn energy(theta: Float) -> Float {
+    <ansatz(theta)| Z(0) |ansatz(theta)>
+}
+
+fn use_all() -> Float {
+    let mut v = [3.0, 4.0, 0.0]
+    let mut p = Point { x: 1.0, y: 2.0 }
+    let fp: extern "C" fn(Float) -> Float = energy
+    unsafe {
+        normalize3(mut v)
+        point_scale(mut p, 2.0)
+        let e = minimize(energy, 0.2)
+        let e2 = fp(0.0)
+        erf(1.0) + e + e2 + p.x + v[0]
+    }
+}

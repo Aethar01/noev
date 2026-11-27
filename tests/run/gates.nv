@@ -11,8 +11,7 @@ fn rot(q: mut Qubit) {
     q.h()
 }
 
-fn main() {
-    // Toffoli truth table.
+test fn toffoli_and_fredkin() {
     for a in 0..2 {
         for b in 0..2 {
             let x = |0>
@@ -21,25 +20,28 @@ fn main() {
             if a == 1 { x.x() }
             if b == 1 { y.x() }
             ctrl x, y { t.x() }
-            print(mv x.measure(), mv y.measure(), mv t.measure())
+            assert Int(mv x.measure()) == a
+            assert Int(mv y.measure()) == b
+            assert Int(mv t.measure()) == (if a == 1 and b == 1 { 1 } else { 0 })
         }
     }
-    // Fredkin.
     let f = |110>
     ctrl f[0] { swap(f[1], f[2]) }
-    print(mv f.measure())
-    // adj undoes.
+    assert mv f.measure() == [1, 0, 1]
+}
+
+test fn adj_undoes() {
     let q = |+>
     q.t()
     adj q.t()
     q.h()
-    print(mv q.measure())
+    assert mv q.measure() == 0
     let p = |0>
     rot(p)
     adj rot(p)
-    print(mv p.measure())
+    assert mv p.measure() == 0
     let m = |110>
     majority(m[0], m[1], m[2])
     adj majority(m[0], m[1], m[2])
-    print(mv m.measure())
+    assert mv m.measure() == [1, 1, 0]
 }

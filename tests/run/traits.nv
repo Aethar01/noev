@@ -1,0 +1,44 @@
+// Traits and `impl`s (spec/types.md §6): defaults, generic `impl`s, calls through bounds,
+// and a `rev` trait function inverted with `adj` in generic code.
+
+trait Shape {
+    fn area(ref self) -> Float
+    fn describe(ref self) -> String { "a shape of area {self.area()}" }
+}
+
+struct Square { side: Float }
+struct Pair<T> { a: T, b: T }
+
+impl Shape for Square {
+    fn area(ref self) -> Float { self.side * self.side }
+}
+
+impl<T: Shape> Shape for Pair<T> {
+    fn area(ref self) -> Float { self.a.area() + self.b.area() }
+}
+
+fn total<T: Shape>(x: ref T, y: ref T) -> Float { x.area() + y.area() }
+
+trait Flip {
+    rev fn flip(mut self)
+}
+
+impl Flip for Qubit {
+    rev fn flip(mut self) { self.x() }
+}
+
+fn undo<T: Flip>(q: mut T) { adj q.flip() }
+
+test fn traits_and_defaults() {
+    let s = Square { side: 2.0 }
+    let p = Pair { a: Square { side: 1.0 }, b: Square { side: 3.0 } }
+    assert s.area() == 4.0
+    assert s.describe() == "a shape of area 4.0"
+    assert p.describe() == "a shape of area 10.0"
+    assert total(ref s, ref s) == 8.0
+    let q = |0>
+    q.flip()
+    undo(mut q)
+    q.flip()
+    assert mv q.measure() == 1
+}

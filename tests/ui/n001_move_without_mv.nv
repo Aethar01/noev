@@ -35,3 +35,10 @@ fn returned() -> Qubit {
     let q = |+>
     q                               //~ N001
 }
+
+// A generic `T` with bounds written may be a qubit unless they include `Copy`, so it is
+// moved, not copied. (Without bounds written, the copy would infer `T: Copy`.)
+fn generic<T: Measure>(x: T) -> T {
+    let y = x                       //~ N001
+    mv y
+}

@@ -48,26 +48,260 @@ pub enum Builtin {
         /// Whether it writes to standard error.
         stderr: bool,
     },
+    /// `qasm("…")`: inline OpenQASM (unsafe; `spec/interop.md` §4).
+    Qasm,
+    /// Standard-library classical/OS operation (`Vec<T>`, `String`, `std::{io, env, fs, net}`).
+    Std(StdOp),
+}
+
+/// Built-in standard-library operations (`spec/std.md` §5–§6).
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[allow(missing_docs)]
+pub enum StdOp {
+    // Vec<T>
+    VecNew = 0,
+    VecWithCapacity = 1,
+    VecLen = 2,
+    VecIsEmpty = 3,
+    VecPush = 4,
+    VecPop = 5,
+    VecGet = 6,
+    VecIndex = 7,
+    VecSet = 8,
+    VecClear = 9,
+    VecExtend = 10,
+    VecClone = 11,
+    // String
+    StrLen = 20,
+    StrIsEmpty = 21,
+    StrContains = 22,
+    StrStartsWith = 23,
+    StrEndsWith = 24,
+    StrTrim = 25,
+    StrSplit = 26,
+    StrLines = 27,
+    StrReplace = 28,
+    StrSubstring = 29,
+    StrFind = 30,
+    StrToUpper = 31,
+    StrToLower = 32,
+    StrAsBytes = 33,
+    StrFromUtf8 = 34,
+    StrParseInt = 35,
+    StrParseFloat = 36,
+    StrRepeat = 37,
+    StrJoin = 38,
+    StrConcat = 39,
+    // std::io
+    IoStdout = 40,
+    IoStderr = 41,
+    IoStdin = 42,
+    IoLock = 43,
+    IoWrite = 44,
+    IoFlush = 45,
+    IoReadLine = 46,
+    IoReadToString = 47,
+    // std::env
+    EnvVar = 50,
+    EnvArgs = 51,
+    EnvCurrentDir = 52,
+    // std::fs
+    FsReadToString = 60,
+    FsRead = 61,
+    FsWrite = 62,
+    FsWriteBytes = 63,
+    FsExists = 64,
+    FsCreateDirAll = 65,
+    FsRemoveFile = 66,
+    // std::net
+    NetTcpConnect = 70,
+    NetTcpRead = 71,
+    NetTcpReadToString = 72,
+    NetTcpWrite = 73,
+    NetTcpWriteStr = 74,
+    NetTcpFlush = 75,
+    NetTcpShutdown = 76,
+    NetTcpClose = 77,
+    NetListenerBind = 78,
+    NetListenerLocalAddr = 79,
+    NetListenerAccept = 80,
+    NetListenerClose = 81,
+}
+
+impl StdOp {
+    /// Decodes a `u32` tag from compiled C ABI calls.
+    pub fn from_u32(v: u32) -> Option<Self> {
+        use StdOp::*;
+        Some(match v {
+            0 => VecNew,
+            1 => VecWithCapacity,
+            2 => VecLen,
+            3 => VecIsEmpty,
+            4 => VecPush,
+            5 => VecPop,
+            6 => VecGet,
+            7 => VecIndex,
+            8 => VecSet,
+            9 => VecClear,
+            10 => VecExtend,
+            11 => VecClone,
+            20 => StrLen,
+            21 => StrIsEmpty,
+            22 => StrContains,
+            23 => StrStartsWith,
+            24 => StrEndsWith,
+            25 => StrTrim,
+            26 => StrSplit,
+            27 => StrLines,
+            28 => StrReplace,
+            29 => StrSubstring,
+            30 => StrFind,
+            31 => StrToUpper,
+            32 => StrToLower,
+            33 => StrAsBytes,
+            34 => StrFromUtf8,
+            35 => StrParseInt,
+            36 => StrParseFloat,
+            37 => StrRepeat,
+            38 => StrJoin,
+            39 => StrConcat,
+            40 => IoStdout,
+            41 => IoStderr,
+            42 => IoStdin,
+            43 => IoLock,
+            44 => IoWrite,
+            45 => IoFlush,
+            46 => IoReadLine,
+            47 => IoReadToString,
+            50 => EnvVar,
+            51 => EnvArgs,
+            52 => EnvCurrentDir,
+            60 => FsReadToString,
+            61 => FsRead,
+            62 => FsWrite,
+            63 => FsWriteBytes,
+            64 => FsExists,
+            65 => FsCreateDirAll,
+            66 => FsRemoveFile,
+            70 => NetTcpConnect,
+            71 => NetTcpRead,
+            72 => NetTcpReadToString,
+            73 => NetTcpWrite,
+            74 => NetTcpWriteStr,
+            75 => NetTcpFlush,
+            76 => NetTcpShutdown,
+            77 => NetTcpClose,
+            78 => NetListenerBind,
+            79 => NetListenerLocalAddr,
+            80 => NetListenerAccept,
+            81 => NetListenerClose,
+            _ => return None,
+        })
+    }
+
+    /// Whether the operation is pure classical (allowed in reversible contexts).
+    pub fn reversible(self) -> bool {
+        (self as u32) < 40
+    }
+
+    /// Whether this operation performs OS/IO side effects (disallowed in recorded circuits).
+    pub fn is_effectful(self) -> bool {
+        !self.reversible()
+    }
+
+    /// Short display name for IR and diagnostics.
+    pub fn name(self) -> &'static str {
+        use StdOp::*;
+        match self {
+            VecNew => "Vec::new",
+            VecWithCapacity => "Vec::with_capacity",
+            VecLen => "Vec::len",
+            VecIsEmpty => "Vec::is_empty",
+            VecPush => "Vec::push",
+            VecPop => "Vec::pop",
+            VecGet => "Vec::get",
+            VecIndex => "Vec::index",
+            VecSet => "Vec::set",
+            VecClear => "Vec::clear",
+            VecExtend => "Vec::extend",
+            VecClone => "Vec::clone",
+            StrLen => "String::len",
+            StrIsEmpty => "String::is_empty",
+            StrContains => "String::contains",
+            StrStartsWith => "String::starts_with",
+            StrEndsWith => "String::ends_with",
+            StrTrim => "String::trim",
+            StrSplit => "String::split",
+            StrLines => "String::lines",
+            StrReplace => "String::replace",
+            StrSubstring => "String::substring",
+            StrFind => "String::find",
+            StrToUpper => "String::to_uppercase",
+            StrToLower => "String::to_lowercase",
+            StrAsBytes => "String::as_bytes",
+            StrFromUtf8 => "String::from_utf8",
+            StrParseInt => "String::parse_int",
+            StrParseFloat => "String::parse_float",
+            StrRepeat => "String::repeat",
+            StrJoin => "String::join",
+            StrConcat => "String::concat",
+            IoStdout => "std::io::stdout",
+            IoStderr => "std::io::stderr",
+            IoStdin => "std::io::stdin",
+            IoLock => "IoStream::lock",
+            IoWrite => "IoStream::write",
+            IoFlush => "IoStream::flush",
+            IoReadLine => "Stdin::read_line",
+            IoReadToString => "Stdin::read_to_string",
+            EnvVar => "std::env::var",
+            EnvArgs => "std::env::args",
+            EnvCurrentDir => "std::env::current_dir",
+            FsReadToString => "std::fs::read_to_string",
+            FsRead => "std::fs::read",
+            FsWrite => "std::fs::write",
+            FsWriteBytes => "std::fs::write_bytes",
+            FsExists => "std::fs::exists",
+            FsCreateDirAll => "std::fs::create_dir_all",
+            FsRemoveFile => "std::fs::remove_file",
+            NetTcpConnect => "TcpStream::connect",
+            NetTcpRead => "TcpStream::read",
+            NetTcpReadToString => "TcpStream::read_to_string",
+            NetTcpWrite => "TcpStream::write",
+            NetTcpWriteStr => "TcpStream::write_str",
+            NetTcpFlush => "TcpStream::flush",
+            NetTcpShutdown => "TcpStream::shutdown",
+            NetTcpClose => "TcpStream::close",
+            NetListenerBind => "TcpListener::bind",
+            NetListenerLocalAddr => "TcpListener::local_addr",
+            NetListenerAccept => "TcpListener::accept",
+            NetListenerClose => "TcpListener::close",
+        }
+    }
 }
 
 impl Builtin {
     /// Whether it may be used in a reversible context.
     pub fn reversible(self) -> bool {
-        !matches!(
-            self,
-            Builtin::Measure
-                | Builtin::MeasureIn
-                | Builtin::Reset
-                | Builtin::Discard
-                | Builtin::Release
-                | Builtin::Amplitudes
-                | Builtin::Print { .. }
-        )
+        match self {
+            Builtin::Std(op) => op.reversible(),
+            _ => !matches!(
+                self,
+                Builtin::Measure
+                    | Builtin::MeasureIn
+                    | Builtin::Reset
+                    | Builtin::Discard
+                    | Builtin::Release
+                    | Builtin::Amplitudes
+                    | Builtin::Print { .. }
+                    | Builtin::Qasm
+            ),
+        }
     }
 
     /// Whether calling it needs `unsafe`.
     pub fn is_unsafe(self) -> bool {
-        self == Builtin::Release
+        matches!(self, Builtin::Release | Builtin::Qasm)
     }
 
     /// The name it is called by, for messages.
@@ -89,6 +323,8 @@ impl Builtin {
             Builtin::Amplitudes => "amplitudes",
             Builtin::Print { stderr: false } => "print",
             Builtin::Print { stderr: true } => "eprint",
+            Builtin::Qasm => "qasm",
+            Builtin::Std(op) => op.name(),
         }
     }
 }
@@ -122,8 +358,9 @@ pub enum Gate {
     P,
     U,
     Swap,
-    /// `unitary(m)`: a one- or two-qubit gate given as a matrix of `Complex` values. Its
-    /// entries travel as the gate's parameters: real and imaginary parts, rows first.
+    /// `unitary(m)`: a gate on a `Qubit` or `[Qubit; N]` given as a `2^N × 2^N` matrix of
+    /// `Complex` values. Its entries travel as the gate's parameters: real and imaginary parts,
+    /// rows first.
     Unitary,
 }
 
@@ -250,7 +487,12 @@ pub struct Sig {
 }
 
 impl Sig {
-    fn new(receiver: Option<OwnKind>, params: Vec<Ty>, ret: Ty, reversible: Reversible) -> Self {
+    pub(crate) fn new(
+        receiver: Option<OwnKind>,
+        params: Vec<Ty>,
+        ret: Ty,
+        reversible: Reversible,
+    ) -> Self {
         Sig {
             receiver,
             params,
@@ -330,23 +572,24 @@ pub fn method(types: &mut Types, base: Ty, name: &str) -> Option<(Builtin, Sig)>
             };
             Some((builtin, sig))
         }
-        // A two-qubit gate from its matrix.
-        TyKind::Array(Ty::QUBIT, 2) if name == "unitary" => {
-            let params = vec![matrix(types, 4)];
+        // An N-qubit gate from its 2^N × 2^N matrix (`spec/core.md` §1).
+        TyKind::Array(Ty::QUBIT, n) if name == "unitary" && (1..=10).contains(&n) => {
+            let dim = 1u64 << n;
+            let params = vec![matrix(types, dim)];
             Some((
                 Builtin::Gate(Gate::Unitary),
                 Sig::new(Some(OwnKind::Mut), params, self_mut, Yes),
             ))
         }
-        TyKind::Array(elem, len) if elem == Ty::QUBIT && name == "measure" => {
-            let bits = types.array(Ty::BIT, len);
+        TyKind::Array(Ty::QUBIT, _) | TyKind::SizedArray(Ty::QUBIT, _) if name == "measure" => {
+            let bits = types.measured(base)?;
             Some((
                 Builtin::Measure,
                 Sig::new(Some(OwnKind::Mv), vec![], bits, No),
             ))
         }
-        TyKind::Array(elem, len) if elem == Ty::QUBIT && name == "measure_in" => {
-            let bits = types.array(Ty::BIT, len);
+        TyKind::Array(Ty::QUBIT, _) | TyKind::SizedArray(Ty::QUBIT, _) if name == "measure_in" => {
+            let bits = types.measured(base)?;
             Some((
                 Builtin::MeasureIn,
                 Sig::new(Some(OwnKind::Mv), vec![types.basis?], bits, No),

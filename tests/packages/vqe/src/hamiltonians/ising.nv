@@ -1,0 +1,15 @@
+pub fn coupling() -> Float {
+    super::scale() * 2.0
+}
+
+pub enum Bond {
+    Weak,
+    Strong
+
+    pub fn weight(ref self) -> Int {
+        match self {
+            Bond::Weak => 1,
+            Bond::Strong => 2,
+        }
+    }
+}

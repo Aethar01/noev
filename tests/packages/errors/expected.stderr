@@ -1,0 +1,7 @@
+errors/src/main.nv:1:5: error: `hidden` is private
+errors/src/main.nv:2:5: error: cannot find `missing` in `a`
+errors/src/main.nv:3:5: error: cannot find the module `nowhere`
+errors/src/main.nv:8:4: error: the function `helper` is defined twice
+errors/src/main.nv:11:5: error: `shared` is ambiguous: glob imports bring two different items with that name
+errors/src/main.nv:12:5: error: `hidden` is private
+errors/src/main.nv:14:5: error: `secret` is private

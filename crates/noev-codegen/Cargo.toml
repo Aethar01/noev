@@ -1,0 +1,45 @@
+[package]
+name = "noev-codegen"
+description = "Native code generators (Cranelift and LLVM) for the Noev quantum programming language."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["cranelift", "llvm"]
+# Pure-Rust Cranelift native code generator.
+cranelift = [
+    "dep:noev-runtime",
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
+    "dep:cranelift-object",
+]
+# LLVM native code generator (pure-Rust IR emitter + dynamic libLLVM / llc driver).
+llvm = ["dep:noev-runtime"]
+
+[dependencies]
+noev-ir = { path = "../noev-ir" }
+noev-runtime = { path = "../noev-runtime", default-features = false, optional = true }
+noev-sema = { path = "../noev-sema" }
+cranelift-codegen = { version = "0.138", optional = true }
+cranelift-frontend = { version = "0.138", optional = true }
+cranelift-module = { version = "0.138", optional = true }
+cranelift-native = { version = "0.138", optional = true }
+cranelift-object = { version = "0.138", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+noev-syntax = { path = "../noev-syntax" }
+
+[[bench]]
+name = "compile"
+harness = false
+required-features = ["cranelift"]

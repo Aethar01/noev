@@ -1,0 +1,141 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: tar.gz
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            cross: false
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binaries and runtime libraries
+        run: cargo build --release --target ${{ matrix.target }} -p noev -p noev-runtime -p noev-c
+
+      - name: Smoke test (Unix)
+        if: runner.os != 'Windows' && !matrix.cross
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/noev"
+          "$BIN" --version
+          "$BIN" test --seed 1 tests/run
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = "target/${{ matrix.target }}/release/noev.exe"
+          & $bin --version
+          & $bin test --seed 1 tests/run
+
+      - name: Package archive (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          RAW_TAG="${GITHUB_REF_NAME:-dev}"
+          TAG="${RAW_TAG//\//-}"
+          NAME="noev-${TAG}-${{ matrix.target }}"
+          STAGE="dist/${NAME}"
+          mkdir -p "${STAGE}/bin" "${STAGE}/lib" "${STAGE}/include"
+          cp "target/${{ matrix.target }}/release/noev" "${STAGE}/bin/noev"
+          cp "target/${{ matrix.target }}/release/libnoev_runtime.a" "${STAGE}/lib/"
+          cp "target/${{ matrix.target }}/release/libnoev_c.a" "${STAGE}/lib/"
+          cp include/noev.h include/noev_backend.h "${STAGE}/include/"
+          cp LICENSE-APACHE LICENSE-MIT README.md "${STAGE}/"
+          tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
+
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $rawTag = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "dev" }
+          $tag = $rawTag -replace '/', '-'
+          $name = "noev-$tag-${{ matrix.target }}"
+          $stage = "dist/$name"
+          New-Item -ItemType Directory -Force -Path "$stage/bin", "$stage/lib", "$stage/include" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/noev.exe" "$stage/bin/noev.exe"
+          Copy-Item "target/${{ matrix.target }}/release/noev_runtime.lib" "$stage/lib/"
+          Copy-Item "target/${{ matrix.target }}/release/noev_c.lib" "$stage/lib/"
+          Copy-Item "include/noev.h", "include/noev_backend.h" "$stage/include/"
+          Copy-Item "LICENSE-APACHE", "LICENSE-MIT", "README.md" "$stage/"
+          Compress-Archive -Path "$stage" -DestinationPath "dist/$name.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS.txt

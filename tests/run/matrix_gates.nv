@@ -1,7 +1,7 @@
 // Gates from matrices (spec/core.md §1): one- and two-qubit unitaries, inverted by `adj`
 // and controlled by `ctrl`; a matrix that is not unitary is an error.
 
-fn main() {
+test fn one_and_two_qubit_matrix_gates() {
     let r = 1.0 / Float(2).sqrt()
     let hadamard = [[Complex(r), Complex(r)], [Complex(r), Complex(-r)]]
     let sqrt_x = [[0.5 + 0.5i, 0.5 - 0.5i], [0.5 - 0.5i, 0.5 + 0.5i]]
@@ -13,22 +13,22 @@ fn main() {
     ]
     let a = |0>
     a.unitary(hadamard)
-    print(<+| mv a)
+    assert <+| mv a
     let b = |0>
     b.unitary(sqrt_x).unitary(sqrt_x)
-    print(<1| mv b)
+    assert <1| mv b
     let c = |0>
     adj c.unitary(sqrt_x)
     c.unitary(sqrt_x)
-    print(<0| mv c)
+    assert <0| mv c
     // CNOT with r[0] as control: |10> -> |11>.
     let r2 = |10>
     r2.unitary(cnot)
-    print(mv r2.measure())
+    assert mv r2.measure() == [1, 1]
     let d = |1>
     let e = |0>
     ctrl d { e.unitary(sqrt_x).unitary(sqrt_x) }
-    print(mv d.measure(), mv e.measure())
+    assert (mv d.measure(), mv e.measure()) == (1, 1)
     // A two-qubit matrix under `ctrl` keeps its phases relative to the control's other
     // branch: iSWAP then SWAP, both controlled by |+>, leave the control in |+i>.
     let swap = [
@@ -43,17 +43,19 @@ fn main() {
         [0.0 + 0i, 1i, 0.0 + 0i, 0.0 + 0i],
         [0.0 + 0i, 0.0 + 0i, 0.0 + 0i, 1.0 + 0i],
     ]
-    print(sample 100 {
+    let d1 = sample 100 {
         let c = |+>
         let pair = |01>
         ctrl c { pair.unitary(iswap) }
         ctrl c { pair.unitary(swap) }
         (<(+i)| mv c, mv pair.measure())
-    })
-    print(sample 100 {
+    }
+    assert d1.count((true, [0, 1])) == 100
+    let d2 = sample 100 {
         let f = |1>
         let g = |0>
         ctrl f { g.unitary(sqrt_x).unitary(sqrt_x) }
         (mv f.measure(), mv g.measure())
-    })
+    }
+    assert d2.count((1, 1)) == 100
 }

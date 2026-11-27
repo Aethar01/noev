@@ -1,0 +1,64 @@
+// Inline OpenQASM (`spec/interop.md` §4): standard gates, custom gate defs,
+// interpolated parameters, repeated qubit placeholders, circuits, and expectations.
+
+fn apply_sx(q: mut Qubit) {
+    unsafe { qasm("sx {q};") }
+}
+
+fn prep_x() -> Qubit {
+    let q = |0>
+    unsafe { qasm("sx {q}; sx {q};") }
+    mv q
+}
+
+test fn inline_qasm_gates_and_circuits() {
+    // 1. Two sx gates flip |0> -> |1> (via helper + repeated placeholder).
+    let q1 = |0>
+    apply_sx(q1)
+    apply_sx(q1)
+    assert mv q1.measure() == 1
+
+    // 2. sx then sxdg cancels back to |0> (repeated placeholder in one qasm string).
+    let q2 = |0>
+    unsafe { qasm("sx {q2}; sxdg {q2};") }
+    assert mv q2.measure() == 0
+
+    // 3. Classical scalar interpolation (Float angle).
+    let q3 = |0>
+    let theta = Float::PI
+    unsafe { qasm("rx({theta}) {q3};") }
+    assert mv q3.measure() == 1
+
+    // 4. Multi-line snippet with a custom gate definition and barrier.
+    let q4 = |0>
+    unsafe {
+        qasm("gate double_sx a {{ sx a; sx a; }\ndouble_sx {q4};\nbarrier {q4};")
+    }
+    assert mv q4.measure() == 1
+
+    // 5. Register indexing and two-qubit stdgates (cx, rzz).
+    let r = |00>
+    let phi = Float::PI / 2.0
+    unsafe {
+        qasm("x {r[0]}; cx {r[0]}, {r[1]}; rzz({phi}) {r[0]}, {r[1]};")
+    }
+    assert mv r.measure() == [1, 1]
+
+    // 6. Circuit recording path (`sample`): Bell state via inline OpenQASM.
+    let dist = sample 200 {
+        let a = |0>
+        let b = |0>
+        unsafe { qasm("h {a}; cx {a}, {b};") }
+        (mv a.measure(), mv b.measure())
+    }
+    let c00 = dist.count((0, 0))
+    let c11 = dist.count((1, 1))
+    assert c00 + c11 == 200
+    assert dist.count((0, 1)) == 0
+    assert dist.count((1, 0)) == 0
+    assert c00 > 50 and c11 > 50
+
+    // 7. Expectation value of a state prepared with inline OpenQASM: <1| Z(0) |1> = -1.
+    let e = <prep_x()| Z(0) |prep_x()>
+    assert (e + 1.0).abs() < 1e-9
+}

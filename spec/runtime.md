@@ -5,8 +5,13 @@ program is native code linked to the **Noev runtime**. The runtime sends quantum
 to a **quantum backend**: a simulator such as ketrs, or a quantum computer's control stack.
 The program does not depend on which backend it runs on.
 
-Status: design, except the backend interface (§3), which the interpreter (`noev run`)
-already uses, with ketrs as its backend (§6).
+Status: **Implemented** — the backend interface (`std::backend` and `noev-runtime::backend`, §3),
+the runtime C ABI and plug-in backend C ABI (`include/noev_backend.h`, §4), target descriptions,
+compile-time capability checks, `[target]` in `noev.toml`, `--backend=NAME[:DEVICE]`, and
+`noev target fetch|list|show` (§5), the interpreter (`noev run`, §6), the Cranelift and LLVM
+code generators (`noev build --codegen=cranelift|llvm`, §2, §7, behind optional `cranelift` and
+`llvm` features, with `--qir-runtime` for linking to QIR runtimes), and QIR 1.0 export
+(`noev build --emit=qir` and `noev export --format=qir`, §4, §7).
 
 ```
 program.nv ─▶ front end ─▶ Noev IR ─┬─▶ code generator ─▶ native object ─┐
@@ -73,18 +78,48 @@ shot, so the same table applies.
 A backend that accepts both levels, as ketrs does, takes circuits where it can, since that is
 faster.
 
-### What only simulators can do
+### Capabilities
 
-Some things are possible only when the backend can see the state, and a backend says
-whether it can do each:
+Some things are possible only when the backend can see the state. Each is a **capability**
+that a backend's target description declares (§5); the language never asks whether a backend
+is a simulator, so a quantum computer that could see its state would declare them too:
 
+- **Read the state**: give a register's amplitudes (`std::debug::amplitudes`,
+  [std.md](std.md)). A program that reads the state is rejected for a target without this
+  capability.
 - **Check `release`**: confirm that a released qubit is in \|0⟩ ([ownership.md](ownership.md)
   §11). Other backends trust the claim.
-- **Exact expectation values**: compute `<ψ| H |ψ>` from the state. Other backends estimate
-  it by measuring each group of terms in its basis, as one circuit when the preparation is a
-  circuit ([types.md](types.md) §3), and `noev export` saves those circuits.
+- **Exact expectation values and amplitudes**: compute `<ψ| H |ψ>` and `<φ|ψ>` from the
+  state. Other backends estimate them `within ε`, by measuring each group of terms in its
+  basis, as one circuit when the preparation is a circuit ([types.md](types.md) §3), and
+  `noev export` saves those circuits.
 - **Sample a state without measuring it**: when a run returns qubits and measures nothing,
   simulate it once and draw every shot from the final state.
+
+### Backends are libraries
+
+A backend is an implementation of the trait `std::backend::Backend`, at one or both levels:
+written in Noev, or in Rust or C through the plug-in interface (§4). ketrs is one written in
+Rust. Writing a backend in Noev needs traits, so its exact signatures arrive with them; in
+outline:
+
+```noev
+trait Backend {
+    fn target(ref self) -> Target                                    // §5
+    fn run(mut self, circuit: ref Circuit, shots: Int) -> Result<Shots, BackendError>
+    fn session(mut self) -> Result<Session, BackendError>            // gate level
+}
+```
+
+A `Circuit` is a classical value that describes a circuit: its qubits, its gates with their
+angles and controls, its measurements, and its classical control. It holds no qubits, so a
+backend can copy it, store it or send it over a network. A backend never holds a qubit, and
+code that implements a backend cannot create one: running it would need a backend of its
+own. That is a compile error.
+
+A backend's package can offer anything else of its own: jobs, queues, credentials, device
+calibration. A program that runs on that backend sees none of it. Its meaning, and with the
+same seed its results on a simulator, do not depend on the backend.
 
 ### Circuits are built while the program runs
 
@@ -102,29 +137,86 @@ to the runtime with each run, so the runtime never has to discover it by trying.
 
 ## 4. The runtime interface
 
-Compiled code calls the runtime through a C ABI, so code from any code generator can link
-to it, and a runtime or backend can be written in any language.
+Compiled code and the interpreter both call the runtime through a C ABI (`extern "C"`), so
+code from any code generator can link to it, and a runtime or backend can be written in any
+language.
 
-Its shape follows QIR's: qubits and measurement results are opaque handles, and gates are
-functions. The groups of functions:
+Its shape follows QIR's: an opaque runtime handle (`NoevRuntime*`), pointer-sized opaque
+qubit handles (`NoevQubit`), tagged measurement result handles (`NoevResult`: bit 63 clear
+for a concrete `0`/`1` bit, bit 63 set for a recorded circuit classical bit index), and one
+function per core gate. Operations that can fail return `bool` (`true` on success) and store
+their diagnostic on the runtime handle.
 
-- **Program**: start up (parse the backend's options, seed the random numbers), shut down
-  (flush output, report errors).
-- **Qubits**: allocate, release (with the simulator's check, [ownership.md](ownership.md)
-  §11), reset.
-- **Gates**: one function per core gate ([core.md](core.md)), each taking its target qubits,
-  angles, and the qubits controlling it (from `ctrl`).
-- **Measurement**: measure a qubit, giving a *result handle*; read a result as a `Bit`. In
-  recording mode a handle stands for a measurement that has not happened. Using it in a
-  condition records classical control; reading its value outside the circuit rule's
-  allowed uses is an error the compiler has already ruled out for runs it marked as circuits.
-- **Runs**: run a function `n` times (`sample`), given a pointer to the run's code, its
-  captured values, and whether it is a circuit; returns a `Distribution`. Estimate an
-  expectation value of a preparation.
-- **Output and failure**: `print`, `eprint`, `assert` failures and runtime errors.
+### Types
+
+- `NoevRuntime` — opaque execution context holding the backend session or circuit recorder,
+  free qubit pool, `ctrl` stack, `adj` and `with`/`do` recording frames, PRNG, output streams
+  and last error.
+- `NoevQubit` — opaque pointer-sized qubit handle (`usize`).
+- `NoevResult` — `uint64_t` measurement handle (concrete `0`/`1`, or `0x8000_0000_0000_0000 | clbit` while recording a circuit).
+- `NoevComplex` — `struct { double re; double im; }`.
+- `NoevPauliFactor` — `struct { NoevQubit qubit; uint8_t pauli; }` (`0` = X, `1` = Y, `2` = Z).
+- `NoevPauliTerm` — `struct { double coeff; const NoevPauliFactor* factors; size_t len; }`.
+
+### Functions
+
+- **Program and errors**:
+  - `noev_rt_new_ketrs(uint64_t seed) -> NoevRuntime*` (when built with ketrs),
+    `noev_rt_new_export(uint64_t seed) -> NoevRuntime*`, `noev_rt_free(NoevRuntime*)`.
+  - `noev_rt_has_error(const NoevRuntime*) -> bool`,
+    `noev_rt_error_message(const NoevRuntime*, size_t* out_len) -> const uint8_t*`,
+    `noev_rt_error_is_unknown(const NoevRuntime*) -> bool`,
+    `noev_rt_clear_error(NoevRuntime*)`,
+    `noev_rt_set_error(NoevRuntime*, const uint8_t* msg, size_t len)`.
+  - `noev_rt_flush(NoevRuntime*) -> bool`,
+    `noev_rt_next_seed(NoevRuntime*) -> uint64_t`,
+    `noev_rt_measured(const NoevRuntime*) -> bool`.
+- **Qubits**:
+  - `noev_rt_qubit_allocate(NoevRuntime*, NoevQubit* out) -> bool`.
+  - `noev_rt_qubit_release(NoevRuntime*, NoevQubit q) -> bool` (checks `|0⟩` on simulators,
+    [ownership.md](ownership.md) §11).
+  - `noev_rt_qubit_reset(NoevRuntime*, NoevQubit q) -> bool`.
+- **Core gates** (pick up active `ctrl` qubits and record into active `adj` / `with` frames):
+  - `noev_qis_x`, `noev_qis_y`, `noev_qis_z`, `noev_qis_h`, `noev_qis_s`, `noev_qis_s_adj`,
+    `noev_qis_t`, `noev_qis_t_adj`: `(NoevRuntime*, NoevQubit q) -> bool`.
+  - `noev_qis_rx`, `noev_qis_ry`, `noev_qis_rz`, `noev_qis_p`:
+    `(NoevRuntime*, double theta, NoevQubit q) -> bool`.
+  - `noev_qis_u`, `noev_qis_u_adj`:
+    `(NoevRuntime*, double theta, double phi, double lam, NoevQubit q) -> bool`.
+  - `noev_qis_swap(NoevRuntime*, NoevQubit q1, NoevQubit q2) -> bool`.
+  - `noev_qis_unitary(NoevRuntime*, const NoevQubit* targets, size_t n_targets, const double* params, size_t n_params, bool adjoint) -> bool`.
+- **Control, adjoint and `with`/`do`**:
+  - `noev_rt_ctrl_push(NoevRuntime*, const NoevQubit* controls, size_t len)`,
+    `noev_rt_ctrl_pop(NoevRuntime*)`,
+    `noev_rt_ctrl_depth(const NoevRuntime*) -> size_t`,
+    `noev_rt_ctrl_restore(NoevRuntime*, size_t depth)`.
+  - `noev_rt_adj_start(NoevRuntime*)`, `noev_rt_adj_end(NoevRuntime*) -> bool`,
+    `noev_rt_adj_abort(NoevRuntime*)`.
+  - `noev_rt_with_start(NoevRuntime*)`, `noev_rt_with_do(NoevRuntime*)`,
+    `noev_rt_with_end(NoevRuntime*) -> bool`.
+- **Measurement**:
+  - `noev_qis_mz(NoevRuntime*, NoevQubit q, NoevResult* out) -> bool`.
+  - `noev_rt_result_is_clbit(NoevResult) -> bool`,
+    `noev_rt_result_clbit_index(NoevResult) -> size_t`,
+    `noev_rt_result_read(NoevRuntime*, NoevResult) -> uint8_t` (reads a concrete bit, or
+    resolves against the replay outcome when re-running classical code for a recorded circuit).
+- **State inspection and runs**:
+  - `noev_rt_amplitudes(NoevRuntime*, const NoevQubit* qubits, size_t n_qubits, NoevComplex* out, size_t out_len) -> bool`.
+  - `noev_rt_zero_amplitude(NoevRuntime*, NoevComplex* out) -> bool`.
+  - `noev_rt_expectation_exact(NoevRuntime*, const NoevPauliTerm* terms, size_t n_terms, double* out) -> bool`.
+  - `noev_rt_sample_run(NoevRuntime*, size_t shots, bool is_circuit, NoevRunFn body, void* env, NoevSampleCallback on_outcome, void* cb_env) -> bool`
+    runs a compiled or interpreted shot callback `shots` times — recording a circuit once when
+    `is_circuit` and the backend accepts circuits, or running gate by gate otherwise.
+- **Output and failure**:
+  - `noev_rt_write(NoevRuntime*, bool stderr, const uint8_t* bytes, size_t len) -> bool`.
+  - `noev_rt_assert(NoevRuntime*, bool cond, const uint8_t* msg, size_t len) -> bool`.
 
 The runtime implements runs on top of the backend: it records circuits for circuit-level
 backends, and calls the run's code once per shot for gate-level ones.
+
+Backends plug into the runtime through a C ABI too, in the other direction: the runtime calls
+the backend's functions for the `Backend` trait (§3). A backend written in Noev is compiled
+to the same functions, so ketrs, a backend in C and a backend in Noev are interchangeable.
 
 ### QIR
 
@@ -140,25 +232,48 @@ QIR is LLVM IR that calls a standard set of quantum functions (`__quantum__qis__
 
 ## 5. Targets
 
-A **target** is a code generator's machine (`x86_64-linux`, …) plus a quantum backend. The
-compiler checks a program against its target's quantum backend and rejects, at compile
-time, what the backend cannot run: a run that is not a circuit on a circuit-level-only
-backend, more qubits than the backend has, or a gate it does not support and cannot be
-decomposed into ones it does. The error points at the line that makes the run need gate-level
-control, as `--emit=plan` does.
+A **target** is a code generator's machine (`x86_64-linux`, …) plus a quantum backend. Every
+backend, simulator or quantum computer, has a **target description**:
 
-The backend is chosen when the program is built (`noev build --backend=ketrs`), and a
-program can be built for a dynamic backend, loaded when it starts, so one binary can run on
-a simulator or on hardware.
+- the levels it accepts (circuit, gate, or both);
+- its number of qubits, its gates and which qubits they can join;
+- its capabilities (§3);
+- for gate-level backends, whether foreign calls can run while qubits are alive
+  ([interop.md](interop.md) §5).
+
+The compiler checks a program against its target's description and rejects, at compile
+time, what the backend cannot run: a run that is not a circuit on a circuit-level-only
+backend, more qubits than the backend has, a gate it does not support and cannot be
+decomposed into ones it does, or a capability it lacks. The error points at the line that
+needs it, as `--emit=plan` does for gate-level control.
+
+The backend is chosen with `--backend=NAME[:DEVICE]`, on `noev build` and on `noev run`; a
+package can name a default in its `noev.toml`:
+
+```toml
+[target]
+backend = "ketrs"
+```
+
+Built-in backends such as ketrs come with their descriptions. Others, such as a remote
+device, are fetched once and cached, so building needs no network:
+`noev target fetch NAME[:DEVICE]`. Credentials are never part of a package or a binary: a
+backend reads its own when the program starts, from the environment or the user's
+configuration.
+
+A program can also be built for a dynamic backend, loaded when it starts, so one binary can
+run on a simulator or on hardware. Compiled binaries accept `--backend=NAME[:DEVICE]` (or
+`--backend NAME[:DEVICE]`, stopping before `--`, or `NOEV_BACKEND`) and `--seed=N` to choose
+the backend and RNG seed at launch. It is then checked against the loaded backend's
+description when it starts, as host functions are checked when it is loaded
+([interop.md](interop.md) §2), and refuses to run if it needs what the backend lacks.
 
 ## 6. The interpreter
 
-`noev run` interprets the IR instead of compiling it. It drives the same runtime and
-backends through the same interface, so a program behaves the same interpreted or compiled.
-The interpreter is the reference implementation: compiled programs are tested against it.
-
-For now, the interface is a Rust trait in `noev-runtime` (`Backend`, with a `Session` for gate
-level), and ketrs is the only backend.
+`noev run` interprets the IR instead of compiling it. It drives the runtime through the same
+C ABI (§4), which talks to backends through the `Backend` / `Session` interface in
+`noev-runtime`, so a program behaves the same interpreted or compiled. The interpreter is the
+reference implementation: compiled programs are tested against it.
 
 `main` is a run with one shot, like any other call (§3). On a backend that works gate by gate
 it runs as written. On one that only takes circuits, a `main` that is a circuit is recorded,
@@ -170,13 +285,20 @@ outcome; the repeated runs it starts are computed once, while recording. `noev e
 
 | `--emit=` | Output                                                                    |
 | --------- | ------------------------------------------------------------------------- |
-| `binary`  | An executable linked to the runtime and a backend (the default, later)     |
+| `binary`  | An executable linked to the runtime and a backend (the default)           |
 | `object`  | A native object file, to link yourself                                    |
+| `llvm-ir` | Full-program LLVM IR text (`.ll`) from the LLVM code generator            |
 | `qir`     | QIR                                                                       |
 | `ir`      | Noev IR, for inspecting the compiler                                      |
 | `plan`    | How each repeated run executes ([execution.md](execution.md) §5)          |
 
-`binary`, `object` and `qir` are not implemented yet. `--emit` is required until `binary` is.
+`binary` (the default) and `object` are produced by Cranelift (`--codegen=cranelift`, default)
+or LLVM (`--codegen=llvm`, `-O2`), each behind its own optional Cargo feature (both on by
+default). Passing `--qir-runtime` with `--codegen=llvm` emits calls to QIR's runtime symbols
+(`__quantum__qis__*`, `__quantum__rt__*`) for linking against external QIR runtimes. `qir`
+emits QIR 1.0 LLVM IR text (`.ll`) with Base Profile for circuits and Adaptive Profile for
+mid-circuit measurement, reset, and classical control; `noev export --format=qir` saves one
+`.ll` file per circuit.
 
 ### Saving circuits
 
@@ -204,11 +326,7 @@ runs are circuits.
 
 ## 8. Open questions
 
-- **Backend options**: how a program or its user chooses a hardware backend, its device and
-  its credentials, without baking them into the binary.
-- **Result output**: how a `Distribution` from a hardware job reports its metadata (device,
-  calibration, time), if the language exposes it at all.
-- **Dynamic backends**: a plug-in ABI with versioning, so backends can be built separately
-  from Noev.
+- **Plug-in interface**: its versioning, so backends built separately from Noev keep working
+  across releases.
 - **Real-time limits**: a gate-level quantum computer will bound how long classical code may
   run between operations; the compiler would need to check those bounds for a target.

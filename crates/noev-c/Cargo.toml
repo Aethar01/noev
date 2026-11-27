@@ -1,0 +1,31 @@
+[package]
+name = "noev-c"
+description = "C and C++ embedding API for Noev (`include/noev.h`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+name = "noev_c"
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+noev = { path = "../noev", default-features = false }
+noev-ir = { path = "../noev-ir" }
+noev-runtime = { path = "../noev-runtime", default-features = false }
+noev-sema = { path = "../noev-sema" }
+
+[features]
+default = ["ketrs"]
+ketrs = ["noev/ketrs", "noev-runtime/ketrs"]
+
+[[bench]]
+name = "c_embed"
+harness = false
+required-features = ["ketrs"]
+
+[lints]
+workspace = true

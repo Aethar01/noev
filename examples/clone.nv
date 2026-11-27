@@ -1,0 +1,84 @@
+// Encrypted cloning (Yamaguchi & Kempf, PRL 136, 010801; demonstrated in arXiv:2602.10695):
+// a qubit can be copied any number of times if every copy is encrypted, and exactly one copy
+// can then be decrypted, with a key that is used up. Here, two clones.
+//
+//     noev run examples/clone.nv
+//     noev export examples/clone.nv                    # the circuits, as OpenQASM 3
+//
+// The input A starts in a Bell pair with a reference qubit. Each clone S_i starts in a Bell
+// pair with a key qubit N_i, which the encryption never touches. After decrypting either
+// clone, it is in the Bell pair with the reference that A was in, so undoing that pair gives
+// 00 every time. A clone that is not decrypted gives each of the four outcomes equally often.
+//
+// The key being single-use is ownership: `decrypt` takes the key qubits, so decrypting a
+// second clone with the same key is a compile error (N002: `n1` was moved).
+
+fn bell() -> (Qubit, Qubit) {
+    let a = |+>
+    let b = |0>
+    ctrl a { b.x() }
+    (mv a, mv b)
+}
+
+/// exp(−iπ/4 Z⊗Z⊗Z), as a parity ladder around one rotation.
+fn zzz(a: mut Qubit, b: mut Qubit, c: mut Qubit) {
+    ctrl a { b.x() }
+    ctrl b { c.x() }
+    c.rz(Float::PI / 2.0)
+    ctrl b { c.x() }
+    ctrl a { b.x() }
+}
+
+/// U_enc = exp(−iπ/4 X⊗X⊗X) · exp(−iπ/4 Z⊗Z⊗Z) on the input and both clones.
+fn encrypt(a: mut Qubit, s1: mut Qubit, s2: mut Qubit) {
+    zzz(a, s1, s2)
+    a.h(); s1.h(); s2.h()
+    zzz(a, s1, s2)
+    a.h(); s1.h(); s2.h()
+}
+
+/// U_dec for clone `s` with its own key qubit `n1` and the other one, `n2`: for each Bell
+/// state σ_μ|ϕ⟩ of (s, n1), the phase α_μ and σ_μ^T on n2. The Bell basis is decoded into
+/// the computational one (I → 00, X → 01, Z → 10, Y → 11), where with n = 2 the four
+/// branches are 1, iX, iZ and −iY^T = XZ on n2, and encoded back.
+fn decrypt(s: mut Qubit, n1: Qubit, n2: Qubit) {
+    ctrl s { n1.x() }
+    s.h()
+    s.s(); n1.s(); ctrl s { n1.z() }     // the phases: 1, i, i, 1
+    ctrl s { n2.z() }
+    ctrl n1 { n2.x() }
+    s.h()
+    ctrl s { n1.x() }
+    discard(mv n1)
+    discard(mv n2)
+}
+
+/// Undoes a Bell pair and measures it: (0, 0) if `a` and `b` were in one.
+fn unbell(a: Qubit, b: Qubit) -> (Bit, Bit) {
+    ctrl a { b.x() }
+    a.h()
+    (mv a.measure(), mv b.measure())
+}
+
+/// Clones the input twice, decrypts clone `which` and tests it against the reference.
+fn cloned(which: Int) -> (Bit, Bit) {
+    let (reference, a) = bell()
+    let (s1, n1) = bell()
+    let (s2, n2) = bell()
+    encrypt(a, s1, s2)
+    discard(mv a)
+    if which == 1 {
+        decrypt(s1, mv n1, mv n2)
+        discard(mv s2)
+        unbell(mv reference, mv s1)
+    } else {
+        decrypt(s2, mv n2, mv n1)
+        discard(mv s1)
+        unbell(mv reference, mv s2)
+    }
+}
+
+fn main() {
+    print("clone 1:", sample 10000 { cloned(1) })
+    print("clone 2:", sample 10000 { cloned(2) })
+}

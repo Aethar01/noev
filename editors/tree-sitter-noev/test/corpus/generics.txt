@@ -1,0 +1,232 @@
+================================================================================
+Generics, traits and impls
+================================================================================
+
+fn zip<T, U: Copy + Measure<Result = Bit>, const N: Int>(a: [T; N], b: [U; N]) -> [(T, U); N]
+where
+    T: Copy,
+{
+    let p = swap::<Int>((1, 2))
+    let q = qft::<8>(r)
+    let const = 1
+}
+
+struct Pair<T, U> { a: T, b: U }
+enum Option<T> { Some(T), None }
+
+trait Oracle<const N: Int> {
+    type Result: Copy
+    rev fn apply(ref self, r: mut [Qubit; N])
+}
+
+impl<T: Measure> Oracle<4> for Pair<T, T> where T: Copy {}
+impl Shape for S {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_item
+    (identifier)
+    (type_parameters
+      (type_parameter
+        (type_identifier))
+      (type_parameter
+        (type_identifier)
+        (bounds
+          (bound
+            (type_identifier))
+          (bound
+            (type_identifier)
+            (associated_binding
+              (type_identifier)
+              (type_path
+                (type_identifier))))))
+      (size_parameter
+        (identifier)
+        (type_path
+          (type_identifier))))
+    (parameters
+      (parameter
+        (identifier)
+        (array_type
+          (type_path
+            (type_identifier))
+          (identifier)))
+      (parameter
+        (identifier)
+        (array_type
+          (type_path
+            (type_identifier))
+          (identifier))))
+    (array_type
+      (tuple_type
+        (type_path
+          (type_identifier))
+        (type_path
+          (type_identifier)))
+      (identifier))
+    (where_clause
+      (where_predicate
+        (type_identifier)
+        (bounds
+          (bound
+            (type_identifier)))))
+    (block
+      (let_declaration
+        (identifier)
+        (call_expression
+          (generic_function
+            (identifier)
+            (type_path
+              (type_identifier)))
+          (arguments
+            (tuple_expression
+              (integer)
+              (integer)))))
+      (let_declaration
+        (identifier)
+        (call_expression
+          (generic_function
+            (identifier)
+            (integer))
+          (arguments
+            (identifier))))
+      (let_declaration
+        (identifier)
+        (integer))))
+  (struct_item
+    (type_identifier)
+    (type_parameters
+      (type_parameter
+        (type_identifier))
+      (type_parameter
+        (type_identifier)))
+    (field_declaration
+      (field_identifier)
+      (type_path
+        (type_identifier)))
+    (field_declaration
+      (field_identifier)
+      (type_path
+        (type_identifier))))
+  (enum_item
+    (type_identifier)
+    (type_parameters
+      (type_parameter
+        (type_identifier)))
+    (enum_variant
+      (constant)
+      (type_path
+        (type_identifier)))
+    (enum_variant
+      (constant)))
+  (trait_item
+    (type_identifier)
+    (type_parameters
+      (size_parameter
+        (identifier)
+        (type_path
+          (type_identifier))))
+    (identifier)
+    (bounds
+      (bound
+        (type_identifier)))
+    (function_signature_item
+      (modifier)
+      (identifier)
+      (parameters
+        (self_parameter
+          (ownership)
+          (self))
+        (parameter
+          (identifier)
+          (reference_type
+            (array_type
+              (type_path
+                (type_identifier))
+              (identifier)))))))
+  (impl_item
+    (type_parameters
+      (type_parameter
+        (type_identifier)
+        (bounds
+          (bound
+            (type_identifier)))))
+    (bound
+      (type_identifier)
+      (integer))
+    (generic_type
+      (type_path
+        (type_identifier))
+      (type_path
+        (type_identifier))
+      (type_path
+        (type_identifier)))
+    (where_clause
+      (where_predicate
+        (type_identifier)
+        (bounds
+          (bound
+            (type_identifier))))))
+  (impl_item
+    (bound
+      (type_identifier))
+    (type_path
+      (type_identifier))))
+
+================================================================================
+Arithmetic in sizes
+================================================================================
+
+fn grow<const N: Int>(r: Reg<N>) -> Reg<{N + 1}> {}
+fn widen<const N: Int>(r: [Qubit; 2 * N]) -> [Qubit; N + 1] {}
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (function_item
+    name: (identifier)
+    type_parameters: (type_parameters
+      (size_parameter
+        name: (identifier)
+        type: (type_path
+          (type_identifier))))
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (generic_type
+          (type_path
+            (type_identifier))
+          (type_path
+            (type_identifier)))))
+    return_type: (generic_type
+      (type_path
+        (type_identifier))
+      (size_expression
+        (binary_expression
+          left: (identifier)
+          right: (integer))))
+    body: (block))
+  (function_item
+    name: (identifier)
+    type_parameters: (type_parameters
+      (size_parameter
+        name: (identifier)
+        type: (type_path
+          (type_identifier))))
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (array_type
+          (type_path
+            (type_identifier))
+          (binary_expression
+            left: (integer)
+            right: (identifier)))))
+    return_type: (array_type
+      (type_path
+        (type_identifier))
+      (binary_expression
+        left: (identifier)
+        right: (integer)))
+    body: (block)))

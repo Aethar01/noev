@@ -1,12 +1,14 @@
 //! `sample`: repeating a closed run and counting its results (`spec/execution.md` §3).
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use noev_ir::ir::{FuncId, Program};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
 use crate::backend::Backend;
+use crate::host::HostTable;
 use crate::machine::{Machine, Mode, Recording, RuntimeError};
 use crate::value::{Distribution, Outcome, Value};
 
@@ -22,6 +24,21 @@ use crate::value::{Distribution, Outcome, Value};
 pub fn sample(
     program: &Program,
     backend: &dyn Backend,
+    func: FuncId,
+    args: Vec<Value>,
+    shots: usize,
+    seed: u64,
+    key: impl Fn(&Value) -> String,
+) -> Result<Distribution, RuntimeError> {
+    sample_with_hosts(program, backend, None, func, args, shots, seed, key)
+}
+
+/// Like [`sample`], with host implementations for `extern fn` declarations.
+#[allow(clippy::too_many_arguments)]
+pub fn sample_with_hosts<'p>(
+    program: &'p Program,
+    backend: &'p dyn Backend,
+    hosts: Option<&Rc<HostTable<'p>>>,
     func: FuncId,
     args: Vec<Value>,
     shots: usize,
@@ -47,7 +64,7 @@ pub fn sample(
 
     if program.functions[func.index()].sampled
         && let Some(outcomes) =
-            sample_circuit(program, backend, func, &args, shots, seeds.random())?
+            sample_circuit(program, backend, hosts, func, &args, shots, seeds.random())?
     {
         for (value, count) in outcomes {
             add(value, count);
@@ -64,7 +81,7 @@ pub fn sample(
         return Ok(dist);
     }
 
-    let mut first = Machine::new(program, backend, seeds.random());
+    let mut first = Machine::new(program, backend, seeds.random()).with_opt_hosts(hosts);
     let value = first.call(func, args.clone())?;
     let mut qubits = Vec::new();
     value.qubits(&mut qubits);
@@ -78,7 +95,7 @@ pub fn sample(
     } else {
         add(first.measure_value(value)?, 1);
         for _ in 1..shots {
-            let mut machine = Machine::new(program, backend, seeds.random());
+            let mut machine = Machine::new(program, backend, seeds.random()).with_opt_hosts(hosts);
             let value = machine.call(func, args.clone())?;
             add(machine.measure_value(value)?, 1);
         }
@@ -90,17 +107,19 @@ pub fn sample(
 /// distinct outcome. `None` if the run cannot be recorded (it failed while recording, or needs
 /// more classical bits than an outcome can hold) or the backend does not take the circuit, in
 /// which case it runs shot by shot.
-fn sample_circuit(
-    program: &Program,
-    backend: &dyn Backend,
+fn sample_circuit<'p>(
+    program: &'p Program,
+    backend: &'p dyn Backend,
+    hosts: Option<&Rc<HostTable<'p>>>,
     func: FuncId,
     args: &[Value],
     shots: usize,
     seed: u64,
 ) -> Result<Option<Vec<(Value, usize)>>, RuntimeError> {
     let mut seeds = SmallRng::seed_from_u64(seed);
-    let mut builder =
-        Machine::new(program, backend, seeds.random()).with_mode(Mode::Build(Recording::default()));
+    let mut builder = Machine::new(program, backend, seeds.random())
+        .with_opt_hosts(hosts)
+        .with_mode(Mode::Build(Recording::default()));
     let Ok(value) = builder.call(func, args.to_vec()) else {
         return Ok(None);
     };
@@ -109,8 +128,8 @@ fn sample_circuit(
     };
     // If nothing needed a measurement result's value, the result is the template with each
     // outcome's bits filled in; otherwise each outcome's classical code is replayed.
-    let replay = builder.needs_values.get();
-    let Mode::Build(recording) = std::mem::take(&mut builder.mode) else {
+    let replay = builder.needs_values();
+    let Mode::Build(recording) = builder.take_mode() else {
         unreachable!("the builder records")
     };
     let circuit = recording.circuit;
@@ -133,7 +152,9 @@ fn sample_circuit(
         // Recording again with the outcome known gives the same classical bits, so its
         // classical code sees this outcome's values.
         let mode = Mode::Build(Recording::knowing(bits));
-        let mut replay = Machine::new(program, backend, seeds.random()).with_mode(mode);
+        let mut replay = Machine::new(program, backend, seeds.random())
+            .with_opt_hosts(hosts)
+            .with_mode(mode);
         let value = replay.call(func, args.to_vec())?;
         let value = replay.measure_value(value)?;
         outcomes.push((value.with_clbits(bits), count));

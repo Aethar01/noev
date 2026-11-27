@@ -14,16 +14,20 @@ fn bump(n: mut Int) {
     n += 1
 }
 
-fn main() {
-    print(steps(27))
+test fn classical_control_and_math() {
+    assert steps(27) == 111
     let mut n = 1
     bump(mut n)
     bump(mut n)
-    print(n)
-    print((2.7).round() + Int(Bool(Bit(true))))
+    assert n == 3
+    assert (2.7).round() + Int(Bool(Bit(true))) == 4
     let mut total = 0
     for i in 0..10 {
         total += i * i
     }
-    print(total, 7 / 2, 7 % 2, -7 / 2, 2.0 * 3.5)
+    assert total == 285
+    assert 7 / 2 == 3
+    assert 7 % 2 == 1
+    assert -7 / 2 == -3
+    assert 2.0 * 3.5 == 7.0
 }
