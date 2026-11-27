@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="./website/public/favicon.svg" alt="Noev logo" width="84" />
+
 # Noev
 
 **One language. Two computing paradigms.**
