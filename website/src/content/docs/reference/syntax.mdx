@@ -1,0 +1,101 @@
+---
+title: Syntax and Features
+description: Quick reference for Noev keywords, literals, operators, ownership syntax, generics, modules, and formatting.
+---
+
+A single-page cheat sheet of Noev syntax and language features. For formal grammar productions, see [Grammar](../../spec/grammar/).
+
+## Keywords
+
+### Reserved keywords
+
+```text
+and    as     assert  break  continue  else   enum    extern
+false  fn     for     if     impl      in     let     match
+mut    not    or      pub    ref       return sample  self
+Self   struct trait   true   type      unsafe use     while
+```
+
+### Contextual keywords
+
+Usable as ordinary variable names everywhere outside their grammatical position:
+
+| Keyword | Meaning | Example |
+| --- | --- | --- |
+| `mv` | Explicit ownership transfer | `let b = mv a`, `mv q.measure()` |
+| `rev` | Reversible function contract | `rev fn oracle(q: mut Qubit)` |
+| `circuit` | Circuit-compilation contract | `circuit fn bell() -> (Bit, Bit)` |
+| `test` | Test item declaration | `test fn t()`, `test(fail = "msg") fn f()` |
+| `adj` | Invert a reversible call | `adj q.s()`, `adj prepare(r)` |
+| `ctrl` | Quantum-controlled block | `ctrl a, b { c.x() }` |
+| `with` / `do` | Compute, use read-only, uncompute | `with { let anc = \|0>; … } do { … }` |
+| `within` | Expectation/amplitude standard error | `<ψ\| H \|ψ> within 0.005` |
+| `const` | Generic size parameter | `fn qft<const N: Int>(r: mut [Qubit; N])` |
+| `where` | Trait bound clause | `fn f<T>(x: T) where T: Copy` |
+| `pkg`, `super` | Module path roots | `use pkg::ansatz::layer` |
+
+## Literals
+
+| Kind | Examples | Type |
+| --- | --- | --- |
+| Integer | `0`, `42`, `1_000`, `0xff`, `0b1010` | `Int` (or expected sized int; `0`/`1` as `Bit`) |
+| Float | `1.0`, `3.14`, `1e-3`, `2.5e6` | `Float` (or `f32`, `Complex`, `c32`) |
+| Imaginary | `2.0i`, `3i`, `1e-3i` | `Complex` (or `c32`) |
+| Boolean | `true`, `false` | `Bool` |
+| String | `"hello"`, `"θ = {theta:.3}"`, `"{{literal}}"` | `String` |
+| Ket (1 qubit) | `\|0>`, `\|1>`, `\|+>`, `\|->`, `\|(+i)>`, `\|(-i)>` | `Qubit` |
+| Ket (register) | `\|01+->`, `\|0(-i)+>`, `\|0{bits}>` | `[Qubit; N]` |
+| Array repeat | `[\|0>; N]` | `[Qubit; N]` (`N` independent fresh qubits) |
+| Bra test | `<0\| mv q`, `<+\| mv q`, `<{bits}\| mv r`, `<bell()\| mv p` | `Bool` |
+
+## Ownership and references
+
+| Syntax | Meaning |
+| --- | --- |
+| `let x = expr` | Bind value (`Qubit` can still be acted on without `let mut`) |
+| `let mut x = expr` | Mutable classical binding (required to mutate classical fields/values, `N015`) |
+| `mv x` | Move ownership of `x` (required for linear/affine values, `N001`) |
+| `ref T` / `ref x` | Shared lend (read-only; `ctrl` controls; omitted implicitly at call sites) |
+| `mut T` / `mut x` | Exclusive lend (implicit for pure quantum args; explicit `mut` for classical, `N016`) |
+| `ref[a, b] T` | Place-based borrow annotation naming borrowed places (inferred within a package) |
+| `match mv x { … }` | Consume `x` into match arms (`match x` lends `ref`; `match mut x` lends `mut`) |
+| `unsafe { … }` | Vouch for an uncheckable physical or FFI claim (`release`, `extern "C"`, `qasm`) |
+
+## Operators
+
+| Category | Operators | Notes |
+| --- | --- | --- |
+| Arithmetic | `+`, `-`, `*`, `/`, `%`, unary `-` | No implicit mixing of numeric types |
+| Bitwise | `&`, `\|`, `^`, `~`, `<<`, `>>` | On `Int`, sized ints, and `Bit` |
+| Logical | `and`, `or`, `not` | Short-circuiting on `Bool` |
+| Comparison | `==`, `!=`, `<`, `<=`, `>`, `>=` | Lends both operands (`ref`); no ordering on `Complex` |
+| Compound assign | `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `\|=`, `^=`, `<<=`, `>>=` | Calls `std::ops::*Assign` on user types |
+| Range | `0..n` | Half-open integer range in `for i in 0..n` |
+| Path / member | `Type::item`, `x.field`, `t.0`, `a[i]` | Semicolons are optional between statements |
+
+## Declarations
+
+| Construct | Syntax |
+| --- | --- |
+| Function | `fn name<T, const N: Int>(x: T) -> R { … }` |
+| Struct + methods | `struct S { a: Float, q: Qubit, fn f(mut self) -> mut Self { … } }` |
+| Enum + methods | `enum E { A, B(Bit), C { n: Int }, fn ok(ref self) -> Bool { … } }` |
+| Type alias | `type Byte = [Bit; 8]` |
+| Trait & impl | `trait T<Rhs = Self> { type Out; fn f(mv self, r: Rhs) -> Self::Out }` / `impl T for S { … }` |
+| Visibility | `pub`, `pub(pkg)`, `pub(super)`, `pub(in path)` |
+| Imports | `use std::ops::{Add, Mul}`, `use pkg::math::*`, `use a::b as c` |
+| Host import | `extern fn step(e: Float, t: Float) -> Float` (safe to call) |
+| C FFI | `extern "C" { fn erf(x: Float) -> Float }`, `extern "C" struct P { x: Float }`, `extern "C" fn cb(...)` |
+| Tests | `test fn name()`, `test(fail) fn name()`, `test(fail = "sub") fn name()`, `assert cond, "msg"` |
+
+## String formatting specs
+
+`{expr:spec}` inside string literals is checked at compile time:
+
+| Spec | Applies to | Example |
+| --- | --- | --- |
+| `:8`, `:<8`, `:>8`, `:^8`, `:*^8` | Any printable type | Width and alignment (left, right, centre, fill char) |
+| `:+` | `Int`, `Float` | Always display sign (`+0.5`) |
+| `:.3` | `Float` | Precision (3 decimal digits) |
+| `:08b`, `:o`, `:x`, `:X` | `Int` | Binary, octal, hex, uppercase hex |
+| `:e` | `Float` | Scientific notation |

@@ -1,0 +1,156 @@
+---
+title: Standard Library Reference
+description: Complete reference for Noev built-in classical types, numeric methods, conversions, traits, collections, strings, I/O, filesystem, networking, and Fourier transforms.
+---
+
+## Module map
+
+Everything in the **prelude** is available without `use`. Other standard library items live under `std::`:
+
+| Module | Items |
+| --- | --- |
+| *(prelude)* | `Int`, `Float`/`f64`, `f32`, `Complex`/`c64`, `c32`, `i8`..`i64`, `u8`..`u64`, `Bool`, `Bit`, `String`, `Qubit`, `Observable`, `Distribution<T>`, `Vec<T>`, `Option<T>` (`Some`, `None`), `Result<T, E>` (`Ok`, `Err`), `Basis`, `Copy`, `Measure`, `print`, `eprint`, `discard`, `measure_in`, core gates and maths |
+| `std::state` | `State` (`Zero`, `One`, `Plus`, `Minus`, `PlusI`, `MinusI`) |
+| `std::observables` | `P`, `PX` |
+| `std::debug` | `amplitudes` |
+| `std::fourier` | `fft`, `ifft` |
+| `std::ops` | `Add`, `Sub`, `Mul`, `Div`, `Rem`, `BitAnd`, `BitOr`, `BitXor`, `Shl`, `Shr`, `Neg`, `BitNot`, and `*Assign` traits |
+| `std::cmp` | `Eq`, `Ord` |
+| `std::io` | `stdout`, `stderr`, `stdin`, `IoStream`, `Stdin` |
+| `std::env` | `var`, `args`, `current_dir` |
+| `std::fs` | `read_to_string`, `read`, `write`, `write_bytes`, `exists`, `create_dir_all`, `remove_file` |
+| `std::net` | `TcpStream`, `TcpListener` |
+| `std::backend` | `Backend`, `Target`, `Level`, `Capabilities`, `Circuit`, `Instruction`, `Op`, `GateKind`, `Shots`, `ShotCount`, `BackendError` |
+
+---
+
+## Numbers and maths (prelude)
+
+### Built-in numeric types
+
+- `Int`: arbitrary-precision signed integer (never overflows; fast path for 64-bit values).
+- `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`: fixed-width integers (checked arithmetic; overflow is a runtime error).
+- `Float` (alias `f64`), `f32`: IEEE 754 floating-point numbers.
+- `Complex` (alias `c64`), `c32`: complex numbers (`1.0 + 2.0i`).
+
+### `Float` constants and methods
+
+- **Constants:** `Float::PI`, `Float::TAU`, `Float::E`
+- **Trig and maths:** `sin()`, `cos()`, `tan()`, `asin()`, `acos()`, `atan()`, `atan2(x)`, `sqrt()`, `exp()`, `ln()`, `abs()`, `min(other)`, `max(other)` (also callable as `Float::sin(theta)`)
+- **Rounding to `Int`:** `trunc()`, `round()`, `floor()`, `ceil()`
+
+### `Int` methods
+
+- `abs()`, `min(other)`, `max(other)`
+
+### `Complex` / `c32` methods
+
+- **Constructor:** `Complex::polar(r, theta)`
+- **Methods:** `re()`, `im()`, `abs()`, `arg()`, `conj()`, `exp()`, `sqrt()`
+
+### Conversions
+
+Noev has no implicit casts:
+
+| Form | Examples | Behaviour |
+| --- | --- | --- |
+| Constructor call | `Float(n)`, `Int(b)`, `Bool(b)`, `Bit(flag)`, `Complex(x)`, `i64(u8_val)`, `u8(bits)` | Lossless / widening (or conventional float rounding) |
+| Named method | `f.trunc()`, `f.round()`, `f.floor()`, `f.ceil()`, `x.bits()`, `z.re()`, `z.abs()` | Explicit lossy or component extraction |
+| Checked `try_from` | `u8::try_from(n)`, `i32::try_from(x)` | Returns `Result<T, String>` |
+
+Bit arrays `[Bit; N]` (`N` = 8, 16, 32, 64) convert to/from `uN` in big-endian reading order via `u8(bits)` and `x.bits()`.
+
+---
+
+## `String` (prelude)
+
+Immutable UTF-8 text with value semantics. Concatenation uses `+`, comparisons use `==` / `!=`.
+
+| Category | Methods / functions |
+| --- | --- |
+| Inspection | `len() -> Int` (bytes), `is_empty() -> Bool`, `contains(pat: String) -> Bool`, `starts_with(pat: String) -> Bool`, `ends_with(pat: String) -> Bool`, `find(pat: String) -> Option<Int>` |
+| Transformation | `trim() -> String`, `replace(from: String, to: String) -> String`, `substring(start: Int, end: Int) -> Option<String>`, `to_uppercase() -> String`, `to_lowercase() -> String`, `repeat(n: Int) -> String` |
+| Split & join | `split(sep: String) -> Vec<String>`, `lines() -> Vec<String>`, `String::join(parts: ref Vec<String>, sep: String) -> String` |
+| Bytes & parsing | `as_bytes() -> Vec<u8>`, `String::from_utf8(bytes: ref Vec<u8>) -> Result<String, String>`, `parse_int() -> Result<Int, String>`, `parse_float() -> Result<Float, String>` |
+
+---
+
+## `Vec<T>` (prelude)
+
+Growable array of classical (non-linear) elements `T`. Affine: moved with `mv`, dropped automatically at scope exit, copied explicitly via `.clone()`.
+
+| Category | Methods / functions |
+| --- | --- |
+| Construction | `Vec::new() -> Vec<T>` (or `Vec::<T>::new()`), `Vec::with_capacity(cap: Int) -> Vec<T>` |
+| Reading (`ref self`) | `len() -> Int`, `is_empty() -> Bool`, `get(i: Int) -> Option<T>`, `v[i] -> T`, `clone() -> Vec<T>`, `==` / `!=` |
+| Mutation (`mut self`) | `push(val: T)`, `pop() -> Option<T>`, `set(i: Int, val: T)`, `v[i] = val`, `clear()`, `extend(other: ref Vec<T>)` |
+
+---
+
+## `Option<T>` and `Result<T, E>` (prelude)
+
+```noev
+enum Option<T> { Some(T), None }
+enum Result<T, E> { Ok(T), Err(E) }
+```
+
+Variants `Some`, `None`, `Ok`, and `Err` are in scope without the enum prefix. Both enums may hold linear values such as `Option<Qubit>`, consumed with `match mv`.
+
+---
+
+## Core traits
+
+- **`Copy`** *(prelude)*: compiler-determined marker for copyable classical types and `ref T`. Never implemented manually.
+- **`Measure`** *(prelude)*: `type Result: Copy; fn measure(mv self) -> Self::Result`. Implemented for `Qubit`, `[T; N]`, and tuples of measurable types; user structs can implement it.
+- **`std::ops`**: `Add`, `Sub`, `Mul`, `Div`, `Rem`, `BitAnd`, `BitOr`, `BitXor`, `Shl`, `Shr`, `Neg`, `BitNot`, plus compound assignments `AddAssign`, `SubAssign`, `MulAssign`, `DivAssign`, `RemAssign`, `BitAndAssign`, `BitOrAssign`, `BitXorAssign`, `ShlAssign`, `ShrAssign` (trailing `Rhs = Self` default).
+- **`std::cmp`**: `Eq<Rhs = Self>` (`eq`, default `ne`) and `Ord<Rhs = Self>` (`lt`, `le`, defaults `gt`, `ge`).
+
+---
+
+## Classical post-processing (`std::fourier`)
+
+```noev
+use std::fourier::{fft, ifft}
+```
+
+| Function | Signature | Notes |
+| --- | --- | --- |
+| `fft` | `fn fft(x: [Complex; N]) -> [Complex; N]` (also `[c32; N]`) | Discrete Fourier transform (`O(N log N)` for powers of two) |
+| `ifft` | `fn ifft(x: [Complex; N]) -> [Complex; N]` (also `[c32; N]`) | Inverse DFT (`ifft(fft(x)) == x`) |
+
+---
+
+## I/O, environment, filesystem, and networking
+
+All operations below are irreversible (`N013` in reversible contexts).
+
+### Output (prelude) & `std::io`
+
+- **Prelude:** `print(a, b, …)` (stdout, space-separated + newline), `eprint(a, b, …)` (stderr). Forbidden inside `sample` blocks and preparations (`N022`).
+- **`std::io`:**
+  - `stdout() -> IoStream`, `stderr() -> IoStream`, `stdin() -> Stdin`
+  - `IoStream`: `lock(ref self) -> IoStream`, `write(ref self, s: String) -> Result<(), String>`, `flush(ref self) -> Result<(), String>`
+  - `Stdin`: `read_line(ref self) -> Result<String, String>`, `read_to_string(ref self) -> Result<String, String>`
+
+### `std::env`
+
+- `var(key: String) -> Option<String>`
+- `args() -> Vec<String>`
+- `current_dir() -> Result<String, String>`
+
+### `std::fs`
+
+- `read_to_string(path: String) -> Result<String, String>`
+- `read(path: String) -> Result<Vec<u8>, String>`
+- `write(path: String, content: String) -> Result<(), String>`
+- `write_bytes(path: String, data: ref Vec<u8>) -> Result<(), String>`
+- `exists(path: String) -> Bool`
+- `create_dir_all(path: String) -> Result<(), String>`
+- `remove_file(path: String) -> Result<(), String>`
+
+### `std::net`
+
+Plain TCP sockets (affine handles):
+
+- `TcpStream`: `TcpStream::connect(addr: String) -> Result<TcpStream, String>`, `read(ref self, max_bytes: Int) -> Result<Vec<u8>, String>`, `read_to_string(ref self) -> Result<String, String>`, `write(ref self, data: ref Vec<u8>) -> Result<Int, String>`, `write_str(ref self, s: String) -> Result<Int, String>`, `flush(ref self) -> Result<(), String>`, `shutdown(ref self) -> Result<(), String>`, `close(mv self)`
+- `TcpListener`: `TcpListener::bind(addr: String) -> Result<TcpListener, String>`, `local_addr(ref self) -> Result<String, String>`, `accept(ref self) -> Result<TcpStream, String>`, `close(mv self)`

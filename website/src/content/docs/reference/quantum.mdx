@@ -1,0 +1,117 @@
+---
+title: Quantum API Reference
+description: Complete reference for Qubit gates, unitary matrices, measurement, observables, sampling, distributions, state inspection, and backends.
+---
+
+All core gates, measurements, Pauli observables, `Basis`, `discard`, `measure_in`, and `Distribution` are in the **prelude** (no `use` required). Other items note their `std::` module.
+
+## Qubit gates (prelude)
+
+All gates are methods on `Qubit` taking `mut self -> mut Self` for chaining (`q.h().s().ry(t)`) and also free functions (`h(q)`, `ry(q, t)`, `swap(a, b)`) returning `()`. Every gate is reversible (valid in `rev fn`, `ctrl`, `with`, and `adj`).
+
+| Method | Free function | Operation |
+| --- | --- | --- |
+| `q.x()` | `x(q)` | Pauli X |
+| `q.y()` | `y(q)` | Pauli Y |
+| `q.z()` | `z(q)` | Pauli Z |
+| `q.h()` | `h(q)` | Hadamard |
+| `q.s()` | `s(q)` | Phase gate `S = √Z` (`adj q.s()` for `S†`) |
+| `q.t()` | `t(q)` | π/8 gate `T = ⁴√Z` (`adj q.t()` for `T†`) |
+| `q.rx(theta)` | `rx(q, theta)` | `exp(−iθX/2)` |
+| `q.ry(theta)` | `ry(q, theta)` | `exp(−iθY/2)` |
+| `q.rz(theta)` | `rz(q, theta)` | `exp(−iθZ/2)` |
+| `q.p(lambda)` | `p(q, lambda)` | Phase `diag(1, e^(iλ))` |
+| `q.u(theta, phi, lambda)` | `u(q, theta, phi, lambda)` | Universal 1-qubit OpenQASM `U` gate |
+| `a.swap(b)` | `swap(a, b)` | Swap two qubits |
+| `q.unitary(m)` | `unitary(q, m)` | Arbitrary 1-qubit unitary `m: [[Complex; 2]; 2]` |
+| `r.unitary(m)` | `unitary(r, m)` | Arbitrary N-qubit unitary on `r: [Qubit; N]` with `m: [[Complex; 2^N]; 2^N]` |
+
+Controlled and inverse gates use language constructs rather than separate gate names:
+
+- **Controlled:** `ctrl a { b.x() }` (CNOT), `ctrl a, b { c.x() }` (Toffoli), `ctrl a { f(b) }`
+- **Adjoint:** `adj q.s()`, `adj q.t()`, `adj f(r)`
+- **Inline OpenQASM:** `unsafe { qasm("…", q0, q1) }` (irreversible, `N013`)
+
+## Measurement, reset, and release
+
+All measurement and reset operations are irreversible (`N013` in reversible contexts).
+
+| Call | Receiver / arg | Return | Notes |
+| --- | --- | --- | --- |
+| `mv q.measure()` | `mv self: Qubit` | `Bit` | Measure in Z basis, consuming `q` |
+| `mv r.measure()` | `mv self: [Qubit; N]` | `[Bit; N]` | Measure every qubit in Z basis (via `Measure` trait) |
+| `mv q.measure_in(basis)` | `mv self`, `basis: Basis` | `Bit` / `[Bit; N]` | Measure in `Basis::X`, `Basis::Y`, or `Basis::Z` (`0` = +1, `1` = −1) |
+| `<s\| mv q` / `<prep()\| mv r` | Consumes `q` / `r` | `Bool` | Measurement test against basis labels or a reversible preparation |
+| `q.reset()` | `mut self: Qubit` | `mut Self` | Reset to `\|0>`; qubit remains live (and can auto-release if untouched) |
+| `mv q.discard()` | `mv self: Qubit` | `()` | Safe cleanup: resets then releases `q` (also `discard(mv q)`) |
+| `unsafe { mv q.release() }` | `mv self: Qubit` | `()` | Release without reset, trusting `q` is in `\|0>` (checked by simulators) |
+
+### `Basis` (prelude) and `State` (`std::state`)
+
+```noev
+enum Basis { X, Y, Z }                                    // prelude
+enum State { Zero, One, Plus, Minus, PlusI, MinusI }      // use std::state::State
+```
+
+`State` values can be used inside computed ket/bra labels: `|{s}>` and `<{s}| mv q`.
+
+## Observables, expectations, and amplitudes
+
+### Building observables
+
+| Function / operator | Module | Meaning |
+| --- | --- | --- |
+| `X(i: Int) -> Observable` | prelude | Pauli X on qubit index `i` |
+| `Y(i: Int) -> Observable` | prelude | Pauli Y on qubit index `i` |
+| `Z(i: Int) -> Observable` | prelude | Pauli Z on qubit index `i` |
+| `I() -> Observable` | prelude | Identity observable (for constant offsets) |
+| `P(i: Int, b: Bit) -> Observable` | `std::observables` | Z-basis projector onto `\|0>` (`b == 0`) or `\|1>` (`b == 1`) |
+| `PX(i: Int, b: Bit) -> Observable` | `std::observables` | X-basis projector onto `\|+>` (`b == 0`) or `\|->` (`b == 1`) |
+| `a + b`, `a - b`, `-a`, `c * a`, `a * b` | operators | Linear combinations and products on disjoint qubit indices |
+
+### Bra-ket evaluation forms
+
+| Expression | Return type | Meaning |
+| --- | --- | --- |
+| `<ψ\| H \|ψ>` | `Float` | Expectation value ⟨ψ\|H\|ψ⟩ (default standard error `0.01`) |
+| `<ψ\| H \|ψ> within ε` | `Float` | Expectation value with standard error at most `ε: Float` |
+| `<φ\|ψ>` | `Complex` | State overlap / amplitude ⟨φ\|ψ⟩ |
+| `<φ\| H \|ψ>` | `Complex` | Transition element ⟨φ\|H\|ψ⟩ |
+
+Exact on simulators when the preparation contains no measurement; estimated by Pauli grouping or Hadamard tests on shot-based backends.
+
+## Sampling and `Distribution<T>` (prelude)
+
+```noev
+let d: Distribution<(Bit, Bit)> = sample 1000 { bell_pair() }
+```
+
+If the block returns qubits, they are measured in the Z basis automatically at the end of each shot.
+
+| Method | Return type | Description |
+| --- | --- | --- |
+| `d.shots()` | `Int` | Total number of shots recorded |
+| `d.count(x: T)` | `Int` | Number of shots that produced `x` |
+| `d.probability(x: T)` | `Float` | `Float(count(x)) / Float(shots())` |
+| `d.most_likely()` | `T` | Most frequent outcome (smallest on ties) |
+
+## State inspection (`std::debug`)
+
+```noev
+use std::debug::amplitudes
+
+let amps = amplitudes(r)    // [Complex; 2^N] for Qubit or [Qubit; N] (N <= 20)
+```
+
+- Lends `r` without modifying it.
+- Basis states are ordered left-to-right (`|00>`, `|01>`, `|10>`, `|11>`).
+- Requires a target with `read_state = true` (rejected at compile time on hardware targets). Runtime error if `r` is entangled with external qubits.
+
+## Backend interface (`std::backend`)
+
+Import with `use std::backend::{Backend, Circuit, Target, ...}` to implement custom backends in Noev:
+
+- **Trait:** `Backend` (`target`, `run`, `session`)
+- **Types:** `Target`, `Level`, `Capabilities`, `Circuit`, `Instruction`, `Op`, `GateKind`, `Shots`, `ShotCount`, `BackendError`
+
+See [Runtime and Backends](../../spec/runtime/) for full struct definitions and the C plug-in header `include/noev_backend.h`.

@@ -63,6 +63,9 @@ export default defineConfig({
         {
           label: 'Reference',
           items: [
+            { label: 'Syntax and Features', slug: 'reference/syntax' },
+            { label: 'Quantum API', slug: 'reference/quantum' },
+            { label: 'Standard Library', slug: 'reference/stdlib' },
             { label: 'Error Index (N001–N024)', slug: 'reference/errors' },
             { label: 'CLI Reference', slug: 'reference/cli' },
           ],
