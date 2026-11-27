@@ -1,6 +1,6 @@
 //! Lowering [`noev_ir::Program`] into Cranelift IR and native object code.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::mem::{align_of, offset_of, size_of};
 
 use cranelift_codegen::Context;
@@ -15,48 +15,28 @@ use cranelift_module::{DataId, FuncId as ClifFuncId, Linkage, Module};
 use cranelift_object::ObjectModule;
 use noev_ir::Program;
 use noev_ir::ir::{
-    Align, BinOp, Block, Const, FormatKind, FormatPart, FuncId, Function, Local, Operand, Place,
-    Prep, Proj, Rvalue, Stmt, Terminator, UnOp,
+    Align, BinOp, Block, Const, FormatKind, FormatPart, FuncId, Function, Operand, Place, Prep,
+    Proj, Rvalue, Stmt, Terminator, UnOp,
 };
 use noev_runtime::cabi_compiled::{NoevFormatPart, NoevPrintArg};
 use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli};
 use noev_sema::{Ty, TyKind};
 
 use crate::CodegenError;
-use crate::layout::LayoutCache;
+use crate::analysis::{PlaceKey, analyze_enum_variants, collect_thunks, const_ty, has_feedback};
+use crate::layout::{LayoutCache, ScalarKind};
 use crate::rodata::Rodata;
 use crate::runtime::RuntimeImports;
 
-/// Hashable key for a [`Place`] used in enum-variant dataflow analysis.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct PlaceKey {
-    local: Local,
-    proj: Vec<ProjKey>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum ProjKey {
-    Deref,
-    Field(u32),
-    IndexConst(i64),
-    IndexOther,
-}
-
-impl PlaceKey {
-    fn from_place(p: &Place) -> Self {
-        Self {
-            local: p.local,
-            proj: p
-                .proj
-                .iter()
-                .map(|step| match step {
-                    Proj::Deref => ProjKey::Deref,
-                    Proj::Field(i) => ProjKey::Field(*i),
-                    Proj::Index(Operand::Const(Const::Int(k))) => ProjKey::IndexConst(*k),
-                    Proj::Index(_) => ProjKey::IndexOther,
-                })
-                .collect(),
-        }
+fn scalar_clif(kind: ScalarKind, ptr_ty: ClifType) -> ClifType {
+    match kind {
+        ScalarKind::I8 => types::I8,
+        ScalarKind::I16 => types::I16,
+        ScalarKind::I32 => types::I32,
+        ScalarKind::I64 => types::I64,
+        ScalarKind::Ptr => ptr_ty,
+        ScalarKind::F32 => types::F32,
+        ScalarKind::F64 => types::F64,
     }
 }
 
@@ -68,7 +48,7 @@ const MAX_INLINE_INT: i64 = (1i64 << 62) - 1;
 pub fn compile_program(module: &mut ObjectModule, program: &Program) -> Result<(), CodegenError> {
     let ptr_ty = module.target_config().pointer_type();
     let ptr_bytes = u32::from(module.target_config().pointer_bytes());
-    let mut layouts = LayoutCache::new(program, ptr_ty, ptr_bytes);
+    let mut layouts = LayoutCache::new(program, ptr_bytes);
     let mut rodata = Rodata::new();
     let mut rt_imports = RuntimeImports::new(ptr_ty);
 
@@ -83,39 +63,8 @@ pub fn compile_program(module: &mut ObjectModule, program: &Program) -> Result<(
 
     // 2. Collect which IR functions need `NoevCompiledFn` thunks (`sample`, `Expectation`,
     //    `Overlap`, `Undo`).
-    let mut thunk_set: HashSet<FuncId> = HashSet::new();
-    for func in &program.functions {
-        for block in &func.blocks {
-            for stmt in &block.stmts {
-                match stmt {
-                    Stmt::Sample { func: f, .. } => {
-                        thunk_set.insert(*f);
-                    }
-                    Stmt::Expectation {
-                        prep: Prep::Call(f, _),
-                        ..
-                    } => {
-                        thunk_set.insert(*f);
-                    }
-                    Stmt::Overlap { bra, ket, .. } => {
-                        if let Prep::Call(f, _) = bra {
-                            thunk_set.insert(*f);
-                        }
-                        if let Prep::Call(f, _) = ket {
-                            thunk_set.insert(*f);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if let Terminator::Undo { func: f, .. } = &block.term {
-                thunk_set.insert(*f);
-            }
-        }
-    }
+    let thunk_list = collect_thunks(program);
     let mut thunk_ids: HashMap<FuncId, ClifFuncId> = HashMap::new();
-    let mut thunk_list: Vec<FuncId> = thunk_set.into_iter().collect();
-    thunk_list.sort_unstable();
     for fid in &thunk_list {
         let mut sig = Signature::new(module.isa().default_call_conv());
         sig.params.push(AbiParam::new(ptr_ty)); // rt
@@ -211,8 +160,8 @@ fn fn_signature(
         if l.size == 0 {
             continue;
         }
-        if let Some(clif) = l.scalar {
-            sig.params.push(AbiParam::new(clif));
+        if let Some(sk) = l.scalar {
+            sig.params.push(AbiParam::new(scalar_clif(sk, ptr_ty)));
         } else {
             sig.params.push(AbiParam::new(ptr_ty));
         }
@@ -270,8 +219,10 @@ fn compile_thunk(
         } else {
             b.ins().iadd_imm_s(args_buf, i64::from(off))
         };
-        if let Some(clif) = l.scalar {
-            let val = b.ins().load(clif, MemFlagsData::new(), ptr, 0);
+        if let Some(sk) = l.scalar {
+            let val = b
+                .ins()
+                .load(scalar_clif(sk, ptr_ty), MemFlagsData::new(), ptr, 0);
             call_args.push(val);
         } else {
             call_args.push(ptr);
@@ -357,207 +308,6 @@ fn compile_main(
 
     module.define_function(main_id, ctx)?;
     Ok(())
-}
-
-/// Checks whether `func` (or any function it calls) contains measurement-dependent control flow
-/// (`Branch { control: Some(_) }` or a dynamic `Bit` label in `Prepare`), which requires
-/// shot-by-shot execution rather than static circuit recording.
-fn has_feedback(program: &Program, root: FuncId) -> bool {
-    let mut visited = HashSet::new();
-    let mut queue = VecDeque::new();
-    queue.push_back(root);
-    visited.insert(root);
-    while let Some(fid) = queue.pop_front() {
-        let func = &program.functions[fid.index()];
-        for block in &func.blocks {
-            for stmt in &block.stmts {
-                if let Stmt::Prepare { label, .. } = stmt {
-                    let is_const = matches!(label, Operand::Const(_));
-                    if !is_const && operand_ty(program, func, label) == Ty::BIT {
-                        return true;
-                    }
-                }
-            }
-            match &block.term {
-                Terminator::Branch {
-                    control: Some(_), ..
-                } => return true,
-                Terminator::Call { func: callee, .. } if visited.insert(*callee) => {
-                    queue.push_back(*callee);
-                }
-                _ => {}
-            }
-        }
-    }
-    false
-}
-
-/// Forward dataflow pass per function: infers which enum variant a [`PlaceKey`] is known to hold
-/// in each basic block (from `tag = Tag(place); cond = (tag == K); Branch(cond, then, else)`).
-fn analyze_enum_variants(func: &Function) -> Vec<HashMap<PlaceKey, u32>> {
-    let n = func.blocks.len();
-    let mut in_facts: Vec<Option<HashMap<PlaceKey, u32>>> = vec![None; n];
-    if n == 0 {
-        return Vec::new();
-    }
-    in_facts[0] = Some(HashMap::new());
-    let mut queue = VecDeque::new();
-    queue.push_back(0usize);
-
-    while let Some(bi) = queue.pop_front() {
-        let mut facts = in_facts[bi].clone().unwrap_or_default();
-        let mut tag_of: HashMap<Local, PlaceKey> = HashMap::new();
-        let mut cond_fact: HashMap<Local, (PlaceKey, u32)> = HashMap::new();
-        let block = &func.blocks[bi];
-
-        for stmt in &block.stmts {
-            if let Stmt::Assign(dest, rv) = stmt {
-                // Any reassignment invalidates old facts about `dest`.
-                facts.retain(|p, _| p.local != dest.local);
-                if dest.proj.is_empty() {
-                    tag_of.remove(&dest.local);
-                    cond_fact.remove(&dest.local);
-                    match rv {
-                        Rvalue::Tag(Operand::Copy(p) | Operand::Move(p)) => {
-                            tag_of.insert(dest.local, PlaceKey::from_place(p));
-                        }
-                        Rvalue::Binary(BinOp::Eq, a, b) => {
-                            let matched = match (a, b) {
-                                (
-                                    Operand::Copy(p) | Operand::Move(p),
-                                    Operand::Const(Const::Int(k)),
-                                )
-                                | (
-                                    Operand::Const(Const::Int(k)),
-                                    Operand::Copy(p) | Operand::Move(p),
-                                ) if p.proj.is_empty() && *k >= 0 => {
-                                    tag_of.get(&p.local).map(|src| (src.clone(), *k as u32))
-                                }
-                                _ => None,
-                            };
-                            if let Some(pair) = matched {
-                                cond_fact.insert(dest.local, pair);
-                            }
-                        }
-                        Rvalue::Variant(v, _) => {
-                            facts.insert(PlaceKey::from_place(dest), *v);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        let mut push_edge = |target: usize, edge_facts: HashMap<PlaceKey, u32>| {
-            let changed = match &mut in_facts[target] {
-                None => {
-                    in_facts[target] = Some(edge_facts);
-                    true
-                }
-                Some(existing) => {
-                    let old_len = existing.len();
-                    existing.retain(|k, v| edge_facts.get(k) == Some(v));
-                    existing.len() != old_len
-                }
-            };
-            if changed {
-                queue.push_back(target);
-            }
-        };
-
-        match &block.term {
-            Terminator::Goto(next)
-            | Terminator::Call { next, .. }
-            | Terminator::Undo { next, .. }
-            | Terminator::Assert { next, .. } => {
-                push_edge(next.index(), facts);
-            }
-            Terminator::Branch {
-                cond,
-                then,
-                otherwise,
-                ..
-            } => {
-                let mut then_facts = facts.clone();
-                if let Operand::Copy(p) | Operand::Move(p) = cond
-                    && p.proj.is_empty()
-                    && let Some((enum_place, v)) = cond_fact.get(&p.local)
-                {
-                    then_facts.insert(enum_place.clone(), *v);
-                }
-                push_edge(then.index(), then_facts);
-                push_edge(otherwise.index(), facts);
-            }
-            Terminator::Return | Terminator::Unreachable => {}
-        }
-    }
-
-    in_facts
-        .into_iter()
-        .map(Option::unwrap_or_default)
-        .collect()
-}
-
-/// Computes the type of an [`Operand`] in `func` (not needing enum variant resolution for
-/// non-enum projections).
-fn operand_ty(program: &Program, func: &Function, op: &Operand) -> Ty {
-    match op {
-        Operand::Copy(p) | Operand::Move(p) => {
-            let mut ty = func.locals[p.local.index()].ty;
-            for proj in &p.proj {
-                ty = match proj {
-                    Proj::Deref => match program.types.kind(ty) {
-                        TyKind::Ref { inner, .. } => *inner,
-                        _ => ty,
-                    },
-                    Proj::Field(i) => match program.types.kind(ty) {
-                        TyKind::Tuple(elems) => elems[*i as usize],
-                        TyKind::Struct(sid) => {
-                            let def = &program.types.structs[sid.index()];
-                            if let Some(variants) = &def.variants {
-                                variants
-                                    .iter()
-                                    .find_map(|v| v.data.get(*i as usize).copied())
-                                    .unwrap_or(Ty::UNIT)
-                            } else {
-                                def.fields[*i as usize].1
-                            }
-                        }
-                        _ => Ty::UNIT,
-                    },
-                    Proj::Index(_) => match program.types.kind(ty) {
-                        TyKind::Array(elem, _) => *elem,
-                        _ => Ty::UNIT,
-                    },
-                };
-            }
-            ty
-        }
-        Operand::Const(c) => const_ty(*c),
-    }
-}
-
-fn const_ty(c: Const) -> Ty {
-    match c {
-        Const::Unit => Ty::UNIT,
-        Const::Int(_) => Ty::INT,
-        Const::Sized(_, w) => match (w.bits, w.signed) {
-            (8, true) => Ty::I8,
-            (16, true) => Ty::I16,
-            (32, true) => Ty::I32,
-            (64, true) => Ty::I64,
-            (8, false) => Ty::U8,
-            (16, false) => Ty::U16,
-            (32, false) => Ty::U32,
-            _ => Ty::U64,
-        },
-        Const::Float(_) => Ty::FLOAT,
-        Const::F32(_) => Ty::F32,
-        Const::Complex(..) => Ty::COMPLEX,
-        Const::C32(..) => Ty::C32,
-        Const::Bool(_) => Ty::BOOL,
-        Const::Bit(_) => Ty::BIT,
-    }
 }
 
 struct FnLowerer<'a, 'b, 'p> {
@@ -890,9 +640,10 @@ impl<'a, 'b, 'p> FnLowerer<'a, 'b, 'p> {
             Operand::Copy(p) | Operand::Move(p) => {
                 let (addr, ty) = self.place_addr(p)?;
                 let l = self.layouts.layout(ty);
-                let clif = l.scalar.ok_or_else(|| {
+                let sk = l.scalar.ok_or_else(|| {
                     CodegenError(format!("expected scalar operand, got {:?}", ty))
                 })?;
+                let clif = scalar_clif(sk, self.ptr_ty);
                 let ptr = addr.expect("scalar has address");
                 Ok(self.builder.ins().load(clif, MemFlagsData::new(), ptr, 0))
             }

@@ -6,10 +6,10 @@ to a **quantum backend**: a simulator such as ketrs, or a quantum computer's con
 The program does not depend on which backend it runs on.
 
 Status: the backend interface (§3), the runtime C ABI (§4), the interpreter (`noev run`, §6),
-the Cranelift code generator (`noev build --emit=object|binary`, §2, §7, behind the optional
-`cranelift` feature), and QIR 1.0 export (`noev build --emit=qir` and `noev export --format=qir`,
-§4, §7) are implemented, with ketrs and export as backends. LLVM and target descriptions (§5)
-are still design.
+the Cranelift and LLVM code generators (`noev build --codegen=cranelift|llvm`, §2, §7, behind
+optional `cranelift` and `llvm` features, with `--qir-runtime` for linking to QIR runtimes),
+and QIR 1.0 export (`noev build --emit=qir` and `noev export --format=qir`, §4, §7) are
+implemented, with ketrs and export as backends. Target descriptions (§5) are still design.
 
 ```
 program.nv ─▶ front end ─▶ Noev IR ─┬─▶ code generator ─▶ native object ─┐
@@ -283,14 +283,18 @@ outcome; the repeated runs it starts are computed once, while recording. `noev e
 | --------- | ------------------------------------------------------------------------- |
 | `binary`  | An executable linked to the runtime and a backend (the default)           |
 | `object`  | A native object file, to link yourself                                    |
+| `llvm-ir` | Full-program LLVM IR text (`.ll`) from the LLVM code generator            |
 | `qir`     | QIR                                                                       |
 | `ir`      | Noev IR, for inspecting the compiler                                      |
 | `plan`    | How each repeated run executes ([execution.md](execution.md) §5)          |
 
-`binary` (the default) and `object` are produced by Cranelift (behind the optional `cranelift`
-feature, on by default). `qir` emits QIR 1.0 LLVM IR text (`.ll`) with Base Profile for
-circuits and Adaptive Profile for mid-circuit measurement, reset, and classical control;
-`noev export --format=qir` saves one `.ll` file per circuit.
+`binary` (the default) and `object` are produced by Cranelift (`--codegen=cranelift`, default)
+or LLVM (`--codegen=llvm`, `-O2`), each behind its own optional Cargo feature (both on by
+default). Passing `--qir-runtime` with `--codegen=llvm` emits calls to QIR's runtime symbols
+(`__quantum__qis__*`, `__quantum__rt__*`) for linking against external QIR runtimes. `qir`
+emits QIR 1.0 LLVM IR text (`.ll`) with Base Profile for circuits and Adaptive Profile for
+mid-circuit measurement, reset, and classical control; `noev export --format=qir` saves one
+`.ll` file per circuit.
 
 ### Saving circuits
 

@@ -1,7 +1,8 @@
-//! Cranelift native codegen throughput benchmark.
+//! Cranelift & LLVM native codegen throughput benchmark.
 #![allow(missing_docs)]
 
 use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use noev_codegen::{CodeGenerator, CodegenOptions, OptLevel};
 
 fn lower_source(source: &str) -> noev_ir::Program {
     let sources = noev_syntax::SourceMap::single("bench.nv", source);
@@ -53,11 +54,46 @@ fn bench_codegen(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("codegen");
     group.throughput(Throughput::Elements(fn_count));
+    #[cfg(feature = "cranelift")]
     group.bench_function("cranelift_100_fns", |b| {
         b.iter_batched(
             || &program,
             |prog| {
-                let obj = noev_codegen::emit_object(prog).expect("emit_object");
+                let obj = noev_codegen::CraneliftCodegen
+                    .emit_object(prog, CodegenOptions::default())
+                    .expect("cranelift emit_object");
+                black_box(obj.len())
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    #[cfg(feature = "llvm")]
+    group.bench_function("llvm_ir_100_fns", |b| {
+        b.iter_batched(
+            || &program,
+            |prog| {
+                let ir = noev_codegen::llvm::LlvmCodegen
+                    .emit_llvm_ir(prog, CodegenOptions::default())
+                    .expect("llvm emit_llvm_ir");
+                black_box(ir.len())
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    #[cfg(feature = "llvm")]
+    group.bench_function("llvm_O2_obj_100_fns", |b| {
+        b.iter_batched(
+            || &program,
+            |prog| {
+                let obj = noev_codegen::llvm::LlvmCodegen
+                    .emit_object(
+                        prog,
+                        CodegenOptions {
+                            opt: OptLevel::Speed,
+                            ..CodegenOptions::default()
+                        },
+                    )
+                    .expect("llvm emit_object");
                 black_box(obj.len())
             },
             BatchSize::SmallInput,

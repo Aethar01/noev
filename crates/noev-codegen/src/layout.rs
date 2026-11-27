@@ -1,11 +1,29 @@
-//! Memory layout for concrete Noev types in native compiled code.
+//! Target-independent memory layout for concrete Noev types in native compiled code,
+//! shared by both Cranelift and LLVM code generators.
 
 use std::collections::HashMap;
 
-use cranelift_codegen::ir::Type as ClifType;
-use cranelift_codegen::ir::types;
 use noev_ir::Program;
 use noev_sema::{Ty, TyKind};
+
+/// Register-sized scalar representation of a concrete Noev type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarKind {
+    /// 8-bit integer (`Bool`, `Bit`, `i8`, `u8`).
+    I8,
+    /// 16-bit integer (`i16`, `u16`).
+    I16,
+    /// 32-bit integer (`i32`, `u32`).
+    I32,
+    /// 64-bit integer (`i64`, `u64`, tagged `Int`, `String`, `Observable`, `Distribution`).
+    I64,
+    /// Native pointer (`Qubit` handle, `ref T`, `mut T`).
+    Ptr,
+    /// 32-bit IEEE 754 float (`f32`).
+    F32,
+    /// 64-bit IEEE 754 float (`Float` / `f64`).
+    F64,
+}
 
 /// Computed memory layout for one concrete [`Ty`].
 #[derive(Clone, Debug)]
@@ -14,10 +32,10 @@ pub struct TypeLayout {
     pub size: u32,
     /// Byte alignment (power of two, >= 1).
     pub align: u32,
-    /// Cranelift SSA register type when this value fits in a single register (`None` for
+    /// Scalar register kind when this value fits in a single register (`None` for
     /// aggregates like `Complex`, `c32`, tuples, arrays, structs, enums, and ZSTs).
-    pub scalar: Option<ClifType>,
-    /// For `Tuple` and `Struct` (non-enum): byte offset of each field.
+    pub scalar: Option<ScalarKind>,
+    /// For `Tuple`, `Complex`, `c32`, and `Struct` (non-enum): byte offset of each field.
     pub fields: Vec<u32>,
     /// For `Enum`: for each variant, byte offsets of its payload fields (from enum base).
     pub enum_variants: Vec<Vec<u32>>,
@@ -26,17 +44,15 @@ pub struct TypeLayout {
 /// Cache of [`TypeLayout`]s for a [`Program`].
 pub struct LayoutCache<'p> {
     program: &'p Program,
-    ptr_ty: ClifType,
     ptr_bytes: u32,
     cache: HashMap<Ty, TypeLayout>,
 }
 
 impl<'p> LayoutCache<'p> {
-    /// Creates a new layout cache for `program` targeting pointers of `ptr_ty` (`ptr_bytes` wide).
-    pub fn new(program: &'p Program, ptr_ty: ClifType, ptr_bytes: u32) -> Self {
+    /// Creates a new layout cache for `program` targeting pointers of `ptr_bytes` width.
+    pub fn new(program: &'p Program, ptr_bytes: u32) -> Self {
         Self {
             program,
-            ptr_ty,
             ptr_bytes,
             cache: HashMap::new(),
         }
@@ -52,7 +68,8 @@ impl<'p> LayoutCache<'p> {
         computed
     }
 
-    /// Returns the alignment shift (`log2(align)`) for Cranelift `StackSlotData`.
+    /// Returns the alignment shift (`log2(align)`) for stack-slot alignment.
+    #[cfg(feature = "cranelift")]
     pub fn align_shift(align: u32) -> u8 {
         align.max(1).trailing_zeros() as u8
     }
@@ -112,11 +129,10 @@ impl<'p> LayoutCache<'p> {
 
     fn compute(&mut self, ty: Ty) -> TypeLayout {
         let ptr_b = self.ptr_bytes;
-        let ptr_t = self.ptr_ty;
-        let scalar = |size: u32, align: u32, clif: ClifType| TypeLayout {
+        let scalar = |size: u32, align: u32, kind: ScalarKind| TypeLayout {
             size,
             align,
-            scalar: Some(clif),
+            scalar: Some(kind),
             fields: Vec::new(),
             enum_variants: Vec::new(),
         };
@@ -128,18 +144,18 @@ impl<'p> LayoutCache<'p> {
                 fields: Vec::new(),
                 enum_variants: Vec::new(),
             },
-            TyKind::Bool | TyKind::Bit | TyKind::I8 | TyKind::U8 => scalar(1, 1, types::I8),
-            TyKind::I16 | TyKind::U16 => scalar(2, 2, types::I16),
-            TyKind::I32 | TyKind::U32 => scalar(4, 4, types::I32),
+            TyKind::Bool | TyKind::Bit | TyKind::I8 | TyKind::U8 => scalar(1, 1, ScalarKind::I8),
+            TyKind::I16 | TyKind::U16 => scalar(2, 2, ScalarKind::I16),
+            TyKind::I32 | TyKind::U32 => scalar(4, 4, ScalarKind::I32),
             TyKind::I64
             | TyKind::U64
             | TyKind::Int
             | TyKind::String
             | TyKind::Observable
-            | TyKind::Distribution(_) => scalar(8, 8, types::I64),
-            TyKind::Qubit | TyKind::Ref { .. } => scalar(ptr_b, ptr_b, ptr_t),
-            TyKind::F32 => scalar(4, 4, types::F32),
-            TyKind::Float => scalar(8, 8, types::F64),
+            | TyKind::Distribution(_) => scalar(8, 8, ScalarKind::I64),
+            TyKind::Qubit | TyKind::Ref { .. } => scalar(ptr_b, ptr_b, ScalarKind::Ptr),
+            TyKind::F32 => scalar(4, 4, ScalarKind::F32),
+            TyKind::Float => scalar(8, 8, ScalarKind::F64),
             TyKind::Complex => TypeLayout {
                 size: 16,
                 align: 8,

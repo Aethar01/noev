@@ -53,7 +53,16 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Emit::Binary)]
         emit: Emit,
 
-        /// Where to write the output (default: file stem for binary/object, stdout for ir/plan)
+        /// Native code generator to use for `binary`, `object`, and `llvm-ir`
+        #[arg(long, value_enum)]
+        codegen: Option<CodegenChoice>,
+
+        /// Emit QIR runtime calls (`__quantum__qis__*`, `__quantum__rt__*`) instead of Noev's
+        /// runtime C ABI (LLVM code generator only)
+        #[arg(long)]
+        qir_runtime: bool,
+
+        /// Where to write the output (default: file stem for binary/object, stdout for ir/plan/qir/llvm-ir)
         #[arg(short, long, value_name = "PATH")]
         output: Option<PathBuf>,
 
@@ -139,6 +148,14 @@ enum MessageFormat {
     Short,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CodegenChoice {
+    /// Pure-Rust Cranelift code generator (fast compile times, default)
+    Cranelift,
+    /// LLVM code generator (optimised native code, optional QIR runtime calls)
+    Llvm,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum Emit {
     /// Noev's intermediate representation, for inspecting the compiler
@@ -149,9 +166,11 @@ enum Emit {
     /// QIR 1.0 (LLVM IR text, `.ll`): base profile for circuits, adaptive profile for
     /// classical control
     Qir,
-    /// A native object file (`.o`) produced by Cranelift
+    /// Full-program LLVM IR text (`.ll`) produced by the LLVM code generator
+    LlvmIr,
+    /// A native object file (`.o`)
     Object,
-    /// A standalone native executable compiled by Cranelift and linked with the runtime
+    /// A standalone native executable linked with the runtime
     Binary,
 }
 
@@ -171,9 +190,18 @@ fn main() -> ExitCode {
         Command::Build {
             file,
             emit,
+            codegen,
+            qir_runtime,
             output,
             messages,
-        } => build(&file, emit, output.as_deref(), messages.message_format),
+        } => build(
+            &file,
+            emit,
+            codegen,
+            qir_runtime,
+            output.as_deref(),
+            messages.message_format,
+        ),
         Command::Run {
             file,
             seed,
@@ -269,7 +297,14 @@ fn front_end(file: &Path, format: MessageFormat) -> Result<Checked, ExitCode> {
 
 /// Compiles `file` and writes the requested output to `output`, or to stdout (or a default file
 /// name for `--emit=object` and `--emit=binary`).
-fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) -> ExitCode {
+fn build(
+    file: &Path,
+    emit: Emit,
+    codegen: Option<CodegenChoice>,
+    qir_runtime: bool,
+    output: Option<&Path>,
+    format: MessageFormat,
+) -> ExitCode {
     let checked = match front_end(file, format) {
         Ok(checked) => checked,
         Err(code) => return code,
@@ -302,8 +337,9 @@ fn build(file: &Path, emit: Emit, output: Option<&Path>, format: MessageFormat) 
             }
         }
         Emit::Qir => build_qir(file, &checked, &program, output, format),
-        Emit::Object => build_object(file, &program, output),
-        Emit::Binary => build_binary(file, &program, output),
+        Emit::LlvmIr => build_llvm_ir(&program, qir_runtime, output),
+        Emit::Object => build_object(file, &program, codegen, qir_runtime, output),
+        Emit::Binary => build_binary(file, &program, codegen, qir_runtime, output),
     }
 }
 
@@ -359,7 +395,7 @@ fn build_qir(
 }
 
 /// Default output filename when `-o` is omitted for `--emit=object` or `--emit=binary`.
-#[cfg(feature = "cranelift")]
+#[cfg(any(feature = "cranelift", feature = "llvm"))]
 fn default_artifact_path(file: &Path, ext: Option<&str>) -> PathBuf {
     let stem = file
         .file_stem()
@@ -373,7 +409,7 @@ fn default_artifact_path(file: &Path, ext: Option<&str>) -> PathBuf {
 }
 
 /// Locates `libnoev_runtime.a` for linking standalone native binaries.
-#[cfg(feature = "cranelift")]
+#[cfg(any(feature = "cranelift", feature = "llvm"))]
 fn find_runtime_lib() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("NOEV_RUNTIME_LIB") {
         let p = PathBuf::from(path);
@@ -399,12 +435,110 @@ fn find_runtime_lib() -> Option<PathBuf> {
     .find(|candidate| candidate.is_file())
 }
 
-#[cfg(feature = "cranelift")]
-fn build_object(file: &Path, program: &noev_ir::Program, output: Option<&Path>) -> ExitCode {
+#[cfg(any(feature = "cranelift", feature = "llvm"))]
+fn select_codegen(
+    choice: Option<CodegenChoice>,
+    qir_runtime: bool,
+) -> Result<&'static dyn noev_codegen::CodeGenerator, ExitCode> {
+    let chosen = choice.unwrap_or(if qir_runtime {
+        CodegenChoice::Llvm
+    } else if cfg!(feature = "cranelift") {
+        CodegenChoice::Cranelift
+    } else {
+        CodegenChoice::Llvm
+    });
+    match chosen {
+        CodegenChoice::Cranelift => {
+            #[cfg(feature = "cranelift")]
+            {
+                Ok(&noev_codegen::CraneliftCodegen)
+            }
+            #[cfg(not(feature = "cranelift"))]
+            {
+                anstream::eprintln!(
+                    "{ERROR}error:{ERROR:#} `noev` was built without the `cranelift` feature"
+                );
+                Err(ExitCode::from(2))
+            }
+        }
+        CodegenChoice::Llvm => {
+            #[cfg(feature = "llvm")]
+            {
+                Ok(&noev_codegen::llvm::LlvmCodegen)
+            }
+            #[cfg(not(feature = "llvm"))]
+            {
+                anstream::eprintln!(
+                    "{ERROR}error:{ERROR:#} `noev` was built without the `llvm` feature"
+                );
+                Err(ExitCode::from(2))
+            }
+        }
+    }
+}
+
+#[cfg(any(feature = "cranelift", feature = "llvm"))]
+fn codegen_options(qir_runtime: bool) -> noev_codegen::CodegenOptions {
+    noev_codegen::CodegenOptions {
+        opt: noev_codegen::OptLevel::Speed,
+        runtime_abi: if qir_runtime {
+            noev_codegen::RuntimeAbi::Qir
+        } else {
+            noev_codegen::RuntimeAbi::Noev
+        },
+    }
+}
+
+#[cfg(feature = "llvm")]
+fn build_llvm_ir(program: &noev_ir::Program, qir_runtime: bool, output: Option<&Path>) -> ExitCode {
+    let opts = codegen_options(qir_runtime);
+    match noev_codegen::llvm::LlvmCodegen.emit_llvm_ir(program, opts) {
+        Ok(ir) => match output {
+            Some(path) => match std::fs::write(path, ir) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    anstream::eprintln!("noev: cannot write {}: {error}", path.display());
+                    ExitCode::from(2)
+                }
+            },
+            None => {
+                print!("{ir}");
+                ExitCode::SUCCESS
+            }
+        },
+        Err(error) => {
+            anstream::eprintln!("{ERROR}error:{ERROR:#} {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(not(feature = "llvm"))]
+fn build_llvm_ir(
+    _program: &noev_ir::Program,
+    _qir_runtime: bool,
+    _output: Option<&Path>,
+) -> ExitCode {
+    anstream::eprintln!("{ERROR}error:{ERROR:#} `noev` was built without the `llvm` feature");
+    ExitCode::from(2)
+}
+
+#[cfg(any(feature = "cranelift", feature = "llvm"))]
+fn build_object(
+    file: &Path,
+    program: &noev_ir::Program,
+    codegen: Option<CodegenChoice>,
+    qir_runtime: bool,
+    output: Option<&Path>,
+) -> ExitCode {
+    let generator = match select_codegen(codegen, qir_runtime) {
+        Ok(g) => g,
+        Err(code) => return code,
+    };
     let dest = output
         .map(Path::to_path_buf)
         .unwrap_or_else(|| default_artifact_path(file, Some("o")));
-    match noev_codegen::emit_object(program) {
+    match generator.emit_object(program, codegen_options(qir_runtime)) {
         Ok(bytes) => match std::fs::write(&dest, bytes) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -419,18 +553,43 @@ fn build_object(file: &Path, program: &noev_ir::Program, output: Option<&Path>) 
     }
 }
 
-#[cfg(not(feature = "cranelift"))]
-fn build_object(_file: &Path, _program: &noev_ir::Program, _output: Option<&Path>) -> ExitCode {
-    anstream::eprintln!("{ERROR}error:{ERROR:#} `noev` was built without the `cranelift` feature");
+#[cfg(not(any(feature = "cranelift", feature = "llvm")))]
+fn build_object(
+    _file: &Path,
+    _program: &noev_ir::Program,
+    _codegen: Option<CodegenChoice>,
+    _qir_runtime: bool,
+    _output: Option<&Path>,
+) -> ExitCode {
+    anstream::eprintln!(
+        "{ERROR}error:{ERROR:#} `noev` was built without a native code generator (`cranelift` or `llvm`)"
+    );
     ExitCode::from(2)
 }
 
-#[cfg(feature = "cranelift")]
-fn build_binary(file: &Path, program: &noev_ir::Program, output: Option<&Path>) -> ExitCode {
+#[cfg(any(feature = "cranelift", feature = "llvm"))]
+fn build_binary(
+    file: &Path,
+    program: &noev_ir::Program,
+    codegen: Option<CodegenChoice>,
+    qir_runtime: bool,
+    output: Option<&Path>,
+) -> ExitCode {
     if program.main.is_none() {
         anstream::eprintln!("{ERROR}error:{ERROR:#} no `main` function to build into a binary");
         return ExitCode::from(1);
     }
+    if qir_runtime {
+        anstream::eprintln!(
+            "{ERROR}error:{ERROR:#} `--qir-runtime` links against an external QIR runtime: \
+             use `--emit=object` or `--emit=llvm-ir` and link with your QIR runtime library"
+        );
+        return ExitCode::from(2);
+    }
+    let generator = match select_codegen(codegen, qir_runtime) {
+        Ok(g) => g,
+        Err(code) => return code,
+    };
     let Some(runtime_lib) = find_runtime_lib() else {
         anstream::eprintln!(
             "{ERROR}error:{ERROR:#} cannot find `libnoev_runtime.a` (set `NOEV_RUNTIME_LIB` or build `noev-runtime`)"
@@ -440,7 +599,7 @@ fn build_binary(file: &Path, program: &noev_ir::Program, output: Option<&Path>) 
     let dest = output
         .map(Path::to_path_buf)
         .unwrap_or_else(|| default_artifact_path(file, None));
-    match noev_codegen::emit_binary(program, &dest, &runtime_lib) {
+    match generator.emit_binary(program, &dest, &runtime_lib, codegen_options(qir_runtime)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             anstream::eprintln!("{ERROR}error:{ERROR:#} {error}");
@@ -449,9 +608,17 @@ fn build_binary(file: &Path, program: &noev_ir::Program, output: Option<&Path>) 
     }
 }
 
-#[cfg(not(feature = "cranelift"))]
-fn build_binary(_file: &Path, _program: &noev_ir::Program, _output: Option<&Path>) -> ExitCode {
-    anstream::eprintln!("{ERROR}error:{ERROR:#} `noev` was built without the `cranelift` feature");
+#[cfg(not(any(feature = "cranelift", feature = "llvm")))]
+fn build_binary(
+    _file: &Path,
+    _program: &noev_ir::Program,
+    _codegen: Option<CodegenChoice>,
+    _qir_runtime: bool,
+    _output: Option<&Path>,
+) -> ExitCode {
+    anstream::eprintln!(
+        "{ERROR}error:{ERROR:#} `noev` was built without a native code generator (`cranelift` or `llvm`)"
+    );
     ExitCode::from(2)
 }
 
