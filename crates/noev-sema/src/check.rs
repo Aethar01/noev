@@ -2578,9 +2578,12 @@ impl<'a> Checker<'a> {
                 let name = self.path_text(path);
                 match (name.as_str(), args.as_slice()) {
                     ("Distribution", &[elem]) => {
-                        if !self.t.types.is_wildcard(elem) && !self.t.types.is_printable(elem) {
+                        if !self.t.types.is_wildcard(elem)
+                            && (self.t.types.linearity(elem) != Kind::Copyable
+                                || !self.t.types.is_printable(elem))
+                        {
                             let message = format!(
-                                "a `Distribution` holds classical values, but {} is not one",
+                                "a `Distribution` holds copyable classical values, but {} is not one",
                                 self.show(elem)
                             );
                             self.error(node.span, message);
@@ -2589,6 +2592,22 @@ impl<'a> Checker<'a> {
                     }
                     ("Distribution", _) => {
                         self.error(node.span, "`Distribution` takes one type argument");
+                        Ty::ERROR
+                    }
+                    ("Vec", &[elem]) => {
+                        if !self.t.types.is_wildcard(elem)
+                            && self.t.types.linearity(elem) == Kind::Linear
+                        {
+                            let message = format!(
+                                "a `Vec` holds classical values, not linear type {}",
+                                self.show(elem)
+                            );
+                            self.error(node.span, message);
+                        }
+                        self.t.types.vec_ty(elem)
+                    }
+                    ("Vec", _) => {
+                        self.error(node.span, "`Vec` takes one type argument");
                         Ty::ERROR
                     }
                     _ if let Some(template) = self.generic_struct(path, node.span) => {
@@ -3744,10 +3763,16 @@ impl<'a> Checker<'a> {
                 Some(id) => Some(self.t.types.struct_ty(id)),
                 None => self.alias_type(item),
             },
-            Binding::Std(text) => {
-                let id = *self.std_types.get(&self.ast.symbols.get(text)?)?;
-                Some(self.t.types.struct_ty(id))
-            }
+            Binding::Std(text) => match text {
+                "IoStream" => Some(Ty::IO_STREAM),
+                "Stdin" => Some(Ty::STDIN),
+                "TcpStream" => Some(Ty::TCP_STREAM),
+                "TcpListener" => Some(Ty::TCP_LISTENER),
+                _ => {
+                    let id = *self.std_types.get(&self.ast.symbols.get(text)?)?;
+                    Some(self.t.types.struct_ty(id))
+                }
+            },
             Binding::Module(_) | Binding::Fn(_) => None,
         }
     }
@@ -3801,7 +3826,8 @@ impl<'a> Checker<'a> {
                 let m = self.t.types.intern(TyKind::Size(m));
                 self.bind_param(w, f) && self.bind_param(n, m)
             }
-            (TyKind::Distribution(w), TyKind::Distribution(f)) => self.bind_param(w, f),
+            (TyKind::Distribution(w), TyKind::Distribution(f))
+            | (TyKind::Vec(w), TyKind::Vec(f)) => self.bind_param(w, f),
             (TyKind::SizeSum { .. }, _) => self.bind_size(want, found),
             (
                 TyKind::Ref {
@@ -4994,6 +5020,10 @@ impl<'a> Checker<'a> {
             "measure" => self.measure_fn(id, args, span),
             "amplitudes" => self.amplitudes_fn(id, args, span),
             "fft" | "ifft" => self.fourier_fn(id, text == "ifft", args, span),
+            "stdout" | "stderr" | "stdin" | "var" | "args" | "current_dir" | "read_to_string"
+            | "read" | "write" | "write_bytes" | "exists" | "create_dir_all" | "remove_file" => {
+                self.std_free_call(id, text, args, span)
+            }
             _ => {
                 let (builtin, sig) = prelude::function(&mut self.t.types, text)?;
                 self.t.callees[id.index()] = Some(Callee::Builtin(builtin));
@@ -5141,6 +5171,20 @@ impl<'a> Checker<'a> {
                     });
                     self.t.callees[id.index()] = Some(Callee::Fn(f));
                     return self.method_args(id, f, &sig, None, receiver, args, span);
+                }
+                if let [ty_name, name] = *rest
+                    && at.is_none()
+                    && self.name(ty_name) == "Vec"
+                    && matches!(self.name(name), "new" | "with_capacity")
+                {
+                    return self.vec_ctor_call(
+                        id,
+                        callee,
+                        self.name(name) == "with_capacity",
+                        args,
+                        expect,
+                        span,
+                    );
                 }
                 if let [ty_name, name] = *rest
                     && let Some(target) = self.path_type(at, ty_name, path_span)
@@ -5418,6 +5462,9 @@ impl<'a> Checker<'a> {
         let text = self.ast.name(name);
         if let Some((builtin, sig)) = prelude::method(&mut self.t.types, ty, text) {
             return Some((Callee::Builtin(builtin), sig));
+        }
+        if let Some((op, sig)) = self.std_method(ty, text) {
+            return Some((Callee::Builtin(Builtin::Std(op)), sig));
         }
         // A trait's function, for a type that implements the trait.
         let f = self.trait_fn(ty, name, span)?;
@@ -5948,8 +5995,10 @@ impl<'a> Checker<'a> {
                 "a struct holding qubits cannot be counted; return its qubits in a tuple or array",
             ),
             TyKind::Ref { .. } => Err("references cannot be counted; return values"),
-            _ if self.t.types.is_printable(ty) => Ok(ty),
-            _ => Err("only classical values and qubits can be counted"),
+            _ if self.t.types.linearity(ty) == Kind::Copyable && self.t.types.is_printable(ty) => {
+                Ok(ty)
+            }
+            _ => Err("only copyable classical values and qubits can be counted"),
         }
     }
 
@@ -5961,6 +6010,294 @@ impl<'a> Checker<'a> {
             self.require_printable(arg, ty);
         }
         Ty::UNIT
+    }
+
+    /// `Vec::new()` and `Vec::with_capacity(cap)`: element type from turbofish or expectation.
+    fn vec_ctor_call(
+        &mut self,
+        id: ExprId,
+        callee: ExprId,
+        with_capacity: bool,
+        args: &[ExprId],
+        expect: Expect,
+        span: Span,
+    ) -> Ty {
+        use prelude::StdOp;
+        let op = if with_capacity {
+            StdOp::VecWithCapacity
+        } else {
+            StdOp::VecNew
+        };
+        let given = self.ast.list(self.ast.path_args(callee)).to_vec();
+        let elem = if !given.is_empty() {
+            if given.len() != 1 {
+                self.error(span, "`Vec` takes 1 type argument");
+                self.skip_args(args);
+                return Ty::ERROR;
+            }
+            let e = self.resolve_type_arg(given[0]);
+            if !self.t.types.is_wildcard(e) && self.t.types.linearity(e) == Kind::Linear {
+                let message = format!(
+                    "a `Vec` holds classical values, not linear type {}",
+                    self.show(e)
+                );
+                self.error(span, message);
+            }
+            e
+        } else if let Some(exp) = expect.ty()
+            && let TyKind::Vec(e) = *self.t.types.kind(self.t.types.deref(exp))
+        {
+            e
+        } else {
+            self.error(
+                span,
+                "cannot infer the element type of `Vec`; write `Vec::<T>::new()` or annotate the variable",
+            );
+            self.skip_args(args);
+            return Ty::ERROR;
+        };
+        let vec_ty = self.t.types.vec_ty(elem);
+        let params = if with_capacity { vec![Ty::INT] } else { vec![] };
+        let sig = Sig::new(None, params, vec_ty, Reversible::Yes);
+        self.t.callees[id.index()] = Some(Callee::Builtin(Builtin::Std(op)));
+        self.check_args(&sig, None, args, span)
+    }
+
+    /// Free functions in `std::io`, `std::env`, and `std::fs` (`spec/std.md` §5–§6).
+    fn std_free_call(&mut self, id: ExprId, text: &str, args: &[ExprId], span: Span) -> Ty {
+        use prelude::StdOp::*;
+        let (op, params, ret) = match text {
+            "stdout" => (IoStdout, vec![], Ty::IO_STREAM),
+            "stderr" => (IoStderr, vec![], Ty::IO_STREAM),
+            "stdin" => (IoStdin, vec![], Ty::STDIN),
+            "var" => {
+                let ret = self.std_enum(vec![Ty::STRING]);
+                (EnvVar, vec![Ty::STRING], ret)
+            }
+            "args" => {
+                let ret = self.t.types.vec_ty(Ty::STRING);
+                (EnvArgs, vec![], ret)
+            }
+            "current_dir" => {
+                let ret = self.std_enum(vec![Ty::STRING, Ty::STRING]);
+                (EnvCurrentDir, vec![], ret)
+            }
+            "read_to_string" => {
+                let ret = self.std_enum(vec![Ty::STRING, Ty::STRING]);
+                (FsReadToString, vec![Ty::STRING], ret)
+            }
+            "read" => {
+                let bytes = self.t.types.vec_ty(Ty::U8);
+                let ret = self.std_enum(vec![bytes, Ty::STRING]);
+                (FsRead, vec![Ty::STRING], ret)
+            }
+            "write" => {
+                let ret = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                (FsWrite, vec![Ty::STRING, Ty::STRING], ret)
+            }
+            "write_bytes" => {
+                let bytes = self.t.types.vec_ty(Ty::U8);
+                let ref_bytes = self.t.types.reference(false, bytes);
+                let ret = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                (FsWriteBytes, vec![Ty::STRING, ref_bytes], ret)
+            }
+            "exists" => (FsExists, vec![Ty::STRING], Ty::BOOL),
+            "create_dir_all" => {
+                let ret = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                (FsCreateDirAll, vec![Ty::STRING], ret)
+            }
+            "remove_file" => {
+                let ret = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                (FsRemoveFile, vec![Ty::STRING], ret)
+            }
+            _ => unreachable!("unexpected std free function `{text}`"),
+        };
+        let sig = Sig::new(None, params, ret, Reversible::No);
+        self.t.callees[id.index()] = Some(Callee::Builtin(Builtin::Std(op)));
+        self.check_args(&sig, None, args, span)
+    }
+
+    /// Methods and associated functions on `Vec<T>`, `String`, `IoStream`, `Stdin`,
+    /// `TcpStream`, and `TcpListener` (`spec/std.md` §5–§6).
+    fn std_method(&mut self, ty: Ty, name: &str) -> Option<(prelude::StdOp, Sig)> {
+        use Reversible::*;
+        use prelude::StdOp::*;
+        match self.t.types.kind(ty).clone() {
+            TyKind::Vec(elem) => {
+                let ref_self = Some(OwnKind::Ref);
+                let mut_self = Some(OwnKind::Mut);
+                let (op, recv, params, ret) = match name {
+                    "len" => (VecLen, ref_self, vec![], Ty::INT),
+                    "is_empty" => (VecIsEmpty, ref_self, vec![], Ty::BOOL),
+                    "push" => (VecPush, mut_self, vec![elem], Ty::UNIT),
+                    "pop" => {
+                        let opt = self.std_enum(vec![elem]);
+                        (VecPop, mut_self, vec![], opt)
+                    }
+                    "get" => {
+                        let opt = self.std_enum(vec![elem]);
+                        (VecGet, ref_self, vec![Ty::INT], opt)
+                    }
+                    "set" => (VecSet, mut_self, vec![Ty::INT, elem], Ty::UNIT),
+                    "clear" => (VecClear, mut_self, vec![], Ty::UNIT),
+                    "extend" => {
+                        let ref_vec = self.t.types.reference(false, ty);
+                        (VecExtend, mut_self, vec![ref_vec], Ty::UNIT)
+                    }
+                    "clone" => (VecClone, ref_self, vec![], ty),
+                    _ => return None,
+                };
+                Some((op, Sig::new(recv, params, ret, Yes)))
+            }
+            TyKind::String => {
+                let ref_self = Some(OwnKind::Ref);
+                let (op, recv, params, ret) = match name {
+                    "len" => (StrLen, ref_self, vec![], Ty::INT),
+                    "is_empty" => (StrIsEmpty, ref_self, vec![], Ty::BOOL),
+                    "contains" => (StrContains, ref_self, vec![Ty::STRING], Ty::BOOL),
+                    "starts_with" => (StrStartsWith, ref_self, vec![Ty::STRING], Ty::BOOL),
+                    "ends_with" => (StrEndsWith, ref_self, vec![Ty::STRING], Ty::BOOL),
+                    "trim" => (StrTrim, ref_self, vec![], Ty::STRING),
+                    "split" => {
+                        let ret = self.t.types.vec_ty(Ty::STRING);
+                        (StrSplit, ref_self, vec![Ty::STRING], ret)
+                    }
+                    "lines" => {
+                        let ret = self.t.types.vec_ty(Ty::STRING);
+                        (StrLines, ref_self, vec![], ret)
+                    }
+                    "replace" => (
+                        StrReplace,
+                        ref_self,
+                        vec![Ty::STRING, Ty::STRING],
+                        Ty::STRING,
+                    ),
+                    "substring" => {
+                        let opt = self.std_enum(vec![Ty::STRING]);
+                        (StrSubstring, ref_self, vec![Ty::INT, Ty::INT], opt)
+                    }
+                    "find" => {
+                        let opt = self.std_enum(vec![Ty::INT]);
+                        (StrFind, ref_self, vec![Ty::STRING], opt)
+                    }
+                    "to_uppercase" => (StrToUpper, ref_self, vec![], Ty::STRING),
+                    "to_lowercase" => (StrToLower, ref_self, vec![], Ty::STRING),
+                    "as_bytes" => {
+                        let ret = self.t.types.vec_ty(Ty::U8);
+                        (StrAsBytes, ref_self, vec![], ret)
+                    }
+                    "parse_int" => {
+                        let res = self.std_enum(vec![Ty::INT, Ty::STRING]);
+                        (StrParseInt, ref_self, vec![], res)
+                    }
+                    "parse_float" => {
+                        let res = self.std_enum(vec![Ty::FLOAT, Ty::STRING]);
+                        (StrParseFloat, ref_self, vec![], res)
+                    }
+                    "repeat" => (StrRepeat, ref_self, vec![Ty::INT], Ty::STRING),
+                    "from_utf8" => {
+                        let bytes = self.t.types.vec_ty(Ty::U8);
+                        let ref_bytes = self.t.types.reference(false, bytes);
+                        let res = self.std_enum(vec![Ty::STRING, Ty::STRING]);
+                        (StrFromUtf8, None, vec![ref_bytes], res)
+                    }
+                    "join" => {
+                        let parts = self.t.types.vec_ty(Ty::STRING);
+                        let ref_parts = self.t.types.reference(false, parts);
+                        (StrJoin, None, vec![ref_parts, Ty::STRING], Ty::STRING)
+                    }
+                    _ => return None,
+                };
+                Some((op, Sig::new(recv, params, ret, Yes)))
+            }
+            TyKind::IoStream => {
+                let ref_self = Some(OwnKind::Ref);
+                let (op, params, ret) = match name {
+                    "lock" => (IoLock, vec![], Ty::IO_STREAM),
+                    "write" => {
+                        let res = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                        (IoWrite, vec![Ty::STRING], res)
+                    }
+                    "flush" => {
+                        let res = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                        (IoFlush, vec![], res)
+                    }
+                    _ => return None,
+                };
+                Some((op, Sig::new(ref_self, params, ret, No)))
+            }
+            TyKind::Stdin => {
+                let ref_self = Some(OwnKind::Ref);
+                let (op, ret) = match name {
+                    "read_line" => (IoReadLine, self.std_enum(vec![Ty::STRING, Ty::STRING])),
+                    "read_to_string" => {
+                        (IoReadToString, self.std_enum(vec![Ty::STRING, Ty::STRING]))
+                    }
+                    _ => return None,
+                };
+                Some((op, Sig::new(ref_self, vec![], ret, No)))
+            }
+            TyKind::TcpStream => {
+                let ref_self = Some(OwnKind::Ref);
+                let (op, recv, params, ret) = match name {
+                    "connect" => {
+                        let res = self.std_enum(vec![Ty::TCP_STREAM, Ty::STRING]);
+                        (NetTcpConnect, None, vec![Ty::STRING], res)
+                    }
+                    "read" => {
+                        let bytes = self.t.types.vec_ty(Ty::U8);
+                        let res = self.std_enum(vec![bytes, Ty::STRING]);
+                        (NetTcpRead, ref_self, vec![Ty::INT], res)
+                    }
+                    "read_to_string" => {
+                        let res = self.std_enum(vec![Ty::STRING, Ty::STRING]);
+                        (NetTcpReadToString, ref_self, vec![], res)
+                    }
+                    "write" => {
+                        let bytes = self.t.types.vec_ty(Ty::U8);
+                        let ref_bytes = self.t.types.reference(false, bytes);
+                        let res = self.std_enum(vec![Ty::INT, Ty::STRING]);
+                        (NetTcpWrite, ref_self, vec![ref_bytes], res)
+                    }
+                    "write_str" => {
+                        let res = self.std_enum(vec![Ty::INT, Ty::STRING]);
+                        (NetTcpWriteStr, ref_self, vec![Ty::STRING], res)
+                    }
+                    "flush" => {
+                        let res = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                        (NetTcpFlush, ref_self, vec![], res)
+                    }
+                    "shutdown" => {
+                        let res = self.std_enum(vec![Ty::UNIT, Ty::STRING]);
+                        (NetTcpShutdown, ref_self, vec![], res)
+                    }
+                    "close" => (NetTcpClose, Some(OwnKind::Mv), vec![], Ty::UNIT),
+                    _ => return None,
+                };
+                Some((op, Sig::new(recv, params, ret, No)))
+            }
+            TyKind::TcpListener => {
+                let ref_self = Some(OwnKind::Ref);
+                let (op, recv, params, ret) = match name {
+                    "bind" => {
+                        let res = self.std_enum(vec![Ty::TCP_LISTENER, Ty::STRING]);
+                        (NetListenerBind, None, vec![Ty::STRING], res)
+                    }
+                    "local_addr" => {
+                        let res = self.std_enum(vec![Ty::STRING, Ty::STRING]);
+                        (NetListenerLocalAddr, ref_self, vec![], res)
+                    }
+                    "accept" => {
+                        let res = self.std_enum(vec![Ty::TCP_STREAM, Ty::STRING]);
+                        (NetListenerAccept, ref_self, vec![], res)
+                    }
+                    "close" => (NetListenerClose, Some(OwnKind::Mv), vec![], Ty::UNIT),
+                    _ => return None,
+                };
+                Some((op, Sig::new(recv, params, ret, No)))
+            }
+            _ => None,
+        }
     }
 
     /// `qasm("…")`: inline OpenQASM (`spec/interop.md` §4).

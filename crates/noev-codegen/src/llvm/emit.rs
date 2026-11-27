@@ -374,6 +374,14 @@ impl GlobalPool {
             TyKind::Distribution(_) => {
                 (TypeTag::Distribution, 0, None, 0, None, 0, None, 0, None, 0)
             }
+            TyKind::Vec(elem) => {
+                let elem_d = self.type_desc(program, layouts, elem);
+                (TypeTag::Vec, 0, None, 0, Some(elem_d), 0, None, 0, None, 0)
+            }
+            TyKind::IoStream => (TypeTag::IoStream, 0, None, 0, None, 0, None, 0, None, 0),
+            TyKind::Stdin => (TypeTag::Stdin, 0, None, 0, None, 0, None, 0, None, 0),
+            TyKind::TcpStream => (TypeTag::TcpStream, 0, None, 0, None, 0, None, 0, None, 0),
+            TyKind::TcpListener => (TypeTag::TcpListener, 0, None, 0, None, 0, None, 0, None, 0),
             TyKind::Ref { inner, .. } => {
                 let elem = self.type_desc(program, layouts, inner);
                 (TypeTag::Ref, 0, None, 0, Some(elem), 0, None, 0, None, 0)
@@ -1411,6 +1419,7 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             }
             Stmt::Print { stderr, args } => self.emit_print(*stderr, args),
             Stmt::Qasm { parts, qubits } => self.emit_qasm(parts, qubits),
+            Stmt::StdCall { op, args, dest } => self.emit_std_call(*op, args, dest.as_ref()),
             Stmt::Sample {
                 dest,
                 func,
@@ -1674,6 +1683,62 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
         let _ = writeln!(
             self.body,
             "  {ok} = call i8 @noev_qis_qasm_str(ptr %rt, i64 {str_handle}, ptr {q_ptr}, i64 {q_count})"
+        );
+        self.check_ok(&ok);
+        Ok(())
+    }
+
+    fn emit_std_call(
+        &mut self,
+        op: noev_sema::prelude::StdOp,
+        args: &[(Operand, Ty)],
+        dest: Option<&(Place, Ty)>,
+    ) -> Result<(), CodegenError> {
+        let n = args.len();
+        let stride = size_of::<NoevPrintArg>() as u32;
+        let arr_ptr = if n == 0 {
+            "null".to_string()
+        } else {
+            let buf = self.alloca_bytes(stride * n as u32, align_of::<NoevPrintArg>() as u32);
+            for (i, (arg_op, ty)) in args.iter().enumerate() {
+                let (vaddr, _) = self.operand_addr(arg_op)?;
+                let vptr = vaddr.unwrap_or_else(|| "null".into());
+                let desc = self.globals.type_desc(self.program, self.layouts, *ty);
+                let base = i * stride as usize;
+                let p0 = self.fresh();
+                let p1 = self.fresh();
+                let _ = writeln!(
+                    self.body,
+                    "  {p0} = getelementptr inbounds i8, ptr {buf}, i64 {}",
+                    base + offset_of!(NoevPrintArg, ptr)
+                );
+                let _ = writeln!(self.body, "  store ptr {vptr}, ptr {p0}, align 8");
+                let _ = writeln!(
+                    self.body,
+                    "  {p1} = getelementptr inbounds i8, ptr {buf}, i64 {}",
+                    base + offset_of!(NoevPrintArg, ty)
+                );
+                let _ = writeln!(self.body, "  store ptr {desc}, ptr {p1}, align 8");
+            }
+            buf
+        };
+        let (out_ptr, out_ty_ptr) = if let Some((place, ty)) = dest {
+            let (addr, _) = self.place_addr(place)?;
+            let ptr = addr.unwrap_or_else(|| "null".into());
+            let desc = self.globals.type_desc(self.program, self.layouts, *ty);
+            (ptr, desc)
+        } else {
+            ("null".to_string(), "null".to_string())
+        };
+        self.declare(
+            "noev_rt_std_call",
+            "declare i8 @noev_rt_std_call(ptr, i32, ptr, i64, ptr, ptr)",
+        );
+        let ok = self.fresh();
+        let _ = writeln!(
+            self.body,
+            "  {ok} = call i8 @noev_rt_std_call(ptr %rt, i32 {}, ptr {arr_ptr}, i64 {n}, ptr {out_ptr}, ptr {out_ty_ptr})",
+            op as u32
         );
         self.check_ok(&ok);
         Ok(())

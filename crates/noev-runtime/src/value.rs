@@ -1,10 +1,24 @@
 //! Runtime values, and observables.
 
+use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 
 use crate::backend::Condition;
 use crate::int::Int;
+
+/// Kind of opaque OS/IO handle held by [`Value::Handle`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HandleKind {
+    /// `std::io::IoStream` (0 = stdout, 1 = stderr).
+    IoStream,
+    /// `std::io::Stdin`.
+    Stdin,
+    /// `std::net::TcpStream` (index into `NoevRuntime::tcp_streams`).
+    TcpStream,
+    /// `std::net::TcpListener` (index into `NoevRuntime::tcp_listeners`).
+    TcpListener,
+}
 
 /// A value held by a local or computed by an expression.
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +62,30 @@ pub enum Value {
     Variant(u32, Vec<Value>),
     /// An `extern "C" fn` function pointer (function index in the IR program).
     FnPtr(u32),
+    /// A growable `Vec<T>` (`spec/std.md` §6). Affine in Noev so uniquely owned in practice.
+    Vec(Rc<RefCell<Vec<Value>>>),
+    /// An opaque handle (`IoStream`, `Stdin`, `TcpStream`, `TcpListener`).
+    Handle(HandleKind, u64),
+}
+
+impl Value {
+    /// Deeply clones a value, creating fresh backing storage for any nested `Vec<T>` so
+    /// explicit `.clone()` / `.get()` / indexing never aliases mutable buffers.
+    pub fn deep_clone(&self) -> Value {
+        match self {
+            Value::Vec(v) => {
+                let items: Vec<Value> = v.borrow().iter().map(Value::deep_clone).collect();
+                Value::Vec(Rc::new(RefCell::new(items)))
+            }
+            Value::Aggregate(items) => {
+                Value::Aggregate(items.iter().map(Value::deep_clone).collect())
+            }
+            Value::Variant(tag, data) => {
+                Value::Variant(*tag, data.iter().map(Value::deep_clone).collect())
+            }
+            other => other.clone(),
+        }
+    }
 }
 
 /// How often each result occurred in repeated runs.
@@ -282,6 +320,17 @@ impl fmt::Display for Value {
             Value::Cond(..) => write!(f, "<measurement logic>"),
             Value::Variant(index, _) => write!(f, "<variant {index}>"),
             Value::FnPtr(index) => write!(f, "<fn#{index}>"),
+            Value::Vec(v) => {
+                write!(f, "[")?;
+                for (i, item) in v.borrow().iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "]")
+            }
+            Value::Handle(kind, _) => write!(f, "<{kind:?}>"),
             Value::Aggregate(items)
                 if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Bit(_))) =>
             {

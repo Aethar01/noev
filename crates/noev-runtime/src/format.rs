@@ -212,6 +212,22 @@ fn write_value(program: &Program, value: &Value, ty: Ty, out: &mut String) {
         (Value::Distribution(d), _) => {
             let _ = write!(out, "{d}");
         }
+        (Value::Vec(v), &TyKind::Vec(elem)) => {
+            out.push('[');
+            for (i, item) in v.borrow().iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_value(program, item, elem, out);
+            }
+            out.push(']');
+        }
+        (Value::Vec(v), _) => {
+            let _ = write!(out, "[{} items]", v.borrow().len());
+        }
+        (Value::Handle(kind, _), _) => {
+            let _ = write!(out, "<{kind:?}>");
+        }
         (Value::Variant(index, data), &TyKind::Struct(s)) => {
             let i = *index as usize;
             let variant = program.variant_names[s.index()]

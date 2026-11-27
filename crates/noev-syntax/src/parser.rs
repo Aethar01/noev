@@ -2041,8 +2041,9 @@ impl Parser<'_> {
     fn path_expr(&mut self) -> ExprId {
         use TokenKind::*;
         let start = self.span();
-        let segments = self.path_segments();
-        // `swap::<Int>`: arguments given, not inferred.
+        let segs = self.path_segments();
+        let mut syms: Vec<Symbol> = self.ast.list(segs).to_vec();
+        // `swap::<Int>` or `Vec::<Int>::new`: arguments given, not inferred.
         let mut args = None;
         if self.at(ColonColon) && self.nth(1).kind == Lt {
             self.bump();
@@ -2057,7 +2058,17 @@ impl Parser<'_> {
             }
             self.close_angle();
             args = Some(self.ast.finish(mark));
+            // `Vec::<Int>::new`: trailing `::segment` after turbofish type arguments.
+            if self.eat(ColonColon) {
+                let tail = self.path_segments();
+                syms.extend_from_slice(self.ast.list(tail));
+            }
         }
+        let mark = self.ast.mark::<Symbol>();
+        for s in syms {
+            self.ast.push_to(s);
+        }
+        let segments = self.ast.finish(mark);
         let kind = match self.ast.list(segments) {
             [single]
                 if args.is_none()

@@ -122,6 +122,10 @@ pub fn builtin(b: Builtin) -> (String, String) {
              placeholders format their values into the statement text. Requires `unsafe` (N019) \
              and is not reversible (N013).",
         ),
+        Builtin::Std(op) => (
+            op.name(),
+            "Standard-library operation (`spec/std.md` §5–§6).",
+        ),
     };
     (sig.into(), doc.into())
 }

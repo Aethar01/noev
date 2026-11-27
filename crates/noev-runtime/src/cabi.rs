@@ -256,11 +256,14 @@ pub struct NoevRuntime {
     /// Error from the most recent failing C ABI call, if any.
     last_error: Option<RuntimeError>,
     /// Heap arenas for compiled native code (arbitrary-precision ints, strings, observables,
-    /// distributions). Freed automatically when the runtime is dropped.
+    /// distributions, vectors, and OS network handles). Freed automatically when dropped.
     pub(crate) bigints: Vec<num_bigint::BigInt>,
     pub(crate) strings: Vec<String>,
     pub(crate) observables: Vec<Observable>,
     pub(crate) distributions: Vec<Rc<Distribution>>,
+    pub(crate) vecs: Vec<Rc<RefCell<Vec<crate::value::Value>>>>,
+    pub(crate) tcp_streams: Vec<Option<std::net::TcpStream>>,
+    pub(crate) tcp_listeners: Vec<Option<std::net::TcpListener>>,
 }
 
 impl NoevRuntime {
@@ -312,6 +315,9 @@ impl NoevRuntime {
             strings: vec![String::new()],
             observables: vec![Observable::default()],
             distributions: Vec::new(),
+            vecs: Vec::new(),
+            tcp_streams: Vec::new(),
+            tcp_listeners: Vec::new(),
         }
     }
 
@@ -324,7 +330,54 @@ impl NoevRuntime {
         child.strings = self.strings.clone();
         child.observables = self.observables.clone();
         child.distributions = self.distributions.clone();
+        child.vecs = self.vecs.clone();
         child
+    }
+
+    /// Writes `text` to stdout or stderr (`std::io::IoStream::write`), returning an error
+    /// message rather than aborting the runtime.
+    pub(crate) fn write_stream(&mut self, stderr: bool, text: &str) -> Result<(), String> {
+        let bytes = text.as_bytes();
+        let res = match &self.output {
+            Some(output) => {
+                let mut out = output.borrow_mut();
+                if stderr {
+                    out.stderr.write_all(bytes)
+                } else {
+                    out.stdout.write_all(bytes)
+                }
+            }
+            None => {
+                if stderr {
+                    std::io::stderr().write_all(bytes)
+                } else {
+                    std::io::stdout().write_all(bytes)
+                }
+            }
+        };
+        res.map_err(|e| e.to_string())
+    }
+
+    /// Flushes stdout or stderr (`std::io::IoStream::flush`).
+    pub(crate) fn flush_stream(&mut self, stderr: bool) -> Result<(), String> {
+        let res = match &self.output {
+            Some(output) => {
+                let mut out = output.borrow_mut();
+                if stderr {
+                    out.stderr.flush()
+                } else {
+                    out.stdout.flush()
+                }
+            }
+            None => {
+                if stderr {
+                    std::io::stderr().flush()
+                } else {
+                    std::io::stdout().flush()
+                }
+            }
+        };
+        res.map_err(|e| e.to_string())
     }
 
     /// Stores `err` as the last error and returns `false`.

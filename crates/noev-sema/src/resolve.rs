@@ -27,9 +27,40 @@ pub enum Binding {
 
 /// The items of the standard library's modules that are not in the prelude
 /// (`spec/modules.md` §6), each with its namespace. They are built in, as the prelude's are.
-pub const STD_ITEMS: [(&str, &[(&str, Ns)]); 4] = [
+pub const STD_ITEMS: [(&str, &[(&str, Ns)]); 8] = [
     ("debug", &[("amplitudes", Ns::Value)]),
+    (
+        "env",
+        &[
+            ("var", Ns::Value),
+            ("args", Ns::Value),
+            ("current_dir", Ns::Value),
+        ],
+    ),
     ("fourier", &[("fft", Ns::Value), ("ifft", Ns::Value)]),
+    (
+        "fs",
+        &[
+            ("read_to_string", Ns::Value),
+            ("read", Ns::Value),
+            ("write", Ns::Value),
+            ("write_bytes", Ns::Value),
+            ("exists", Ns::Value),
+            ("create_dir_all", Ns::Value),
+            ("remove_file", Ns::Value),
+        ],
+    ),
+    (
+        "io",
+        &[
+            ("stdout", Ns::Value),
+            ("stderr", Ns::Value),
+            ("stdin", Ns::Value),
+            ("IoStream", Ns::Type),
+            ("Stdin", Ns::Type),
+        ],
+    ),
+    ("net", &[("TcpStream", Ns::Type), ("TcpListener", Ns::Type)]),
     ("observables", &[("P", Ns::Value), ("PX", Ns::Value)]),
     ("state", &[("State", Ns::Type)]),
 ];

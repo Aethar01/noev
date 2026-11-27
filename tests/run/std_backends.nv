@@ -1,0 +1,142 @@
+// End-to-end test of Step 16 (`spec/std.md` §5–§6):
+// `Vec<T>`, `String` methods, `std::io`, `std::env`, `std::fs`, and `std::net`.
+
+use std::env::{args, current_dir, var}
+use std::fs::{create_dir_all, exists, read, read_to_string, remove_file, write, write_bytes}
+use std::io::stdout
+use std::net::{TcpListener, TcpStream}
+
+fn test_vec() {
+    let mut v: Vec<Int> = Vec::new()
+    print(v.len(), v.is_empty())
+    v.push(10)
+    v.push(20)
+    v.push(30)
+    print(v.len(), v.is_empty(), v[0], v[1], v[2])
+    v[1] = 25
+    v[2] += 5
+    print(v)
+    let popped = v.pop()
+    print(popped, v.get(1), v.get(99))
+    let mut w = Vec::<Int>::with_capacity(4)
+    w.push(10)
+    w.push(25)
+    print(v == w)
+    let cloned = v.clone()
+    v.extend(cloned)
+    print(v)
+    v.clear()
+    print(v.len(), v.is_empty())
+}
+
+fn test_string() {
+    let raw = "  alpha, beta, gamma  "
+    let t = raw.trim()
+    print(t.len(), t.is_empty(), t.contains("beta"), t.starts_with("alpha"), t.ends_with("gamma"))
+    let parts = t.split(", ")
+    print(parts.len(), parts[0], parts[2])
+    print(String::join(parts, "|"))
+    let lines = "one\ntwo\nthree".lines()
+    print(lines.len(), lines[1])
+    print("foo bar foo".replace("foo", "baz"))
+    print("abcdef".substring(1, 4), "abcdef".find("cd"), "abcdef".find("zz"))
+    print("NoEv".to_uppercase(), "NoEv".to_lowercase(), "ab".repeat(3))
+    let mut s = "hel" + "lo"
+    s += "!"
+    print(s)
+    let bytes = "ok".as_bytes()
+    print(bytes.len(), bytes[0], bytes[1], String::from_utf8(bytes))
+    print("42".parse_int(), "bad".parse_int(), "3.5".parse_float())
+}
+
+fn test_io_env_fs_net() {
+    // std::io
+    let out = stdout().lock()
+    let _ = out.write("io-line\n")
+    let _ = out.flush()
+
+    // std::env
+    let a = args()
+    let cwd_ok = match current_dir() {
+        Ok(d) => not d.is_empty()
+        Err(_) => false
+    }
+    let missing = var("NOEV_DEFINITELY_UNSET_VAR_12345")
+    print(a.len() >= 1, cwd_ok, missing)
+
+    // std::fs (using a unique path inside /tmp via listener port to avoid collisions across parallel tests)
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => mv l
+        Err(e) => {
+            print("bind failed:", e)
+            return
+        }
+    }
+    let addr = match listener.local_addr() {
+        Ok(s) => s
+        Err(e) => {
+            print("addr failed:", e)
+            return
+        }
+    }
+    let port = match addr.split(":").get(1) {
+        Some(p) => p
+        None => "0"
+    }
+    let dir = "/tmp/noev_std_test_" + port
+    let path = dir + "/hello.txt"
+    let bpath = dir + "/bytes.bin"
+    let _ = create_dir_all(dir)
+    let _ = write(path, "hello backend\nline 2")
+    let text = match read_to_string(path) {
+        Ok(t) => t
+        Err(e) => e
+    }
+    let bdata = "ABC".as_bytes()
+    let _ = write_bytes(bpath, bdata)
+    let rbytes = match read(bpath) {
+        Ok(b) => mv b
+        Err(_) => Vec::<u8>::new()
+    }
+    let existed_before = exists(path)
+    let _ = remove_file(path)
+    let _ = remove_file(bpath)
+    let existed_after = exists(path)
+    print(existed_before, existed_after, text.lines().len(), String::from_utf8(rbytes))
+
+    // std::net: loopback TCP echo on ephemeral port
+    let client = match TcpStream::connect(addr) {
+        Ok(c) => mv c
+        Err(e) => {
+            print("connect failed:", e)
+            return
+        }
+    }
+    let server = match listener.accept() {
+        Ok(s) => mv s
+        Err(e) => {
+            print("accept failed:", e)
+            return
+        }
+    }
+    let n_sent = match client.write_str("ping-noev") {
+        Ok(n) => n
+        Err(_) => -1
+    }
+    let _ = client.flush()
+    let _ = client.shutdown()
+    let received = match server.read_to_string() {
+        Ok(msg) => msg
+        Err(e) => e
+    }
+    mv client.close()
+    mv server.close()
+    mv listener.close()
+    print(n_sent, received)
+}
+
+fn main() {
+    test_vec()
+    test_string()
+    test_io_env_fs_net()
+}

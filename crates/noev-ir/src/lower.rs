@@ -7,7 +7,7 @@
 //! `reset` then `release`, as its reference definition in `spec/std.md` says.
 
 use noev_sema::check::{Adjust, Callee, LocalId, Res};
-use noev_sema::prelude::{Builtin, Gate};
+use noev_sema::prelude::{Builtin, Gate, StdOp};
 use noev_sema::ty::OpKind;
 use noev_sema::{Circuits, Ty, TyKind, Typed, Types};
 use noev_syntax::ast::{self as ast, ExprId, ExprKind, OwnKind, StmtKind};
@@ -1021,6 +1021,49 @@ impl Builder<'_> {
                 self.call(place, None, false);
             }
             StmtKind::Assign { op, place, value } => {
+                if let ExprKind::Index { base, index } = ast.expr(place).kind
+                    && let Some((vec_ty, elem)) = self.vec_elem_ty(base)
+                {
+                    let v_op = self.value_operand(base);
+                    let idx_op = self.deref_operand(index);
+                    let val_op = self.operand(value);
+                    let outer = std::mem::replace(&mut self.span, stmt.span);
+                    let final_val = match op {
+                        ast::AssignOp::Assign => val_op,
+                        ast::AssignOp::Compound(bin_op) => {
+                            let cur = self.temp(elem);
+                            self.push(Stmt::StdCall {
+                                op: StdOp::VecIndex,
+                                args: vec![(v_op.clone(), vec_ty), (idx_op.clone(), Ty::INT)],
+                                dest: Some((cur.clone(), elem)),
+                            });
+                            let next = self.temp(elem);
+                            if bin_op == ast::BinaryOp::Add && elem == Ty::STRING {
+                                self.push(Stmt::StdCall {
+                                    op: StdOp::StrConcat,
+                                    args: vec![
+                                        (Operand::Copy(cur), Ty::STRING),
+                                        (val_op, Ty::STRING),
+                                    ],
+                                    dest: Some((next.clone(), Ty::STRING)),
+                                });
+                            } else {
+                                self.assign(
+                                    next.clone(),
+                                    Rvalue::Binary(bin_op, Operand::Copy(cur), val_op),
+                                );
+                            }
+                            Operand::Copy(next)
+                        }
+                    };
+                    self.push(Stmt::StdCall {
+                        op: StdOp::VecSet,
+                        args: vec![(v_op, vec_ty), (idx_op, Ty::INT), (final_val, elem)],
+                        dest: None,
+                    });
+                    self.span = outer;
+                    return;
+                }
                 let target = self.place_deref(place);
                 let value = self.operand(value);
                 if op == ast::AssignOp::Assign
@@ -1038,6 +1081,22 @@ impl Builder<'_> {
                         place_ir = place_ir.with(Proj::Field(step));
                     }
                     self.release_unmoved(root, &mut p, place_ir, ty);
+                }
+                if op == ast::AssignOp::Compound(ast::BinaryOp::Add) {
+                    let place_ty = self.ty(place);
+                    if self.types.deref(place_ty) == Ty::STRING {
+                        let outer = std::mem::replace(&mut self.span, stmt.span);
+                        self.push(Stmt::StdCall {
+                            op: StdOp::StrConcat,
+                            args: vec![
+                                (Operand::Copy(target.clone()), Ty::STRING),
+                                (value, Ty::STRING),
+                            ],
+                            dest: Some((target, Ty::STRING)),
+                        });
+                        self.span = outer;
+                        return;
+                    }
                 }
                 let rvalue = match op {
                     ast::AssignOp::Assign => Rvalue::Use(value),
@@ -1333,9 +1392,13 @@ impl Builder<'_> {
     fn is_place_expr(&self, id: ExprId) -> bool {
         match self.ast.expr(id).kind {
             ExprKind::Name(_) => matches!(self.typed.res[id.index()], Res::Local(_)),
-            ExprKind::Field { base, .. }
-            | ExprKind::TupleIndex { base, .. }
-            | ExprKind::Index { base, .. } => self.is_place_expr(base),
+            ExprKind::Field { base, .. } | ExprKind::TupleIndex { base, .. } => {
+                self.is_place_expr(base)
+            }
+            ExprKind::Index { base, .. } => {
+                let raw = self.typed.types.deref(self.typed.ty(base));
+                !matches!(self.typed.types.kind(raw), TyKind::Vec(_)) && self.is_place_expr(base)
+            }
             _ => false,
         }
     }
@@ -1483,11 +1546,12 @@ impl Builder<'_> {
             return op;
         }
         // A projection is read from its place, which `place` makes from a temporary when its
-        // base is a value such as a call's result.
-        let projection = matches!(
-            expr.kind,
-            ExprKind::Field { .. } | ExprKind::TupleIndex { .. } | ExprKind::Index { .. }
-        );
+        // base is a value such as a call's result. `Vec` indexing lowers to `StdOp::VecIndex`.
+        let projection = match expr.kind {
+            ExprKind::Field { .. } | ExprKind::TupleIndex { .. } => true,
+            ExprKind::Index { base, .. } => self.vec_elem_ty(base).is_none(),
+            _ => false,
+        };
         if self.is_place_expr(id) || projection {
             let ty = self.ty(id);
             return match adjust {
@@ -1748,6 +1812,16 @@ impl Builder<'_> {
                 _ => {}
             },
             ExprKind::Match { scrutinee, arms } => self.match_into(id, scrutinee, arms, dest),
+            ExprKind::Index { base, index } if self.vec_elem_ty(base).is_some() => {
+                let (vec_ty, elem) = self.vec_elem_ty(base).expect("checked");
+                let v_op = self.value_operand(base);
+                let idx_op = self.deref_operand(index);
+                self.push(Stmt::StdCall {
+                    op: StdOp::VecIndex,
+                    args: vec![(v_op, vec_ty), (idx_op, Ty::INT)],
+                    dest: dest.map(|d| (d, elem)),
+                });
+            }
             ExprKind::Name(_)
             | ExprKind::Field { .. }
             | ExprKind::TupleIndex { .. }
@@ -1814,7 +1888,15 @@ impl Builder<'_> {
             ExprKind::Binary { op, lhs, rhs } => {
                 let a = self.deref_operand(lhs);
                 let b = self.deref_operand(rhs);
-                self.set(&dest, Rvalue::Binary(op, a, b));
+                if op == ast::BinaryOp::Add && self.ty(id) == Ty::STRING {
+                    self.push(Stmt::StdCall {
+                        op: StdOp::StrConcat,
+                        args: vec![(a, Ty::STRING), (b, Ty::STRING)],
+                        dest: dest.map(|d| (d, Ty::STRING)),
+                    });
+                } else {
+                    self.set(&dest, Rvalue::Binary(op, a, b));
+                }
             }
             ExprKind::PrepTest { prep, operand } => {
                 let (ExprKind::Call { args, .. }, Some(Callee::Fn(f))) =
@@ -2759,7 +2841,42 @@ impl Builder<'_> {
                     self.push(Stmt::Qasm { parts, qubits });
                 }
             }
+            Builtin::Std(std_op) => {
+                let mut call_args = Vec::with_capacity(args.len() + usize::from(first.is_some()));
+                let mut push_arg = |this: &mut Self, expr: ExprId| {
+                    let op = this.operand(expr);
+                    let raw = this.ty(expr);
+                    let ty = match this.typed.adjust[expr.index()] {
+                        Adjust::Lend { mutable } => this.types.reference(mutable, raw),
+                        Adjust::Deref => this.types.deref(raw),
+                        Adjust::None => raw,
+                    };
+                    call_args.push((op, ty));
+                };
+                if let Some(recv) = first {
+                    push_arg(self, recv);
+                }
+                for &a in rest {
+                    push_arg(self, a);
+                }
+                let ret_ty = self.ty(id);
+                self.push(Stmt::StdCall {
+                    op: std_op,
+                    args: call_args,
+                    dest: dest.map(|d| (d, ret_ty)),
+                });
+            }
             Builtin::Convert(_) | Builtin::Const(_) => {}
+        }
+    }
+
+    /// If `expr` has type `Vec<T>` (or `ref`/`mut Vec<T>`), returns `(Vec<T>, T)`.
+    fn vec_elem_ty(&mut self, expr: ExprId) -> Option<(Ty, Ty)> {
+        let raw = self.ty(expr);
+        let vec_ty = self.types.deref(raw);
+        match *self.types.kind(vec_ty) {
+            TyKind::Vec(elem) => Some((vec_ty, elem)),
+            _ => None,
         }
     }
 }

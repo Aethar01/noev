@@ -1260,6 +1260,7 @@ impl<'a, 'b, 'p> FnLowerer<'a, 'b, 'p> {
             }
             Stmt::Print { stderr, args } => self.lower_print(*stderr, args),
             Stmt::Qasm { parts, qubits } => self.lower_qasm(parts, qubits),
+            Stmt::StdCall { op, args, dest } => self.lower_std_call(*op, args, dest.as_ref()),
             Stmt::Sample {
                 dest,
                 func,
@@ -1456,6 +1457,77 @@ impl<'a, 'b, 'p> FnLowerer<'a, 'b, 'p> {
             Some(types::I8),
         )?;
         let call = self.call_clif(id, &[self.rt_val, str_handle, q_ptr, n_val]);
+        let ok = self.builder.inst_results(call)[0];
+        self.check_ok(ok);
+        Ok(())
+    }
+
+    fn lower_std_call(
+        &mut self,
+        op: noev_sema::prelude::StdOp,
+        args: &[(Operand, Ty)],
+        dest: Option<&(Place, Ty)>,
+    ) -> Result<(), CodegenError> {
+        let n = args.len();
+        let stride = size_of::<NoevPrintArg>() as u32;
+        let arr_ptr = if n == 0 {
+            self.builder.ins().iconst(self.ptr_ty, 0)
+        } else {
+            let buf = self.alloc_temp_slot(stride * n as u32, align_of::<NoevPrintArg>() as u32);
+            for (i, (arg_op, ty)) in args.iter().enumerate() {
+                let (val_addr, _) = self.operand_addr(arg_op)?;
+                let val_ptr = val_addr.unwrap_or_else(|| self.builder.ins().iconst(self.ptr_ty, 0));
+                let desc_id =
+                    self.rodata
+                        .type_desc(self.module, self.program, self.layouts, *ty)?;
+                let desc_ptr = self.data_addr(desc_id);
+                let base = i as i32 * stride as i32;
+                self.builder.ins().store(
+                    MemFlagsData::new(),
+                    val_ptr,
+                    buf,
+                    base + offset_of!(NoevPrintArg, ptr) as i32,
+                );
+                self.builder.ins().store(
+                    MemFlagsData::new(),
+                    desc_ptr,
+                    buf,
+                    base + offset_of!(NoevPrintArg, ty) as i32,
+                );
+            }
+            buf
+        };
+        let (out_ptr, out_ty_ptr) = if let Some((place, ty)) = dest {
+            let (addr, _) = self.place_addr(place)?;
+            let ptr = addr.unwrap_or_else(|| self.builder.ins().iconst(self.ptr_ty, 0));
+            let desc_id = self
+                .rodata
+                .type_desc(self.module, self.program, self.layouts, *ty)?;
+            let desc_ptr = self.data_addr(desc_id);
+            (ptr, desc_ptr)
+        } else {
+            let z = self.builder.ins().iconst(self.ptr_ty, 0);
+            (z, z)
+        };
+        let op_val = self.builder.ins().iconst(types::I32, i64::from(op as u32));
+        let n_val = self.builder.ins().iconst(self.ptr_ty, n as i64);
+        let id = self.rt_imports.get(
+            self.module,
+            "noev_rt_std_call",
+            &[
+                self.ptr_ty,
+                types::I32,
+                self.ptr_ty,
+                self.ptr_ty,
+                self.ptr_ty,
+                self.ptr_ty,
+            ],
+            Some(types::I8),
+        )?;
+        let call = self.call_clif(
+            id,
+            &[self.rt_val, op_val, arr_ptr, n_val, out_ptr, out_ty_ptr],
+        );
         let ok = self.builder.inst_results(call)[0];
         self.check_ok(ok);
         Ok(())

@@ -137,6 +137,14 @@ pub fn validate(program: &Program) -> Vec<String> {
                             }
                         }
                     }
+                    Stmt::StdCall { args, dest, .. } => {
+                        for (op, _) in args {
+                            check_operand(op, &mut report);
+                        }
+                        if let Some((d, _)) = dest {
+                            check_place(d, &mut report);
+                        }
+                    }
                     Stmt::Overlap {
                         dest,
                         bra,

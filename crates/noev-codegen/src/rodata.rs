@@ -114,6 +114,25 @@ impl Rodata {
             TyKind::Distribution(_) => {
                 (TypeTag::Distribution, 0, None, 0, None, 0, None, 0, None, 0)
             }
+            TyKind::Vec(elem) => {
+                let elem_desc = self.type_desc(module, program, layouts, elem)?;
+                (
+                    TypeTag::Vec,
+                    0,
+                    None,
+                    0,
+                    Some(elem_desc),
+                    0,
+                    None,
+                    0,
+                    None,
+                    0,
+                )
+            }
+            TyKind::IoStream => (TypeTag::IoStream, 0, None, 0, None, 0, None, 0, None, 0),
+            TyKind::Stdin => (TypeTag::Stdin, 0, None, 0, None, 0, None, 0, None, 0),
+            TyKind::TcpStream => (TypeTag::TcpStream, 0, None, 0, None, 0, None, 0, None, 0),
+            TyKind::TcpListener => (TypeTag::TcpListener, 0, None, 0, None, 0, None, 0, None, 0),
             TyKind::Ref { inner, .. } => {
                 let elem = self.type_desc(module, program, layouts, inner)?;
                 (TypeTag::Ref, 0, None, 0, Some(elem), 0, None, 0, None, 0)

@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli};
+use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli, StdOp};
 use noev_sema::ty::Width;
 use noev_sema::{Ty, TyKind, Types};
 use noev_syntax::Span;
@@ -299,6 +299,15 @@ pub enum Stmt {
         /// Distinct qubit places referenced by [`QasmPart::Qubit`] indices.
         qubits: Vec<Place>,
     },
+    /// Call a built-in standard-library operation (`Vec<T>`, `String`, `std::{io, env, fs, net}`).
+    StdCall {
+        /// Which operation to run.
+        op: StdOp,
+        /// Evaluated arguments and their dereferenced types.
+        args: Vec<(Operand, Ty)>,
+        /// Optional destination place and its type (`None` when the return value is discarded).
+        dest: Option<(Place, Ty)>,
+    },
     /// `place = value`.
     Assign(Place, Rvalue),
     /// Allocate a fresh qubit in \|0⟩ at a `Qubit` place.
@@ -544,6 +553,11 @@ impl Program {
             }
             TyKind::Array(elem, len) => format!("[{}; {len}]", self.type_name(*elem)),
             TyKind::Distribution(elem) => format!("Distribution<{}>", self.type_name(*elem)),
+            TyKind::Vec(elem) => format!("Vec<{}>", self.type_name(*elem)),
+            TyKind::IoStream => "IoStream".into(),
+            TyKind::Stdin => "Stdin".into(),
+            TyKind::TcpStream => "TcpStream".into(),
+            TyKind::TcpListener => "TcpListener".into(),
             TyKind::Struct(id) => self.struct_names[id.index()].clone(),
             TyKind::Ref { mutable, inner } => {
                 format!(
@@ -728,6 +742,15 @@ impl Program {
                     })
                     .collect();
                 format!("qasm [{}] [{}]", ps.join(", "), qs.join(", "))
+            }
+            Stmt::StdCall { op, args, dest } => {
+                let args: Vec<String> = args.iter().map(|(a, _)| operand_text(a)).collect();
+                match dest {
+                    Some((d, _)) => {
+                        format!("{} = {}({})", place_text(d), op.name(), args.join(", "))
+                    }
+                    None => format!("{}({})", op.name(), args.join(", ")),
+                }
             }
             Stmt::Overlap {
                 dest,

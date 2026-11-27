@@ -461,6 +461,7 @@ fn infer_recordable(ast: &Ast, typed: &Typed, order: &CallOrder) -> Vec<bool> {
                     | ExprKind::Overlap { .. } => false,
                     _ => match typed.callees[e.index()] {
                         Some(Callee::Builtin(Builtin::Print { .. })) => false,
+                        Some(Callee::Builtin(Builtin::Std(op))) if op.is_effectful() => false,
                         // A trait's function may print in an `impl`, unless it is `rev`.
                         Some(Callee::Fn(f)) if unknown_body(typed, f) => false,
                         Some(Callee::Fn(f)) => result[f.index()],
@@ -961,6 +962,9 @@ impl<'a> Walker<'a> {
                         | ExprKind::Overlap { .. } => Some("starts a repeated run"),
                         _ if typed.callees[e.index()].is_some() => match typed.callees[e.index()] {
                             Some(Callee::Builtin(Builtin::Print { .. })) => Some("prints"),
+                            Some(Callee::Builtin(Builtin::Std(op))) if op.is_effectful() => {
+                                Some("performs I/O")
+                            }
                             Some(Callee::Fn(f)) if !self.cx.recordable[f.index()] => {
                                 Some("calls a function that prints or starts repeated runs")
                             }
@@ -1522,6 +1526,14 @@ impl<'a> Walker<'a> {
                     self.violate(ast.expr(arg).span, "printed");
                 }
                 false
+            }
+            Some(Callee::Builtin(Builtin::Std(op))) if op.is_effectful() => {
+                if let Some(&(arg, _)) = tainted_args.iter().find(|&&(_, t)| t)
+                    && before
+                {
+                    self.violate(ast.expr(arg).span, "passed to an I/O call");
+                }
+                any
             }
             _ => {
                 if let Some(&(arg, _)) = tainted_args.iter().find(|&&(_, t)| t)

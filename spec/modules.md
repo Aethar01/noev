@@ -148,7 +148,7 @@ The prelude holds what almost every program uses, as Rust's does:
 - every intrinsic in [core.md](core.md): gates, `measure`, `reset`, measurement tests,
   observables, maths;
 - `discard`, `Basis` and `measure_in`, `print` and `eprint` ([std.md](std.md));
-- the built-in types and `Option` and `Result` with their variants ([types.md](types.md));
+- the built-in types (`Vec<T>` included) and `Option` and `Result` with their variants ([types.md](types.md));
 - once traits exist, `Copy` and `Measure` ([types.md](types.md) §6).
 
 The other standard-library items live in modules of their own:
@@ -159,6 +159,10 @@ The other standard-library items live in modules of their own:
 | `amplitudes`          | `std::debug`        |
 | `fft`, `ifft`         | `std::fourier`      |
 | `P`, `PX`             | `std::observables`  |
+| `stdout`, `stderr`, `stdin`, `IoStream`, `Stdin` | `std::io` |
+| `var`, `args`, `current_dir` | `std::env` |
+| `read_to_string`, `read`, `write`, `write_bytes`, `exists`, `create_dir_all`, `remove_file` | `std::fs` |
+| `TcpStream`, `TcpListener` | `std::net` |
 | `Add`, `Sub`, `Mul`, `Div`, `Rem`, `BitAnd`, `BitOr`, `BitXor`, `Shl`, `Shr`, `Neg`, `BitNot`, and the `…Assign` traits | `std::ops` |
 | `Eq`, `Ord`           | `std::cmp`          |
 

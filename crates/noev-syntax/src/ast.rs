@@ -240,7 +240,16 @@ pub const STD_NAMES: [&str; 17] = [
 
 /// The modules of the standard library's package, `std`, whose items are built in
 /// (`spec/modules.md` §6). What is in the prelude is in no module of its own yet.
-pub const STD_MODULES: [&str; 4] = ["debug", "fourier", "observables", "state"];
+pub const STD_MODULES: [&str; 8] = [
+    "debug",
+    "env",
+    "fourier",
+    "fs",
+    "io",
+    "net",
+    "observables",
+    "state",
+];
 
 /// The standard library's `std::ops` module (`spec/types.md` §6), parsed when a program names
 /// `ops`: the traits behind `+`, `-`, `*`, `/` and `%`, and their compound assignments, on

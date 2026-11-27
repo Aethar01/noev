@@ -939,6 +939,21 @@ impl Machine<'_> {
                     Err(self.rt.take_error())
                 }
             }
+            Stmt::StdCall { op, args, dest } => {
+                let mut arg_vals = Vec::with_capacity(args.len());
+                for (arg_op, _) in args {
+                    let mut val = self.value(arg_op)?;
+                    while let Value::Ref(ptr) = val {
+                        val = self.get(&ptr)?.clone();
+                    }
+                    arg_vals.push(val);
+                }
+                let result = crate::std_ops::eval(&mut self.rt, *op, arg_vals)?;
+                if let Some((place, _)) = dest {
+                    self.store(place, result)?;
+                }
+                Ok(())
+            }
             Stmt::Overlap {
                 dest,
                 bra,
@@ -1561,6 +1576,18 @@ fn binary(op: BinOp, a: Value, b: Value) -> Result<Value> {
         },
         // Element by element, each by its own type's `==`.
         (Value::Aggregate(xs), Value::Aggregate(ys)) if matches!(op, Eq | NotEq) => {
+            let mut same = xs.len() == ys.len();
+            for (x, y) in xs.into_iter().zip(ys) {
+                if !same {
+                    break;
+                }
+                same = binary(Eq, x, y)? == Value::Bool(true);
+            }
+            Value::Bool(same == (op == Eq))
+        }
+        (Value::Vec(a), Value::Vec(b)) if matches!(op, Eq | NotEq) => {
+            let xs = a.borrow().clone();
+            let ys = b.borrow().clone();
             let mut same = xs.len() == ys.len();
             for (x, y) in xs.into_iter().zip(ys) {
                 if !same {

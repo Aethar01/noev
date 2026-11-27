@@ -152,7 +152,12 @@ impl<'p> LayoutCache<'p> {
             | TyKind::Int
             | TyKind::String
             | TyKind::Observable
-            | TyKind::Distribution(_) => scalar(8, 8, ScalarKind::I64),
+            | TyKind::Distribution(_)
+            | TyKind::Vec(_)
+            | TyKind::IoStream
+            | TyKind::Stdin
+            | TyKind::TcpStream
+            | TyKind::TcpListener => scalar(8, 8, ScalarKind::I64),
             TyKind::Qubit | TyKind::Ref { .. } | TyKind::ExternCFn { .. } => {
                 scalar(ptr_b, ptr_b, ScalarKind::Ptr)
             }

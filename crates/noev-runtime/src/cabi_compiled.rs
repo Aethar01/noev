@@ -5,6 +5,7 @@
 //! checked sized arithmetic, formatting/printing, observables, distributions, FFT, matrix
 //! validation, and compiled `sample` / expectation / overlap / undo runs.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_char};
 use std::fmt::Write as _;
@@ -27,7 +28,7 @@ use crate::cabi::{
     RuntimeError,
 };
 use crate::int::Int;
-use crate::value::{Distribution, Observable, Outcome, Pauli, Value};
+use crate::value::{Distribution, HandleKind, Observable, Outcome, Pauli, Value};
 
 // ---------------------------------------------------------------------------------------
 // Type descriptors emitted in `.rodata` by code generators
@@ -87,6 +88,16 @@ pub enum TypeTag {
     Struct = 23,
     /// Enum (`{ tag: u32, payload: … }`)
     Enum = 24,
+    /// `Vec<T>` (`u64` handle into `rt.vecs`, with `elem` descriptor)
+    Vec = 25,
+    /// `std::io::IoStream` (`u64` handle: 0 = stdout, 1 = stderr)
+    IoStream = 26,
+    /// `std::io::Stdin` (`u64` handle)
+    Stdin = 27,
+    /// `std::net::TcpStream` (`u64` handle into `rt.tcp_streams`)
+    TcpStream = 28,
+    /// `std::net::TcpListener` (`u64` handle into `rt.tcp_listeners`)
+    TcpListener = 29,
 }
 
 /// Field descriptor inside a tuple, struct, or enum variant payload.
@@ -422,6 +433,25 @@ unsafe fn read_native(rt: &NoevRuntime, ptr: *const u8, desc: &NoevTypeDesc) -> 
             };
             Value::Variant(tag, data)
         }
+        25 => {
+            let handle = unsafe { ptr.cast::<u64>().read_unaligned() };
+            match rt.vecs.get(handle as usize) {
+                Some(v) => Value::Vec(v.clone()),
+                None => Value::Vec(Rc::new(RefCell::new(Vec::new()))),
+            }
+        }
+        26 => Value::Handle(HandleKind::IoStream, unsafe {
+            ptr.cast::<u64>().read_unaligned()
+        }),
+        27 => Value::Handle(HandleKind::Stdin, unsafe {
+            ptr.cast::<u64>().read_unaligned()
+        }),
+        28 => Value::Handle(HandleKind::TcpStream, unsafe {
+            ptr.cast::<u64>().read_unaligned()
+        }),
+        29 => Value::Handle(HandleKind::TcpListener, unsafe {
+            ptr.cast::<u64>().read_unaligned()
+        }),
         _ => Value::Unit,
     }
 }
@@ -466,6 +496,14 @@ unsafe fn write_native(rt: &mut NoevRuntime, val: &Value, ptr: *mut u8, desc: &N
             let idx = rt.distributions.len();
             rt.distributions.push(d.clone());
             unsafe { ptr.cast::<u64>().write_unaligned(idx as u64) };
+        }
+        (Value::Vec(v), 25) => {
+            let idx = rt.vecs.len();
+            rt.vecs.push(v.clone());
+            unsafe { ptr.cast::<u64>().write_unaligned(idx as u64) };
+        }
+        (Value::Handle(_, h), 26..=29) => {
+            unsafe { ptr.cast::<u64>().write_unaligned(*h) };
         }
         (Value::Aggregate(items), 21 | 23) => {
             let fields = if desc.n_fields == 0 || desc.fields.is_null() {
@@ -537,6 +575,28 @@ fn display_desc(val: &Value, desc: &NoevTypeDesc, out: &mut String) {
         Value::Observable(o) => crate::format::write_observable(o, out),
         Value::Distribution(d) => {
             let _ = write!(out, "{d}");
+        }
+        Value::Vec(v) => {
+            out.push('[');
+            let elem = if desc.elem.is_null() {
+                None
+            } else {
+                Some(unsafe { &*desc.elem })
+            };
+            for (i, item) in v.borrow().iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                if let Some(elem_desc) = elem {
+                    display_desc(item, elem_desc, out);
+                } else {
+                    let _ = write!(out, "{item:?}");
+                }
+            }
+            out.push(']');
+        }
+        Value::Handle(kind, _) => {
+            let _ = write!(out, "<{kind:?}>");
         }
         Value::Aggregate(items) => {
             if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Bit(_))) {
@@ -1494,6 +1554,46 @@ pub unsafe extern "C" fn noev_qis_qasm_str(
     };
     let bytes = template.as_bytes();
     unsafe { cabi::noev_qis_qasm(rt, bytes.as_ptr(), bytes.len(), qubits, n_qubits) }
+}
+
+/// Dispatches a standard-library operation (`Vec<T>`, `String`, `std::{io, env, fs, net}`)
+/// from compiled native code (`Stmt::StdCall`).
+///
+/// # Safety
+/// `rt` must be valid; `args` must point to `n_args` valid [`NoevPrintArg`] entries;
+/// when `out_ptr` is non-null, `out_ty` must describe the destination slot at `out_ptr`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noev_rt_std_call(
+    rt: *mut NoevRuntime,
+    op: u32,
+    args: *const NoevPrintArg,
+    n_args: usize,
+    out_ptr: *mut u8,
+    out_ty: *const NoevTypeDesc,
+) -> bool {
+    let rt_ref = unsafe { &mut *rt };
+    let Some(std_op) = noev_sema::prelude::StdOp::from_u32(op) else {
+        return rt_ref.fail_err(RuntimeError::new(format!("unknown std operation id {op}")));
+    };
+    let slice = if n_args == 0 || args.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(args, n_args) }
+    };
+    let mut vals = Vec::with_capacity(slice.len());
+    for arg in slice {
+        let desc = unsafe { &*arg.ty };
+        vals.push(unsafe { read_native(rt_ref, arg.ptr, desc) });
+    }
+    match crate::std_ops::eval(rt_ref, std_op, vals) {
+        Ok(res) => {
+            if !out_ptr.is_null() && !out_ty.is_null() {
+                unsafe { write_native(rt_ref, &res, out_ptr, &*out_ty) };
+            }
+            true
+        }
+        Err(err) => rt_ref.fail_err(err),
+    }
 }
 
 /// Prints `n_args` values separated by spaces and a trailing newline.

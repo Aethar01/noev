@@ -13,6 +13,7 @@ pub mod qasm;
 pub mod qir;
 pub mod sampling;
 pub mod sized;
+pub mod std_ops;
 pub mod unitary;
 pub mod value;
 

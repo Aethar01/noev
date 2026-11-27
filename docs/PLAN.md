@@ -446,7 +446,7 @@ gets a compile-fail test under `tests/ui/`.
 | 13 | C, both ways                  | `extern "C"` imports called inside `unsafe`, arrays by reference, `extern "C" struct`, `extern "C" fn` callbacks, and a `noev.h` API for C and C++ hosts (`spec/interop.md` §3); imports use native code generation | ☑ Done |
 | 14 | Inline OpenQASM               | Hardware-specific gates, inside `unsafe`                              | ☑ Done |
 | 15 | Larger matrix gates           | Gates from unitary matrices on three or more qubits, decomposed as for two | ☑ Done |
-| 16 | Standard library for backends | `Vec<T>`, string handling, `std::io`, `std::env`, `std::fs`: only what a backend written in Noev needs (`spec/std.md` §6) | ☐ |
+| 16 | Standard library for backends | `Vec<T>`, string handling, `std::io`, `std::env`, `std::fs`, `std::net`: what a backend written in Noev needs (`spec/std.md` §5–§6) | ☑ Done |
 | 17 | Targets and backends          | The `Backend` trait and `Circuit` in `std::backend`; target descriptions for every backend, ketrs included; capability checks; `--backend` on `build` and `run`; `noev target fetch`; the plug-in C ABI for backends (`spec/runtime.md` §3–5) | ☐ |
 
 A backend for a real quantum computer is a package of its own, written in Noev on steps 16

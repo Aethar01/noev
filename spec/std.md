@@ -173,13 +173,13 @@ fn print(values: …) {           // variadic: not expressible in Noev yet
 Like the rest of the standard library, `print` and `eprint` are implemented natively.
 They are not allowed in a run that is repeated ([execution.md](execution.md) §3).
 
-### `std::io` (Reserved)
+### `std::io`
 
-Explicit control over output, as in Rust, for loops that write a lot and for programs that
-must handle write errors. It needs modules, so it comes with them.
+Explicit control over output and standard input, for loops that write a lot and for programs
+and backends that must handle I/O errors.
 
 ```noev
-use std::io::stdout
+use std::io::{stdout, stderr, stdin}
 
 let out = stdout().lock()        // one lock for the whole loop, not one per write
 for i in 0..n {
@@ -188,19 +188,86 @@ for i in 0..n {
 out.flush()
 ```
 
-- `stdout()` and `stderr()` return handles; `lock()` holds the stream for its lifetime, so
-  writes are not re-locked one by one and output from different threads cannot interleave.
-- `write(s: String)` buffers; `flush()` writes the buffer out. Both report write errors as a
-  `Result`.
+- `stdout() -> IoStream`, `stderr() -> IoStream`, and `stdin() -> Stdin` return stream
+  handles. `IoStream::lock(ref self) -> IoStream` returns a handle to the locked stream.
+- `IoStream::write(ref self, s: String) -> Result<(), String>` writes `s`;
+  `IoStream::flush(ref self) -> Result<(), String>` flushes buffered output.
+- `Stdin::read_line(ref self) -> Result<String, String>` reads one line;
+  `Stdin::read_to_string(ref self) -> Result<String, String>` reads until EOF.
+- `IoStream` and `Stdin` are affine handles (not implicitly copied; dropped freely). All
+  `std::io` operations are irreversible (N013).
 
-## 6. Planned
+## 6. Classical collections, strings, and OS interfaces for backends
 
-Most of the standard library needs generics, so that one definition works for any register
-size: the quantum Fourier transform, Grover iterations, arithmetic circuits, state
-preparation, and common observables such as Ising and Heisenberg Hamiltonians. These arrive
-with generics (`docs/PLAN.md` §11).
+Backends can be written in Noev ([runtime.md](runtime.md) §3), so the standard library
+provides the classical types and OS modules they need.
 
-Backends can be written in Noev ([runtime.md](runtime.md) §3), so the standard library also
-grows the classical parts they need, and no more for now: `std::backend` (the `Backend` trait,
-`Circuit`, `Target`), growable collections (`Vec<T>`), string handling, and `std::io`,
-`std::env` and `std::fs` for output, configuration and credentials.
+### `Vec<T>` (prelude)
+
+A growable heap-allocated array of classical (non-linear) elements `T`. `Vec<T>` is affine:
+it is moved with `mv`, lent with `ref`/`mut`, dropped automatically at scope exit (no N003),
+and never implicitly copied (use `.clone()` for an explicit copy).
+
+- Construction: `Vec::new() -> Vec<T>` (with element type inferred from context, `Vec::new::<T>()`, or `Vec::<T>::new()`), `Vec::with_capacity(cap: Int) -> Vec<T>`.
+- Reading (`ref self`): `len() -> Int`, `is_empty() -> Bool`, `get(index: Int) -> Option<T>`,
+  `clone() -> Vec<T>`, indexing `v[i] -> T` (bounds-checked at run time), `==` / `!=`, and
+  printing/formatting (`[a, b, c]`).
+- Mutation (`mut self`, requires `let mut`): `push(value: T)`, `pop() -> Option<T>`,
+  `set(index: Int, value: T)` and `v[i] = value` (bounds-checked at run time), `clear()`,
+  `extend(other: ref Vec<T>)`.
+
+### `String` methods (prelude)
+
+- Inspection: `len() -> Int` (UTF-8 byte length), `is_empty() -> Bool`,
+  `contains(pat: String) -> Bool`, `starts_with(pat: String) -> Bool`,
+  `ends_with(pat: String) -> Bool`, `find(pat: String) -> Option<Int>`.
+- Transformation: `trim() -> String`, `replace(from: String, to: String) -> String`,
+  `substring(start: Int, end: Int) -> Option<String>`, `to_uppercase() -> String`,
+  `to_lowercase() -> String`, `repeat(n: Int) -> String`, and `+` concatenation (`a + b`).
+- Splitting, joining, bytes and parsing: `split(sep: String) -> Vec<String>`,
+  `lines() -> Vec<String>`, `String::join(parts: ref Vec<String>, sep: String) -> String`,
+  `as_bytes() -> Vec<u8>`, `String::from_utf8(bytes: ref Vec<u8>) -> Result<String, String>`,
+  `parse_int() -> Result<Int, String>`, `parse_float() -> Result<Float, String>`.
+
+### `std::env`
+
+Environment and process inspection (irreversible, N013):
+
+- `var(key: String) -> Option<String>` — reads an environment variable.
+- `args() -> Vec<String>` — returns the program's command-line arguments.
+- `current_dir() -> Result<String, String>` — returns the current working directory.
+
+### `std::fs`
+
+File-system access for configuration, credentials, and circuit artefacts (irreversible, N013):
+
+- `read_to_string(path: String) -> Result<String, String>`
+- `read(path: String) -> Result<Vec<u8>, String>`
+- `write(path: String, content: String) -> Result<(), String>`
+- `write_bytes(path: String, data: ref Vec<u8>) -> Result<(), String>`
+- `exists(path: String) -> Bool`
+- `create_dir_all(path: String) -> Result<(), String>`
+- `remove_file(path: String) -> Result<(), String>`
+
+### `std::net`
+
+Plain TCP sockets (irreversible, N013); TLS/HTTPS lives in external packages binding a
+maintained C library so Noev never maintains TLS:
+
+- `TcpStream` (affine handle): `TcpStream::connect(addr: String) -> Result<TcpStream, String>`,
+  `read(ref self, max_bytes: Int) -> Result<Vec<u8>, String>`,
+  `read_to_string(ref self) -> Result<String, String>`,
+  `write(ref self, data: ref Vec<u8>) -> Result<Int, String>`,
+  `write_str(ref self, s: String) -> Result<Int, String>`,
+  `flush(ref self) -> Result<(), String>`,
+  `shutdown(ref self) -> Result<(), String>`,
+  `close(mv self)`.
+- `TcpListener` (affine handle): `TcpListener::bind(addr: String) -> Result<TcpListener, String>`,
+  `local_addr(ref self) -> Result<String, String>`,
+  `accept(ref self) -> Result<TcpStream, String>`,
+  `close(mv self)`.
+
+## 7. Planned
+
+`std::backend` (the `Backend` trait, `Circuit`, `Target`, Step 17) and generic quantum
+algorithms (QFT, Grover, arithmetic circuits, Hamiltonians) build on these primitives.

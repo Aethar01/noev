@@ -210,6 +210,16 @@ pub enum TyKind {
     },
     /// `Distribution<T>`.
     Distribution(Ty),
+    /// `Vec<T>`: growable heap-allocated array of classical values (`spec/std.md` §6).
+    Vec(Ty),
+    /// `std::io::IoStream` (stdout / stderr handle).
+    IoStream,
+    /// `std::io::Stdin`.
+    Stdin,
+    /// `std::net::TcpStream`.
+    TcpStream,
+    /// `std::net::TcpListener`.
+    TcpListener,
     /// A struct.
     Struct(StructId),
     /// `ref T` or `mut T`.
@@ -400,6 +410,10 @@ basic! {
     F32 = 18: F32,
     COMPLEX = 19: Complex,
     C32 = 20: C32,
+    IO_STREAM = 21: IoStream,
+    STDIN = 22: Stdin,
+    TCP_STREAM = 23: TcpStream,
+    TCP_LISTENER = 24: TcpListener,
 }
 
 /// A sized integer type's size and signedness (`spec/types.md` §1).
@@ -665,7 +679,7 @@ impl Types {
                     self.size_requirements(e, found);
                 }
             }
-            &TyKind::Array(elem, _) | &TyKind::Distribution(elem) => {
+            &TyKind::Array(elem, _) | &TyKind::Distribution(elem) | &TyKind::Vec(elem) => {
                 self.size_requirements(elem, found)
             }
             &TyKind::SizedArray(elem, len) => {
@@ -691,12 +705,17 @@ impl Types {
         }
     }
 
-    /// The element type of an array, whether or not its length is known.
+    /// The element type of an array or `Vec`, whether or not its length is known.
     pub fn elem_of(&self, ty: Ty) -> Option<Ty> {
         match *self.kind(ty) {
-            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) => Some(elem),
+            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) | TyKind::Vec(elem) => Some(elem),
             _ => None,
         }
+    }
+
+    /// Interns `Vec<elem>`.
+    pub fn vec_ty(&mut self, elem: Ty) -> Ty {
+        self.intern(TyKind::Vec(elem))
     }
 
     /// The type parameter `ty` is, if it is one.
@@ -826,6 +845,10 @@ impl Types {
                 let elem = self.subst(elem, from, to);
                 self.intern(TyKind::Distribution(elem))
             }
+            TyKind::Vec(elem) => {
+                let elem = self.subst(elem, from, to);
+                self.intern(TyKind::Vec(elem))
+            }
             TyKind::Ref { mutable, inner } => {
                 let inner = self.subst(inner, from, to);
                 self.reference(mutable, inner)
@@ -895,9 +918,10 @@ impl Types {
                 base, copy: false, ..
             } => self.quantum_param(*base),
             TyKind::Tuple(elems) => elems.iter().find_map(|&t| self.quantum_param(t)),
-            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) | TyKind::Distribution(elem) => {
-                self.quantum_param(*elem)
-            }
+            TyKind::Array(elem, _)
+            | TyKind::SizedArray(elem, _)
+            | TyKind::Distribution(elem)
+            | TyKind::Vec(elem) => self.quantum_param(*elem),
             TyKind::Ref { inner, .. } => self.quantum_param(*inner),
             TyKind::Struct(id) => self.structs[id.index()]
                 .args
@@ -948,9 +972,8 @@ impl Types {
                     .expect("interned with the array");
                 self.match_params(p, t, params, found) && self.match_params(n, m, params, found)
             }
-            (TyKind::Distribution(p), TyKind::Distribution(t)) => {
-                self.match_params(*p, *t, params, found)
-            }
+            (TyKind::Distribution(p), TyKind::Distribution(t))
+            | (TyKind::Vec(p), TyKind::Vec(t)) => self.match_params(*p, *t, params, found),
             (
                 TyKind::Ref {
                     mutable: a,
@@ -1005,7 +1028,9 @@ impl Types {
                 self.has_params(*base) || args.iter().any(|&a| self.has_params(a))
             }
             TyKind::Tuple(elems) => elems.iter().any(|&t| self.has_params(t)),
-            TyKind::Array(elem, _) | TyKind::Distribution(elem) => self.has_params(*elem),
+            TyKind::Array(elem, _) | TyKind::Distribution(elem) | TyKind::Vec(elem) => {
+                self.has_params(*elem)
+            }
             TyKind::SizedArray(..) | TyKind::SizeSum { .. } => true,
             TyKind::Ref { inner, .. } => self.has_params(*inner),
             TyKind::Struct(id) => self.structs[id.index()]
@@ -1058,7 +1083,7 @@ impl Types {
                     self.collect_params(e, found);
                 }
             }
-            &TyKind::Array(elem, _) | &TyKind::Distribution(elem) => {
+            &TyKind::Array(elem, _) | &TyKind::Distribution(elem) | &TyKind::Vec(elem) => {
                 self.collect_params(elem, found)
             }
             &TyKind::SizedArray(elem, len) => {
@@ -1104,7 +1129,15 @@ impl Types {
             TyKind::Param(_) => Kind::Linear,
             TyKind::Assoc { copy: true, .. } => Kind::Copyable,
             TyKind::Assoc { .. } => Kind::Linear,
-            TyKind::Ref { mutable: true, .. } => Kind::Affine,
+            TyKind::Ref { mutable: true, .. }
+            | TyKind::IoStream
+            | TyKind::Stdin
+            | TyKind::TcpStream
+            | TyKind::TcpListener => Kind::Affine,
+            TyKind::Vec(elem) => {
+                let inner = self.linearity_at(*elem, copy, depth + 1);
+                inner.max(Kind::Affine)
+            }
             TyKind::Tuple(elems) => combine(&mut elems.iter().copied()),
             TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) => {
                 self.linearity_at(*elem, copy, depth + 1)
@@ -1158,7 +1191,7 @@ impl Types {
         match self.kind(ty) {
             TyKind::Ref { .. } => true,
             TyKind::Tuple(elems) => elems.iter().any(|&t| self.has_ref_at(t, depth + 1)),
-            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) => {
+            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) | TyKind::Vec(elem) => {
                 self.has_ref_at(*elem, depth + 1)
             }
             TyKind::Struct(id) => {
@@ -1178,10 +1211,45 @@ impl Types {
     }
 
     /// Whether values of `ty` can be printed and interpolated into strings: classical
-    /// values, through any number of shared references (`spec/types.md` §7).
+    /// values (including `Vec<T>` of printable elements), through any number of shared
+    /// references (`spec/types.md` §7).
     pub fn is_printable(&self, ty: Ty) -> bool {
         let ty = self.deref(ty);
-        self.linearity(ty) == Kind::Copyable && !self.has_ref(ty) && !self.has_params(ty)
+        !self.has_ref(ty) && !self.has_params(ty) && self.printable_at(ty, 0)
+    }
+
+    fn printable_at(&self, ty: Ty, depth: usize) -> bool {
+        if depth > 64 {
+            return true;
+        }
+        match self.kind(ty) {
+            TyKind::Qubit
+            | TyKind::Ref { .. }
+            | TyKind::Param(_)
+            | TyKind::Assoc { .. }
+            | TyKind::IoStream
+            | TyKind::Stdin
+            | TyKind::TcpStream
+            | TyKind::TcpListener => false,
+            TyKind::Tuple(elems) => elems.iter().all(|&t| self.printable_at(t, depth + 1)),
+            TyKind::Array(elem, _)
+            | TyKind::SizedArray(elem, _)
+            | TyKind::Distribution(elem)
+            | TyKind::Vec(elem) => self.printable_at(*elem, depth + 1),
+            TyKind::Struct(id) => {
+                let def = &self.structs[id.index()];
+                def.fields
+                    .iter()
+                    .all(|&(_, t)| self.printable_at(t, depth + 1))
+                    && def
+                        .variants
+                        .iter()
+                        .flatten()
+                        .flat_map(|v| v.data.iter())
+                        .all(|&t| self.printable_at(t, depth + 1))
+            }
+            _ => true,
+        }
     }
 
     /// What the built-in operator `op` gives on `lhs` and `rhs`, if it applies.
@@ -1196,7 +1264,13 @@ impl Types {
             }
             // The shift amount is the same type, or an `Int`.
             Shl | Shr => (lhs.is_integer() && (rhs == lhs || rhs == Ty::INT)).then_some(lhs),
-            Add | Sub => match (lhs, rhs) {
+            Add => match (lhs, rhs) {
+                (a, b) if a == b && (a.is_number() || a.is_complex()) => Some(a),
+                (Ty::OBSERVABLE, Ty::OBSERVABLE) => Some(Ty::OBSERVABLE),
+                (Ty::STRING, Ty::STRING) => Some(Ty::STRING),
+                _ => None,
+            },
+            Sub => match (lhs, rhs) {
                 (a, b) if a == b && (a.is_number() || a.is_complex()) => Some(a),
                 (Ty::OBSERVABLE, Ty::OBSERVABLE) => Some(Ty::OBSERVABLE),
                 _ => None,
@@ -1308,7 +1382,7 @@ impl Types {
             TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Bit | TyKind::String => true,
             _ if ty.is_number() || ty.is_complex() => true,
             // Element by element: `m == [0, 1]` for measured bits.
-            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) => {
+            TyKind::Array(elem, _) | TyKind::SizedArray(elem, _) | TyKind::Vec(elem) => {
                 self.comparable_at(elem, depth + 1)
             }
             TyKind::Tuple(ref elems) => elems.iter().all(|&t| self.comparable_at(t, depth + 1)),
@@ -1412,6 +1486,11 @@ impl Types {
                 text
             }
             TyKind::Distribution(elem) => format!("Distribution<{}>", self.display(*elem, ast)),
+            TyKind::Vec(elem) => format!("Vec<{}>", self.display(*elem, ast)),
+            TyKind::IoStream => "IoStream".into(),
+            TyKind::Stdin => "Stdin".into(),
+            TyKind::TcpStream => "TcpStream".into(),
+            TyKind::TcpListener => "TcpListener".into(),
             TyKind::Struct(id) => {
                 let def = &self.structs[id.index()];
                 let name = ast.name(def.name);

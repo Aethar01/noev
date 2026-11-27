@@ -72,6 +72,19 @@ before 1.0.
   calls for linking against external QIR runtimes), verified all 39 `tests/run/*.nv` programs
   compiled with LLVM `-O2` against the interpreter plus end-to-end C QIR shim linking, and
   added LLVM IR and `-O2` object benchmarks alongside Cranelift.
+- Standard library for backends (`spec/std.md` §5–§6, `spec/modules.md` §6): added
+  affine `Vec<T>` in the prelude (`new`, `with_capacity`, `len`, `is_empty`, `push`, `pop`,
+  `get`, `set`, `v[i]`/`v[i] = x`, `clear`, `extend`, `clone`, `==`, formatting, and
+  `Vec::<T>::new()` turbofish); added `String` methods (`len`, `is_empty`, `contains`,
+  `starts_with`, `ends_with`, `trim`, `split`, `lines`, `replace`, `substring`, `find`,
+  `to_uppercase`, `to_lowercase`, `as_bytes`, `String::from_utf8`, `parse_int`,
+  `parse_float`, `repeat`, `String::join`, and `+` concatenation); added `std::io`
+  (`stdout`, `stderr`, `stdin`, `IoStream::{lock, write, flush}`, `Stdin::{read_line,
+  read_to_string}`), `std::env` (`var`, `args`, `current_dir`), `std::fs`
+  (`read_to_string`, `read`, `write`, `write_bytes`, `exists`, `create_dir_all`,
+  `remove_file`), and `std::net` (`TcpStream`, `TcpListener`) across sema, IR
+  (`Stmt::StdCall`), runtime (`std_ops`, `noev_rt_std_call`), Cranelift, and LLVM, with UI
+  tests, an end-to-end run test, and a `std_ops` benchmark.
 - Larger matrix gates (`spec/core.md` §1): generalized `r.unitary(m)` to arbitrary
   `[Qubit; N]` registers (`1 <= N <= 10`, `[[Complex; 2^N]; 2^N]`); implemented recursive
   Quantum Shannon Decomposition (`unitary::decompose_n`: Cosine–Sine Decomposition via

@@ -3658,10 +3658,12 @@ impl Owner<'_> {
     /// moving it: requiring a type parameter to be classical.
     fn uncopyable(&self, text: &str, ty: Ty) -> (String, String) {
         if self.lin(ty) == Kind::Affine {
-            return (
-                format!("`{text}` holds a `mut` reference, which cannot be copied"),
-                String::new(),
-            );
+            let msg = if self.typed.types.has_ref(ty) {
+                format!("`{text}` holds a `mut` reference, which cannot be copied")
+            } else {
+                format!("`{text}` cannot be copied")
+            };
+            return (msg, String::new());
         }
         match self.typed.types.quantum_param(ty) {
             Some(p) => {
@@ -4156,6 +4158,12 @@ impl Owner<'_> {
                 for &arg in args {
                     self.expr(arg, Use::Value);
                 }
+            }
+            return Vec::new();
+        }
+        if matches!(callee, Some(Callee::Builtin(Builtin::Print { .. }))) {
+            for &arg in args {
+                self.expr(arg, Use::Read);
             }
             return Vec::new();
         }
@@ -4774,7 +4782,10 @@ impl Owner<'_> {
                 (TyKind::Tuple(elems), Proj::Field(idx)) => {
                     elems.get(*idx as usize).copied().unwrap_or(Ty::ERROR)
                 }
-                (&TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _), Proj::Index(_)) => elem,
+                (
+                    &TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _) | &TyKind::Vec(elem),
+                    Proj::Index(_),
+                ) => elem,
                 _ => return through,
             };
             if i + 1 < place.proj.len() || deref_final {
@@ -4797,7 +4808,10 @@ impl Owner<'_> {
                 (TyKind::Tuple(elems), Proj::Field(i)) => {
                     elems.get(*i as usize).copied().unwrap_or(Ty::ERROR)
                 }
-                (&TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _), Proj::Index(_)) => elem,
+                (
+                    &TyKind::Array(elem, _) | &TyKind::SizedArray(elem, _) | &TyKind::Vec(elem),
+                    Proj::Index(_),
+                ) => elem,
                 _ => return Ty::ERROR,
             };
         }
