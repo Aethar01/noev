@@ -1453,7 +1453,7 @@ impl BorrowInfer<'_> {
                     merge_sources(&mut out, s);
                 }
             }
-            Callee::Builtin(_) | Callee::Convert(_) | Callee::TryConvert(_) => {
+            Callee::Builtin(_) | Callee::Convert(_) | Callee::TryConvert(_) | Callee::FnPtr => {
                 if let Some((_, s)) = &recv_src {
                     merge_sources(&mut out, s);
                 } else {
@@ -3688,7 +3688,7 @@ impl Owner<'_> {
         let ok = match callee {
             Callee::Builtin(b) => b.reversible(),
             Callee::Convert(_) | Callee::TryConvert(_) => true,
-            Callee::Variant(..) => false,
+            Callee::Variant(..) | Callee::FnPtr => false,
             Callee::Fn(f) => self.reversible_fn(f),
         };
         if !ok {
@@ -4430,6 +4430,7 @@ impl Owner<'_> {
             Callee::Convert(_) | Callee::TryConvert(_) | Callee::Variant(..) => {
                 (false, true, String::new())
             }
+            Callee::FnPtr => (true, false, "C function pointer".to_string()),
             Callee::Fn(f) => (
                 self.typed.fns[f.index()].sig.is_unsafe,
                 self.reversible_fn(f),
@@ -4439,6 +4440,11 @@ impl Owner<'_> {
         if is_unsafe && self.unsafe_depth == 0 {
             let message = if name == "release" {
                 "`release` is unsafe: it trusts that the qubit is in |0⟩".to_string()
+            } else if matches!(callee, Callee::FnPtr) {
+                "calling an `extern \"C\" fn` pointer needs `unsafe`".to_string()
+            } else if matches!(callee, Callee::Fn(f) if self.ast.function(f).extern_kind == ExternKind::CImport)
+            {
+                format!("`{name}` is an `extern \"C\"` function; calling it needs `unsafe`")
             } else {
                 format!("`{name}` is an `unsafe fn`; calling it needs `unsafe`")
             };

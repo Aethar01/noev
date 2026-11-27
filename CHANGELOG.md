@@ -72,6 +72,14 @@ before 1.0.
   calls for linking against external QIR runtimes), verified all 39 `tests/run/*.nv` programs
   compiled with LLVM `-O2` against the interpreter plus end-to-end C QIR shim linking, and
   added LLVM IR and `-O2` object benchmarks alongside Cranelift.
+- C and C++ interop, both ways (`spec/interop.md` §1, §3–§6): added `extern "C" { fn … }`
+  imports (N019 outside `unsafe`, N013 in reversible contexts), `extern "C" struct` with
+  C layout, `ref`/`mut` array and struct parameters, `extern "C" fn` exports/callbacks and
+  `extern "C" fn(…) -> …` function pointers across syntax, sema, IR, and both Cranelift and
+  LLVM code generators (System V struct classification, `byval`/`sret` for >16B structs,
+  checked `Int <-> int64_t`, `--link`/`-l` in `noev build`); added the C/C++ embedding API
+  (`include/noev.h`, `crates/noev-c` / `libnoev_c.a`) with re-entrant callbacks, UI tests,
+  end-to-end C99/C++17 & dual-codegen integration tests, and a C embedding benchmark.
 - Python bindings (`spec/interop.md` §1, §2): added `crates/noev-py` (PyO3 + maturin,
   configured in `pyproject.toml`) and the `python/noev` package with type stubs
   (`_noev.pyi`, `py.typed`), exposing `Program`, `Runtime`, `HostContext`, `Observable`,

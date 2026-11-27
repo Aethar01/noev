@@ -483,8 +483,17 @@ fn helpful_errors() {
         Vec::<String>::new()
     );
     assert_eq!(
-        errors("extern \"C\" { fn erf(x: Float) -> Float }"),
-        ["`extern \"C\"` declarations are not supported yet"]
+        errors(
+            "extern \"C\" { fn erf(x: Float) -> Float }\n\
+             extern \"C\" struct Point { x: Float, y: Float }\n\
+             extern \"C\" fn cb(x: Float) -> Float { x }\n\
+             fn use_fp(f: extern \"C\" fn(Float) -> Float) {}"
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        errors("extern \"Fortran\" { fn f() }"),
+        ["unsupported extern ABI \"Fortran\"; only `\"C\"` is supported"]
     );
     assert_eq!(
         errors("fn f(x: Int) -> Float { x as Float }"),

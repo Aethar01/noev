@@ -1137,6 +1137,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "noev-c"
+version = "0.4.2"
+dependencies = [
+ "noev",
+ "noev-ir",
+ "noev-runtime",
+ "noev-sema",
+]
+
+[[package]]
 name = "noev-codegen"
 version = "0.4.2"
 dependencies = [

@@ -11,7 +11,7 @@ pub fn validate(program: &Program) -> Vec<String> {
         let mut report = |message: String| problems.push(format!("{}: {message}", function.name));
         let blocks = function.blocks.len();
         let locals = function.locals.len();
-        if function.is_extern {
+        if matches!(function.extern_kind, ExternKind::Host | ExternKind::CImport) {
             if blocks != 0 {
                 report("extern function has blocks".into());
             }
@@ -71,7 +71,10 @@ pub fn validate(program: &Program) -> Vec<String> {
                                 check_operand(index, &mut report);
                                 check_operand(bit, &mut report);
                             }
-                            Rvalue::FloatConst(_) | Rvalue::BigInt(_) | Rvalue::Identity => {}
+                            Rvalue::FloatConst(_)
+                            | Rvalue::BigInt(_)
+                            | Rvalue::Identity
+                            | Rvalue::FnPtr(_) => {}
                             Rvalue::Format(parts) => {
                                 for part in parts {
                                     if let FormatPart::Value(op, _, _) = part {
@@ -179,6 +182,17 @@ pub fn validate(program: &Program) -> Vec<String> {
                     if func.index() >= program.functions.len() {
                         report(format!("unknown function {}", func.0));
                     }
+                    args.iter().for_each(|a| check_operand(a, &mut report));
+                    check_place(dest, &mut report);
+                    vec![*next]
+                }
+                Terminator::CallIndirect {
+                    callee,
+                    args,
+                    dest,
+                    next,
+                } => {
+                    check_operand(callee, &mut report);
                     args.iter().for_each(|a| check_operand(a, &mut report));
                     check_place(dest, &mut report);
                     vec![*next]

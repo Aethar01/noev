@@ -631,6 +631,7 @@ fn display_desc(val: &Value, desc: &NoevTypeDesc, out: &mut String) {
         Value::Qubit(_) => out.push_str("<qubit>"),
         Value::Clbit(_) | Value::Cond(..) => out.push('0'),
         Value::Ref(_) => out.push_str("<reference>"),
+        Value::FnPtr(idx) => out.push_str(&format!("<fn#{idx}>")),
     }
 }
 
@@ -2319,4 +2320,77 @@ pub unsafe extern "C" fn noev_rt_bounds_check(
 #[allow(dead_code)]
 fn _backend_err(e: BackendError) -> RuntimeError {
     RuntimeError::new(e.0)
+}
+
+// ---------------------------------------------------------------------------------------
+// C interop helpers (`spec/interop.md` §1, §3)
+// ---------------------------------------------------------------------------------------
+
+/// Converts a compiled tagged `Int` into a C `int64_t`, failing with a runtime error if the
+/// value is outside the signed 64-bit range (`spec/interop.md` §1).
+///
+/// # Safety
+/// `rt` and `out` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noev_rt_int_to_c_i64(
+    rt: *mut NoevRuntime,
+    val: i64,
+    out: *mut i64,
+) -> bool {
+    let rt = unsafe { &mut *rt };
+    let v = decode_int(rt, val);
+    if let Some(n) = v.to_i64() {
+        unsafe { *out = n };
+        true
+    } else {
+        rt.fail_err(RuntimeError::new(format!(
+            "Noev `Int` value `{v}` is outside the 64-bit signed integer range across the C boundary"
+        )))
+    }
+}
+
+/// Converts a C `int64_t` into a compiled tagged `Int`.
+///
+/// # Safety
+/// `rt` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noev_rt_int_from_c_i64(rt: *mut NoevRuntime, v: i64) -> i64 {
+    let rt = unsafe { &mut *rt };
+    encode_int(rt, Int::Small(v))
+}
+
+static CALLBACK_SEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Creates a fresh runtime for an `extern "C" fn` callback invoked from C (`spec/interop.md` §3).
+#[unsafe(no_mangle)]
+pub extern "C" fn noev_rt_callback_enter() -> *mut NoevRuntime {
+    let seed = CALLBACK_SEED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(feature = "ketrs")]
+    {
+        cabi::noev_rt_new_ketrs(seed)
+    }
+    #[cfg(not(feature = "ketrs"))]
+    {
+        cabi::noev_rt_new_export(seed)
+    }
+}
+
+/// Finishes an `extern "C" fn` callback. If `ok` is false, prints the runtime error and ends the
+/// process (`spec/interop.md` §3: cannot unwind through C stack frames).
+///
+/// # Safety
+/// `rt` must have been returned by [`noev_rt_callback_enter`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noev_rt_callback_exit(rt: *mut NoevRuntime, ok: bool) {
+    if !ok {
+        let rt_ref = unsafe { &mut *rt };
+        let err = rt_ref.take_error();
+        eprintln!(
+            "noev runtime error in extern \"C\" fn callback: {}",
+            err.message
+        );
+        unsafe { cabi::noev_rt_free(rt) };
+        std::process::exit(1);
+    }
+    unsafe { cabi::noev_rt_free(rt) };
 }

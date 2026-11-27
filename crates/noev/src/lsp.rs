@@ -578,7 +578,7 @@ impl Document {
                     }
                     Callee::TryConvert(ty) => return Some(docs::try_convert(&self.show(ty))),
                     Callee::Variant(s, index) => return self.describe_variant(s, index),
-                    Callee::Fn(_) => {}
+                    Callee::Fn(_) | Callee::FnPtr => {}
                 }
             }
         }

@@ -7,24 +7,26 @@ use cranelift_codegen::Context;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::{
-    AbiParam, Block as ClifBlock, InstBuilder, MemFlagsData, Signature, StackSlot, StackSlotData,
-    StackSlotKind, Type as ClifType, Value as ClifValue,
+    AbiParam, ArgumentPurpose, Block as ClifBlock, InstBuilder, MemFlagsData, Signature, StackSlot,
+    StackSlotData, StackSlotKind, Type as ClifType, Value as ClifValue,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataId, FuncId as ClifFuncId, Linkage, Module};
 use cranelift_object::ObjectModule;
 use noev_ir::Program;
 use noev_ir::ir::{
-    Align, BinOp, Block, Const, FormatKind, FormatPart, FuncId, Function, Operand, Place, Prep,
-    Proj, Rvalue, Stmt, Terminator, UnOp,
+    Align, BinOp, Block, Const, ExternKind, FormatKind, FormatPart, FuncId, Function, Operand,
+    Place, Prep, Proj, Rvalue, Stmt, Terminator, UnOp,
 };
 use noev_runtime::cabi_compiled::{NoevFormatPart, NoevPrintArg};
 use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli};
 use noev_sema::{Ty, TyKind};
 
 use crate::CodegenError;
-use crate::analysis::{PlaceKey, analyze_enum_variants, collect_thunks, const_ty, has_feedback};
-use crate::layout::{LayoutCache, ScalarKind};
+use crate::analysis::{
+    PlaceKey, analyze_enum_variants, collect_thunks, const_ty, has_feedback, operand_ty,
+};
+use crate::layout::{CAbiArg, LayoutCache, ScalarKind};
 use crate::rodata::Rodata;
 use crate::runtime::RuntimeImports;
 
@@ -52,13 +54,43 @@ pub fn compile_program(module: &mut ObjectModule, program: &Program) -> Result<(
     let mut rodata = Rodata::new();
     let mut rt_imports = RuntimeImports::new(ptr_ty);
 
-    // 1. Declare all IR functions.
+    // 1. Declare all IR functions (plus exported C-ABI wrappers for `extern "C" fn`).
     let mut func_ids: Vec<ClifFuncId> = Vec::with_capacity(program.functions.len());
+    let mut c_export_ids: HashMap<usize, ClifFuncId> = HashMap::new();
     for (i, func) in program.functions.iter().enumerate() {
-        let sig = fn_signature(module, &mut layouts, func);
-        let name = format!("__noev_fn_{i}");
-        let id = module.declare_function(&name, Linkage::Local, &sig)?;
-        func_ids.push(id);
+        match func.extern_kind {
+            ExternKind::Host => {
+                return Err(CodegenError(format!(
+                    "`extern fn {}` is a host function and requires an embedding host runtime",
+                    func.name
+                )));
+            }
+            ExternKind::CImport => {
+                let param_tys: Vec<Ty> =
+                    func.locals[1..=func.params].iter().map(|l| l.ty).collect();
+                let sig = c_fn_signature(module, &mut layouts, &param_tys, func.locals[0].ty);
+                let id = module.declare_function(&func.name, Linkage::Import, &sig)?;
+                func_ids.push(id);
+            }
+            ExternKind::CExport => {
+                let sig = fn_signature(module, &mut layouts, func);
+                let name = format!("__noev_fn_{i}");
+                let id = module.declare_function(&name, Linkage::Local, &sig)?;
+                func_ids.push(id);
+
+                let param_tys: Vec<Ty> =
+                    func.locals[1..=func.params].iter().map(|l| l.ty).collect();
+                let csig = c_fn_signature(module, &mut layouts, &param_tys, func.locals[0].ty);
+                let cid = module.declare_function(&func.name, Linkage::Export, &csig)?;
+                c_export_ids.insert(i, cid);
+            }
+            ExternKind::None => {
+                let sig = fn_signature(module, &mut layouts, func);
+                let name = format!("__noev_fn_{i}");
+                let id = module.declare_function(&name, Linkage::Local, &sig)?;
+                func_ids.push(id);
+            }
+        }
     }
 
     // 2. Collect which IR functions need `NoevCompiledFn` thunks (`sample`, `Expectation`,
@@ -83,11 +115,8 @@ pub fn compile_program(module: &mut ObjectModule, program: &Program) -> Result<(
 
     // 3. Compile each IR function.
     for (i, func) in program.functions.iter().enumerate() {
-        if func.is_extern {
-            return Err(CodegenError(format!(
-                "`extern fn {}` is a host function and requires an embedding host runtime",
-                func.name
-            )));
+        if func.is_c_import() {
+            continue;
         }
         ctx.clear();
         ctx.func.signature = fn_signature(module, &mut layouts, func);
@@ -102,6 +131,7 @@ pub fn compile_program(module: &mut ObjectModule, program: &Program) -> Result<(
                 rodata: &mut rodata,
                 rt_imports: &mut rt_imports,
                 func_ids: &func_ids,
+                c_export_ids: &c_export_ids,
                 thunk_ids: &thunk_ids,
                 builder: &mut builder,
                 ptr_ty,
@@ -118,6 +148,19 @@ pub fn compile_program(module: &mut ObjectModule, program: &Program) -> Result<(
             builder.finalize(target_config);
         }
         module.define_function(func_ids[i], &mut ctx)?;
+
+        if let Some(&cid) = c_export_ids.get(&i) {
+            compile_c_export_wrapper(
+                module,
+                &mut ctx,
+                &mut fb_ctx,
+                &mut layouts,
+                &mut rt_imports,
+                func,
+                func_ids[i],
+                cid,
+            )?;
+        }
     }
 
     // 4. Compile thunks.
@@ -178,6 +221,216 @@ fn fn_signature(
     }
     sig.returns.push(AbiParam::new(types::I8));
     sig
+}
+
+/// Platform C ABI signature for an `extern "C"` import, export, or function pointer.
+fn c_fn_signature(
+    module: &ObjectModule,
+    layouts: &mut LayoutCache<'_>,
+    param_tys: &[Ty],
+    ret_ty: Ty,
+) -> Signature {
+    let ptr_ty = module.target_config().pointer_type();
+    let mut sig = Signature::new(module.isa().default_call_conv());
+    match layouts.c_abi_arg(ret_ty) {
+        CAbiArg::Void => {}
+        CAbiArg::Scalar(sk) => sig.returns.push(AbiParam::new(scalar_clif(sk, ptr_ty))),
+        CAbiArg::DirectChunks(chunks) => {
+            for sk in chunks {
+                sig.returns.push(AbiParam::new(scalar_clif(sk, ptr_ty)));
+            }
+        }
+        CAbiArg::Indirect { .. } => {
+            sig.params
+                .push(AbiParam::special(ptr_ty, ArgumentPurpose::StructReturn));
+        }
+    }
+    for &pty in param_tys {
+        match layouts.c_abi_arg(pty) {
+            CAbiArg::Void => {}
+            CAbiArg::Scalar(sk) => sig.params.push(AbiParam::new(scalar_clif(sk, ptr_ty))),
+            CAbiArg::DirectChunks(chunks) => {
+                for sk in chunks {
+                    sig.params.push(AbiParam::new(scalar_clif(sk, ptr_ty)));
+                }
+            }
+            CAbiArg::Indirect { size, .. } => {
+                sig.params.push(AbiParam::special(
+                    ptr_ty,
+                    ArgumentPurpose::StructArgument(size),
+                ));
+            }
+        }
+    }
+    sig
+}
+
+/// Emits the exported C-ABI wrapper for an `extern "C" fn` (`spec/interop.md` §3).
+#[allow(clippy::too_many_arguments)]
+fn compile_c_export_wrapper(
+    module: &mut ObjectModule,
+    ctx: &mut Context,
+    fb_ctx: &mut FunctionBuilderContext,
+    layouts: &mut LayoutCache<'_>,
+    rt_imports: &mut RuntimeImports,
+    func: &Function,
+    inner_id: ClifFuncId,
+    export_id: ClifFuncId,
+) -> Result<(), CodegenError> {
+    let ptr_ty = module.target_config().pointer_type();
+    let target_config = module.target_config();
+    let param_tys: Vec<Ty> = func.locals[1..=func.params].iter().map(|l| l.ty).collect();
+    let ret_ty = func.locals[0].ty;
+    let ret_abi = layouts.c_abi_arg(ret_ty);
+    let ret_layout = layouts.layout(ret_ty);
+
+    ctx.clear();
+    ctx.func.signature = c_fn_signature(module, layouts, &param_tys, ret_ty);
+
+    let enter_id = rt_imports.get(module, "noev_rt_callback_enter", &[], Some(ptr_ty))?;
+    let exit_id = rt_imports.get(module, "noev_rt_callback_exit", &[ptr_ty, types::I8], None)?;
+    let from_c_i64_id = rt_imports.get(
+        module,
+        "noev_rt_int_from_c_i64",
+        &[ptr_ty, types::I64],
+        Some(types::I64),
+    )?;
+    let to_c_i64_id = rt_imports.get(
+        module,
+        "noev_rt_int_to_c_i64",
+        &[ptr_ty, types::I64, ptr_ty],
+        Some(types::I8),
+    )?;
+
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, fb_ctx);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let c_params: Vec<ClifValue> = b.block_params(entry).to_vec();
+
+        let enter_ref = module.declare_func_in_func(enter_id, b.func);
+        let enter_call = b.ins().call(enter_ref, &[]);
+        let rt = b.inst_results(enter_call)[0];
+
+        let mut p_idx = 0usize;
+        let sret_ptr = if matches!(ret_abi, CAbiArg::Indirect { .. }) {
+            let p = c_params[0];
+            p_idx = 1;
+            Some(p)
+        } else {
+            None
+        };
+
+        let mut inner_args = vec![rt];
+        for &pty in &param_tys {
+            let l = layouts.layout(pty);
+            match layouts.c_abi_arg(pty) {
+                CAbiArg::Void => {}
+                CAbiArg::Scalar(_) => {
+                    let v = c_params[p_idx];
+                    p_idx += 1;
+                    if pty == Ty::INT {
+                        let fref = module.declare_func_in_func(from_c_i64_id, b.func);
+                        let call = b.ins().call(fref, &[rt, v]);
+                        inner_args.push(b.inst_results(call)[0]);
+                    } else {
+                        inner_args.push(v);
+                    }
+                }
+                CAbiArg::DirectChunks(chunks) => {
+                    let slot = b.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        l.size.max(16),
+                        LayoutCache::align_shift(l.align.max(8)),
+                    ));
+                    let addr = b.ins().stack_addr(ptr_ty, slot, 0);
+                    for (ci, _) in chunks.iter().enumerate() {
+                        let v = c_params[p_idx];
+                        p_idx += 1;
+                        b.ins().store(MemFlagsData::new(), v, addr, (ci * 8) as i32);
+                    }
+                    inner_args.push(addr);
+                }
+                CAbiArg::Indirect { .. } => {
+                    let addr = c_params[p_idx];
+                    p_idx += 1;
+                    inner_args.push(addr);
+                }
+            }
+        }
+
+        let ret_slot_addr = if ret_layout.size > 0 {
+            if let Some(sp) = sret_ptr {
+                inner_args.push(sp);
+                Some(sp)
+            } else {
+                let slot = b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    ret_layout.size.max(16),
+                    LayoutCache::align_shift(ret_layout.align.max(8)),
+                ));
+                let addr = b.ins().stack_addr(ptr_ty, slot, 0);
+                inner_args.push(addr);
+                Some(addr)
+            }
+        } else {
+            None
+        };
+
+        let inner_ref = module.declare_func_in_func(inner_id, b.func);
+        let call = b.ins().call(inner_ref, &inner_args);
+        let mut ok = b.inst_results(call)[0];
+
+        // Extract return value(s) BEFORE `noev_rt_callback_exit` frees `rt`.
+        let mut ret_vals = Vec::new();
+        match &ret_abi {
+            CAbiArg::Void | CAbiArg::Indirect { .. } => {}
+            CAbiArg::Scalar(sk) => {
+                let addr = ret_slot_addr.expect("ret slot");
+                let raw = b
+                    .ins()
+                    .load(scalar_clif(*sk, ptr_ty), MemFlagsData::new(), addr, 0);
+                if ret_ty == Ty::INT {
+                    let out_slot = b.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        8,
+                        3,
+                    ));
+                    let out_addr = b.ins().stack_addr(ptr_ty, out_slot, 0);
+                    let fref = module.declare_func_in_func(to_c_i64_id, b.func);
+                    let conv = b.ins().call(fref, &[rt, raw, out_addr]);
+                    let conv_ok = b.inst_results(conv)[0];
+                    ok = b.ins().band(ok, conv_ok);
+                    let c_i64 = b.ins().load(types::I64, MemFlagsData::new(), out_addr, 0);
+                    ret_vals.push(c_i64);
+                } else {
+                    ret_vals.push(raw);
+                }
+            }
+            CAbiArg::DirectChunks(chunks) => {
+                let addr = ret_slot_addr.expect("ret slot");
+                for (ci, &sk) in chunks.iter().enumerate() {
+                    let v = b.ins().load(
+                        scalar_clif(sk, ptr_ty),
+                        MemFlagsData::new(),
+                        addr,
+                        (ci * 8) as i32,
+                    );
+                    ret_vals.push(v);
+                }
+            }
+        }
+
+        let exit_ref = module.declare_func_in_func(exit_id, b.func);
+        b.ins().call(exit_ref, &[rt, ok]);
+        b.ins().return_(&ret_vals);
+        b.seal_all_blocks();
+        b.finalize(target_config);
+    }
+
+    module.define_function(export_id, ctx)?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -324,6 +577,7 @@ struct FnLowerer<'a, 'b, 'p> {
     rodata: &'a mut Rodata,
     rt_imports: &'a mut RuntimeImports,
     func_ids: &'a [ClifFuncId],
+    c_export_ids: &'a HashMap<usize, ClifFuncId>,
     thunk_ids: &'a HashMap<FuncId, ClifFuncId>,
     builder: &'a mut FunctionBuilder<'b>,
     ptr_ty: ClifType,
@@ -1692,6 +1946,16 @@ impl<'a, 'b, 'p> FnLowerer<'a, 'b, 'p> {
                 self.builder
                     .ins()
                     .store(MemFlagsData::new(), tagged, dst, 0);
+                Ok(())
+            }
+            Rvalue::FnPtr(fid) => {
+                let Some(dst) = dst_addr else { return Ok(()) };
+                let cid = *self.c_export_ids.get(&fid.index()).ok_or_else(|| {
+                    CodegenError("function pointer target is not `extern \"C\" fn`".into())
+                })?;
+                let fref = self.module.declare_func_in_func(cid, self.builder.func);
+                let addr = self.builder.ins().func_addr(self.ptr_ty, fref);
+                self.builder.ins().store(MemFlagsData::new(), addr, dst, 0);
                 Ok(())
             }
         }
@@ -3330,6 +3594,23 @@ impl<'a, 'b, 'p> FnLowerer<'a, 'b, 'p> {
                 next,
             } => {
                 let callee = &self.program.functions[func.index()];
+                if callee.is_c_import() {
+                    let param_tys: Vec<Ty> = callee.locals[1..=callee.params]
+                        .iter()
+                        .map(|l| l.ty)
+                        .collect();
+                    let ret_ty = callee.locals[0].ty;
+                    self.lower_c_call(
+                        Some(self.func_ids[func.index()]),
+                        None,
+                        &param_tys,
+                        ret_ty,
+                        args,
+                        dest,
+                        *next,
+                    )?;
+                    return Ok(());
+                }
                 let mut call_args = vec![self.rt_val];
                 for (i, arg) in args.iter().enumerate() {
                     let pty = callee.locals[i + 1].ty;
@@ -3449,6 +3730,22 @@ impl<'a, 'b, 'p> FnLowerer<'a, 'b, 'p> {
                 self.check_ok(ok);
                 self.builder.ins().jump(self.blocks[next.index()], &[]);
             }
+            Terminator::CallIndirect {
+                callee,
+                args,
+                dest,
+                next,
+            } => {
+                let fptr_ty = operand_ty(self.program, self.func, callee);
+                let TyKind::ExternCFn { params, ret } = self.program.types.kind(fptr_ty).clone()
+                else {
+                    return Err(CodegenError(
+                        "indirect call target does not have `extern \"C\" fn` type".into(),
+                    ));
+                };
+                let fp_val = self.eval_scalar(callee)?;
+                self.lower_c_call(None, Some(fp_val), &params, ret, args, dest, *next)?;
+            }
             Terminator::Return => {
                 self.emit_return_ok()?;
             }
@@ -3467,6 +3764,127 @@ impl<'a, 'b, 'p> FnLowerer<'a, 'b, 'p> {
                 self.builder.ins().jump(self.err_block, &[]);
             }
         }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_c_call(
+        &mut self,
+        direct: Option<ClifFuncId>,
+        indirect: Option<ClifValue>,
+        param_tys: &[Ty],
+        ret_ty: Ty,
+        args: &[Operand],
+        dest: &Place,
+        next: Block,
+    ) -> Result<(), CodegenError> {
+        let ret_abi = self.layouts.c_abi_arg(ret_ty);
+        let ret_layout = self.layouts.layout(ret_ty);
+        let (dst_addr, _) = self.place_addr(dest)?;
+
+        let mut call_args = Vec::new();
+        let sret_ptr = if matches!(ret_abi, CAbiArg::Indirect { .. }) {
+            let ptr =
+                dst_addr.unwrap_or_else(|| self.alloc_temp_slot(ret_layout.size, ret_layout.align));
+            call_args.push(ptr);
+            Some(ptr)
+        } else {
+            None
+        };
+
+        for (arg, &pty) in args.iter().zip(param_tys.iter()) {
+            let l = self.layouts.layout(pty);
+            match self.layouts.c_abi_arg(pty) {
+                CAbiArg::Void => {}
+                CAbiArg::Scalar(_) => {
+                    let v = self.eval_scalar(arg)?;
+                    if pty == Ty::INT {
+                        let out = self.alloc_temp_slot(8, 8);
+                        let conv_id = self.rt_imports.get(
+                            self.module,
+                            "noev_rt_int_to_c_i64",
+                            &[self.ptr_ty, types::I64, self.ptr_ty],
+                            Some(types::I8),
+                        )?;
+                        let conv = self.call_clif(conv_id, &[self.rt_val, v, out]);
+                        let ok = self.builder.inst_results(conv)[0];
+                        self.check_ok(ok);
+                        let raw = self
+                            .builder
+                            .ins()
+                            .load(types::I64, MemFlagsData::new(), out, 0);
+                        call_args.push(raw);
+                    } else {
+                        call_args.push(v);
+                    }
+                }
+                CAbiArg::DirectChunks(chunks) => {
+                    let (src_opt, _) = self.operand_addr(arg)?;
+                    let src = src_opt.expect("struct arg");
+                    let tmp = self.alloc_temp_slot(l.size.max(16), l.align.max(8));
+                    self.emit_memcpy(tmp, src, l.size, l.align);
+                    for (ci, sk) in chunks.into_iter().enumerate() {
+                        let v = self.builder.ins().load(
+                            scalar_clif(sk, self.ptr_ty),
+                            MemFlagsData::new(),
+                            tmp,
+                            (ci * 8) as i32,
+                        );
+                        call_args.push(v);
+                    }
+                }
+                CAbiArg::Indirect { .. } => {
+                    let (src_opt, _) = self.operand_addr(arg)?;
+                    let src = src_opt.expect("struct arg");
+                    call_args.push(src);
+                }
+            }
+        }
+
+        let call = if let Some(fid) = direct {
+            self.call_clif(fid, &call_args)
+        } else {
+            let sig = c_fn_signature(self.module, self.layouts, param_tys, ret_ty);
+            let sig_ref = self.builder.import_signature(sig);
+            let fp = indirect.expect("indirect fn ptr");
+            self.builder.ins().call_indirect(sig_ref, fp, &call_args)
+        };
+        let results: Vec<ClifValue> = self.builder.inst_results(call).to_vec();
+
+        if let Some(dst) = dst_addr {
+            match ret_abi {
+                CAbiArg::Void => {}
+                CAbiArg::Indirect { .. } => {
+                    let _ = sret_ptr;
+                }
+                CAbiArg::Scalar(_) => {
+                    let mut val = results[0];
+                    if ret_ty == Ty::INT {
+                        let conv_id = self.rt_imports.get(
+                            self.module,
+                            "noev_rt_int_from_c_i64",
+                            &[self.ptr_ty, types::I64],
+                            Some(types::I64),
+                        )?;
+                        let conv = self.call_clif(conv_id, &[self.rt_val, val]);
+                        val = self.builder.inst_results(conv)[0];
+                    }
+                    self.builder.ins().store(MemFlagsData::new(), val, dst, 0);
+                }
+                CAbiArg::DirectChunks(_) => {
+                    let tmp =
+                        self.alloc_temp_slot(ret_layout.size.max(16), ret_layout.align.max(8));
+                    for (ci, val) in results.into_iter().enumerate() {
+                        self.builder
+                            .ins()
+                            .store(MemFlagsData::new(), val, tmp, (ci * 8) as i32);
+                    }
+                    self.emit_memcpy(dst, tmp, ret_layout.size, ret_layout.align);
+                }
+            }
+        }
+
+        self.builder.ins().jump(self.blocks[next.index()], &[]);
         Ok(())
     }
 }

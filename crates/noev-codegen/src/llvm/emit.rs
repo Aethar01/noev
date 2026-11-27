@@ -10,15 +10,17 @@ use std::mem::{align_of, offset_of, size_of};
 
 use noev_ir::Program;
 use noev_ir::ir::{
-    Align, BinOp, Block, Const, FormatKind, FormatPart, FuncId, Function, Operand, Place, Prep,
-    Proj, Rvalue, Stmt, Terminator, UnOp,
+    Align, BinOp, Block, Const, ExternKind, FormatKind, FormatPart, FuncId, Function, Operand,
+    Place, Prep, Proj, Rvalue, Stmt, Terminator, UnOp,
 };
 use noev_runtime::cabi_compiled::{NoevFormatPart, NoevPrintArg, TypeTag};
 use noev_sema::prelude::{DistMethod, FloatConst, Gate, Math, Pauli};
 use noev_sema::{Ty, TyKind};
 
-use crate::analysis::{PlaceKey, analyze_enum_variants, collect_thunks, const_ty, has_feedback};
-use crate::layout::{LayoutCache, ScalarKind};
+use crate::analysis::{
+    PlaceKey, analyze_enum_variants, collect_thunks, const_ty, has_feedback, operand_ty,
+};
+use crate::layout::{CAbiArg, LayoutCache, ScalarKind};
 use crate::{CodegenError, CodegenOptions, RuntimeAbi};
 
 const DEFAULT_PRECISION: f64 = 0.01;
@@ -67,13 +69,23 @@ pub fn emit_module(program: &Program, opts: CodegenOptions) -> Result<String, Co
     let mut decls: BTreeMap<String, String> = BTreeMap::new();
     let mut bodies = String::new();
 
-    // 1. Emit every IR function.
+    // 1. Emit every IR function (plus C import declarations and C export wrappers).
     for (i, func) in program.functions.iter().enumerate() {
-        if func.is_extern {
-            return Err(CodegenError(format!(
-                "`extern fn {}` is a host function and requires an embedding host runtime",
-                func.name
-            )));
+        match func.extern_kind {
+            ExternKind::Host => {
+                return Err(CodegenError(format!(
+                    "`extern fn {}` is a host function and requires an embedding host runtime",
+                    func.name
+                )));
+            }
+            ExternKind::CImport => {
+                let param_tys: Vec<Ty> =
+                    func.locals[1..=func.params].iter().map(|l| l.ty).collect();
+                let decl = llvm_c_decl(&mut layouts, &func.name, &param_tys, func.locals[0].ty);
+                decls.entry(func.name.clone()).or_insert(decl);
+                continue;
+            }
+            ExternKind::None | ExternKind::CExport => {}
         }
         let facts = analyze_enum_variants(func);
         let mut emitter = FnEmitter {
@@ -94,6 +106,9 @@ pub fn emit_module(program: &Program, opts: CodegenOptions) -> Result<String, Co
             ctrl_depth_var: String::new(),
         };
         emitter.emit_function(&mut bodies)?;
+        if func.is_c_export() {
+            emit_c_export_wrapper(&mut bodies, &mut layouts, &mut decls, func, i);
+        }
     }
 
     // 2. Emit thunks for `sample`, `Expectation`, `Overlap`, `Undo`.
@@ -2082,6 +2097,16 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 let _ = writeln!(self.body, "  store i64 {tagged}, ptr {dst}, align 8");
                 Ok(())
             }
+            Rvalue::FnPtr(fid) => {
+                let Some(dst) = dst_addr else { return Ok(()) };
+                let target = &self.program.functions[fid.index()];
+                let _ = writeln!(
+                    self.body,
+                    "  store ptr @{}, ptr {dst}, align 8",
+                    target.name
+                );
+                Ok(())
+            }
         }
     }
 
@@ -3698,6 +3723,16 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 next,
             } => {
                 let callee = &self.program.functions[func.index()];
+                if callee.is_c_import() {
+                    let param_tys: Vec<Ty> = callee.locals[1..=callee.params]
+                        .iter()
+                        .map(|l| l.ty)
+                        .collect();
+                    let ret_ty = callee.locals[0].ty;
+                    let callee_sym = format!("@{}", callee.name);
+                    self.emit_c_call(&callee_sym, &param_tys, ret_ty, args, dest, *next)?;
+                    return Ok(());
+                }
                 let mut call_args = vec!["ptr %rt".to_string()];
                 for (i, arg) in args.iter().enumerate() {
                     let pty = callee.locals[i + 1].ty;
@@ -3806,6 +3841,22 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
                 }
                 let _ = writeln!(self.body, "  br label %bb{}", next.index());
             }
+            Terminator::CallIndirect {
+                callee,
+                args,
+                dest,
+                next,
+            } => {
+                let fptr_ty = operand_ty(self.program, self.func, callee);
+                let TyKind::ExternCFn { params, ret } = self.program.types.kind(fptr_ty).clone()
+                else {
+                    return Err(CodegenError(
+                        "indirect call target does not have `extern \"C\" fn` type".into(),
+                    ));
+                };
+                let fp_val = self.eval_scalar(callee)?;
+                self.emit_c_call(&fp_val, &params, ret, args, dest, *next)?;
+            }
             Terminator::Return => {
                 self.emit_return_ok();
             }
@@ -3827,5 +3878,421 @@ impl<'a, 'p> FnEmitter<'a, 'p> {
             }
         }
         Ok(())
+    }
+
+    fn emit_c_call(
+        &mut self,
+        callee_expr: &str,
+        param_tys: &[Ty],
+        ret_ty: Ty,
+        args: &[Operand],
+        dest: &Place,
+        next: Block,
+    ) -> Result<(), CodegenError> {
+        let ret_abi = self.layouts.c_abi_arg(ret_ty);
+        let ret_layout = self.layouts.layout(ret_ty);
+        let (dst_addr, _) = self.place_addr(dest)?;
+
+        let mut call_args = Vec::new();
+        let ret_llvm = llvm_c_ret_ty(&ret_abi);
+        if let CAbiArg::Indirect { size, align } = ret_abi {
+            let rp = dst_addr
+                .clone()
+                .unwrap_or_else(|| self.alloca_bytes(ret_layout.size, ret_layout.align));
+            call_args.push(format!("ptr sret([{size} x i8]) align {align} {rp}"));
+        }
+
+        for (arg, &pty) in args.iter().zip(param_tys.iter()) {
+            let l = self.layouts.layout(pty);
+            match self.layouts.c_abi_arg(pty) {
+                CAbiArg::Void => {}
+                CAbiArg::Scalar(sk) => {
+                    let v = self.eval_scalar(arg)?;
+                    if pty == Ty::INT {
+                        let out = self.alloca_bytes(8, 8);
+                        self.declare(
+                            "noev_rt_int_to_c_i64",
+                            "declare i8 @noev_rt_int_to_c_i64(ptr, i64, ptr)",
+                        );
+                        let ok = self.fresh();
+                        let _ = writeln!(
+                            self.body,
+                            "  {ok} = call i8 @noev_rt_int_to_c_i64(ptr %rt, i64 {v}, ptr {out})"
+                        );
+                        self.check_ok(&ok);
+                        let raw = self.fresh();
+                        let _ = writeln!(self.body, "  {raw} = load i64, ptr {out}, align 8");
+                        call_args.push(format!("i64 {raw}"));
+                    } else {
+                        call_args.push(format!("{} {v}", scalar_llvm(sk)));
+                    }
+                }
+                CAbiArg::DirectChunks(chunks) => {
+                    let (src_opt, _) = self.operand_addr(arg)?;
+                    let src = src_opt.expect("struct arg");
+                    let tmp = self.alloca_bytes(l.size.max(16), l.align.max(8));
+                    self.emit_memcpy(&tmp, &src, l.size);
+                    for (ci, sk) in chunks.into_iter().enumerate() {
+                        let p = if ci == 0 {
+                            tmp.clone()
+                        } else {
+                            let gep = self.fresh();
+                            let _ = writeln!(
+                                self.body,
+                                "  {gep} = getelementptr inbounds i8, ptr {tmp}, i64 {}",
+                                ci * 8
+                            );
+                            gep
+                        };
+                        let v = self.fresh();
+                        let lt = scalar_llvm(sk);
+                        let _ = writeln!(self.body, "  {v} = load {lt}, ptr {p}, align 1");
+                        call_args.push(format!("{lt} {v}"));
+                    }
+                }
+                CAbiArg::Indirect { size, align } => {
+                    let (src_opt, _) = self.operand_addr(arg)?;
+                    let src = src_opt.expect("struct arg");
+                    call_args.push(format!("ptr byval([{size} x i8]) align {align} {src}"));
+                }
+            }
+        }
+
+        if ret_llvm == "void" {
+            let _ = writeln!(
+                self.body,
+                "  call void {callee_expr}({})",
+                call_args.join(", ")
+            );
+        } else {
+            let res = self.fresh();
+            let _ = writeln!(
+                self.body,
+                "  {res} = call {ret_llvm} {callee_expr}({})",
+                call_args.join(", ")
+            );
+            if let Some(dst) = dst_addr {
+                match ret_abi {
+                    CAbiArg::Void | CAbiArg::Indirect { .. } => {}
+                    CAbiArg::Scalar(sk) => {
+                        let val = if ret_ty == Ty::INT {
+                            self.declare(
+                                "noev_rt_int_from_c_i64",
+                                "declare i64 @noev_rt_int_from_c_i64(ptr, i64)",
+                            );
+                            let tagged = self.fresh();
+                            let _ = writeln!(
+                                self.body,
+                                "  {tagged} = call i64 @noev_rt_int_from_c_i64(ptr %rt, i64 {res})"
+                            );
+                            tagged
+                        } else {
+                            res
+                        };
+                        let _ = writeln!(
+                            self.body,
+                            "  store {} {val}, ptr {dst}, align {}",
+                            scalar_llvm(sk),
+                            ret_layout.align
+                        );
+                    }
+                    CAbiArg::DirectChunks(chunks) => {
+                        let tmp =
+                            self.alloca_bytes(ret_layout.size.max(16), ret_layout.align.max(8));
+                        if chunks.len() == 1 {
+                            let _ = writeln!(
+                                self.body,
+                                "  store {} {res}, ptr {tmp}, align 1",
+                                scalar_llvm(chunks[0])
+                            );
+                        } else {
+                            for (ci, sk) in chunks.iter().enumerate() {
+                                let part = self.fresh();
+                                let _ = writeln!(
+                                    self.body,
+                                    "  {part} = extractvalue {ret_llvm} {res}, {ci}"
+                                );
+                                let p = if ci == 0 {
+                                    tmp.clone()
+                                } else {
+                                    let gep = self.fresh();
+                                    let _ = writeln!(
+                                        self.body,
+                                        "  {gep} = getelementptr inbounds i8, ptr {tmp}, i64 {}",
+                                        ci * 8
+                                    );
+                                    gep
+                                };
+                                let _ = writeln!(
+                                    self.body,
+                                    "  store {} {part}, ptr {p}, align 1",
+                                    scalar_llvm(*sk)
+                                );
+                            }
+                        }
+                        self.emit_memcpy(&dst, &tmp, ret_layout.size);
+                    }
+                }
+            }
+        }
+
+        let _ = writeln!(self.body, "  br label %bb{}", next.index());
+        Ok(())
+    }
+}
+
+fn llvm_c_ret_ty(ret_abi: &CAbiArg) -> String {
+    match ret_abi {
+        CAbiArg::Void | CAbiArg::Indirect { .. } => "void".into(),
+        CAbiArg::Scalar(sk) => scalar_llvm(*sk).into(),
+        CAbiArg::DirectChunks(chunks) => {
+            if chunks.len() == 1 {
+                scalar_llvm(chunks[0]).into()
+            } else {
+                let parts: Vec<&str> = chunks.iter().map(|&sk| scalar_llvm(sk)).collect();
+                format!("{{ {} }}", parts.join(", "))
+            }
+        }
+    }
+}
+
+fn llvm_c_decl(layouts: &mut LayoutCache<'_>, name: &str, param_tys: &[Ty], ret_ty: Ty) -> String {
+    let ret_abi = layouts.c_abi_arg(ret_ty);
+    let ret_llvm = llvm_c_ret_ty(&ret_abi);
+    let mut params = Vec::new();
+    if let CAbiArg::Indirect { size, align } = ret_abi {
+        params.push(format!("ptr sret([{size} x i8]) align {align}"));
+    }
+    for &pty in param_tys {
+        match layouts.c_abi_arg(pty) {
+            CAbiArg::Void => {}
+            CAbiArg::Scalar(sk) => params.push(scalar_llvm(sk).into()),
+            CAbiArg::DirectChunks(chunks) => {
+                for sk in chunks {
+                    params.push(scalar_llvm(sk).into());
+                }
+            }
+            CAbiArg::Indirect { size, align } => {
+                params.push(format!("ptr byval([{size} x i8]) align {align}"));
+            }
+        }
+    }
+    format!("declare {ret_llvm} @{name}({})", params.join(", "))
+}
+
+/// Emits the exported C-ABI wrapper `define <c_ret> @<name>(...)` for an `extern "C" fn`
+/// (`spec/interop.md` §3).
+fn emit_c_export_wrapper(
+    out: &mut String,
+    layouts: &mut LayoutCache<'_>,
+    decls: &mut BTreeMap<String, String>,
+    func: &Function,
+    func_index: usize,
+) {
+    decls
+        .entry("noev_rt_callback_enter".into())
+        .or_insert_with(|| "declare ptr @noev_rt_callback_enter()".into());
+    decls
+        .entry("noev_rt_callback_exit".into())
+        .or_insert_with(|| "declare void @noev_rt_callback_exit(ptr, i8)".into());
+
+    let param_tys: Vec<Ty> = func.locals[1..=func.params].iter().map(|l| l.ty).collect();
+    let ret_ty = func.locals[0].ty;
+    let ret_abi = layouts.c_abi_arg(ret_ty);
+    let ret_layout = layouts.layout(ret_ty);
+    let ret_llvm = llvm_c_ret_ty(&ret_abi);
+
+    let mut sig_params = Vec::new();
+    let mut p_idx = 0usize;
+    let sret_param = if let CAbiArg::Indirect { size, align } = ret_abi {
+        sig_params.push(format!("ptr sret([{size} x i8]) align {align} %c_sret"));
+        Some("%c_sret".to_string())
+    } else {
+        None
+    };
+
+    let mut param_abis = Vec::with_capacity(param_tys.len());
+    for &pty in &param_tys {
+        let abi = layouts.c_abi_arg(pty);
+        match &abi {
+            CAbiArg::Void => {}
+            CAbiArg::Scalar(sk) => {
+                sig_params.push(format!("{} %cp{p_idx}", scalar_llvm(*sk)));
+                p_idx += 1;
+            }
+            CAbiArg::DirectChunks(chunks) => {
+                for &sk in chunks {
+                    sig_params.push(format!("{} %cp{p_idx}", scalar_llvm(sk)));
+                    p_idx += 1;
+                }
+            }
+            CAbiArg::Indirect { size, align } => {
+                sig_params.push(format!("ptr byval([{size} x i8]) align {align} %cp{p_idx}"));
+                p_idx += 1;
+            }
+        }
+        param_abis.push((pty, abi));
+    }
+
+    let _ = writeln!(
+        out,
+        "\ndefine {ret_llvm} @{}({}) {{\nentry:",
+        func.name,
+        sig_params.join(", ")
+    );
+    out.push_str("  %rt = call ptr @noev_rt_callback_enter()\n");
+
+    let mut inner_args = vec!["ptr %rt".to_string()];
+    let mut c_arg = 0usize;
+    let mut tmp_idx = 0usize;
+    for (pty, abi) in param_abis {
+        let l = layouts.layout(pty);
+        match abi {
+            CAbiArg::Void => {}
+            CAbiArg::Scalar(sk) => {
+                let name = format!("%cp{c_arg}");
+                c_arg += 1;
+                if pty == Ty::INT {
+                    decls
+                        .entry("noev_rt_int_from_c_i64".into())
+                        .or_insert_with(|| "declare i64 @noev_rt_int_from_c_i64(ptr, i64)".into());
+                    let t = format!("%t{tmp_idx}");
+                    tmp_idx += 1;
+                    let _ = writeln!(
+                        out,
+                        "  {t} = call i64 @noev_rt_int_from_c_i64(ptr %rt, i64 {name})"
+                    );
+                    inner_args.push(format!("i64 {t}"));
+                } else {
+                    inner_args.push(format!("{} {name}", scalar_llvm(sk)));
+                }
+            }
+            CAbiArg::DirectChunks(chunks) => {
+                let slot = format!("%slot{tmp_idx}");
+                tmp_idx += 1;
+                let sz = l.size.max(16);
+                let al = l.align.max(8);
+                let _ = writeln!(out, "  {slot} = alloca [{sz} x i8], align {al}");
+                for (ci, sk) in chunks.into_iter().enumerate() {
+                    let pname = format!("%cp{c_arg}");
+                    c_arg += 1;
+                    let p = if ci == 0 {
+                        slot.clone()
+                    } else {
+                        let g = format!("%gep{tmp_idx}");
+                        tmp_idx += 1;
+                        let _ = writeln!(
+                            out,
+                            "  {g} = getelementptr inbounds i8, ptr {slot}, i64 {}",
+                            ci * 8
+                        );
+                        g
+                    };
+                    let _ = writeln!(out, "  store {} {pname}, ptr {p}, align 1", scalar_llvm(sk));
+                }
+                inner_args.push(format!("ptr {slot}"));
+            }
+            CAbiArg::Indirect { .. } => {
+                let pname = format!("%cp{c_arg}");
+                c_arg += 1;
+                inner_args.push(format!("ptr {pname}"));
+            }
+        }
+    }
+
+    let ret_slot = if ret_layout.size > 0 {
+        if let Some(sp) = sret_param {
+            inner_args.push(format!("ptr {sp}"));
+            Some(sp)
+        } else {
+            let sz = ret_layout.size.max(16);
+            let al = ret_layout.align.max(8);
+            let _ = writeln!(out, "  %ret_slot = alloca [{sz} x i8], align {al}");
+            inner_args.push("ptr %ret_slot".into());
+            Some("%ret_slot".into())
+        }
+    } else {
+        None
+    };
+
+    let _ = writeln!(
+        out,
+        "  %ok0 = call i8 @__noev_fn_{func_index}({})",
+        inner_args.join(", ")
+    );
+
+    let mut ok_var = "%ok0".to_string();
+    let ret_val_expr: Option<String> = match &ret_abi {
+        CAbiArg::Void | CAbiArg::Indirect { .. } => None,
+        CAbiArg::Scalar(sk) => {
+            let rs = ret_slot.as_deref().expect("ret slot");
+            let _ = writeln!(
+                out,
+                "  %raw_ret = load {}, ptr {rs}, align {}",
+                scalar_llvm(*sk),
+                ret_layout.align
+            );
+            if ret_ty == Ty::INT {
+                decls
+                    .entry("noev_rt_int_to_c_i64".into())
+                    .or_insert_with(|| "declare i8 @noev_rt_int_to_c_i64(ptr, i64, ptr)".into());
+                out.push_str("  %c_i64_slot = alloca i64, align 8\n");
+                out.push_str(
+                    "  %ok_conv = call i8 @noev_rt_int_to_c_i64(ptr %rt, i64 %raw_ret, ptr %c_i64_slot)\n",
+                );
+                out.push_str("  %ok1 = and i8 %ok0, %ok_conv\n");
+                ok_var = "%ok1".into();
+                out.push_str("  %c_ret = load i64, ptr %c_i64_slot, align 8\n");
+                Some("%c_ret".into())
+            } else {
+                Some("%raw_ret".into())
+            }
+        }
+        CAbiArg::DirectChunks(chunks) => {
+            let rs = ret_slot.as_deref().expect("ret slot");
+            if chunks.len() == 1 {
+                let _ = writeln!(
+                    out,
+                    "  %c_ret = load {}, ptr {rs}, align 1",
+                    scalar_llvm(chunks[0])
+                );
+                Some("%c_ret".into())
+            } else {
+                let mut agg = "undef".to_string();
+                for (ci, sk) in chunks.iter().enumerate() {
+                    let p = if ci == 0 {
+                        rs.to_string()
+                    } else {
+                        let g = format!("%rgep{ci}");
+                        let _ = writeln!(
+                            out,
+                            "  {g} = getelementptr inbounds i8, ptr {rs}, i64 {}",
+                            ci * 8
+                        );
+                        g
+                    };
+                    let v = format!("%rc{ci}");
+                    let lt = scalar_llvm(*sk);
+                    let _ = writeln!(out, "  {v} = load {lt}, ptr {p}, align 1");
+                    let next_agg = format!("%ragg{ci}");
+                    let _ = writeln!(
+                        out,
+                        "  {next_agg} = insertvalue {ret_llvm} {agg}, {lt} {v}, {ci}"
+                    );
+                    agg = next_agg;
+                }
+                Some(agg)
+            }
+        }
+    };
+
+    let _ = writeln!(
+        out,
+        "  call void @noev_rt_callback_exit(ptr %rt, i8 {ok_var})"
+    );
+    if let Some(rv) = ret_val_expr {
+        let _ = writeln!(out, "  ret {ret_llvm} {rv}\n}}");
+    } else {
+        out.push_str("  ret void\n}\n");
     }
 }

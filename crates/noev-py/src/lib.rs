@@ -329,7 +329,7 @@ impl PyRuntime {
                 )));
             };
             let func = &ir.functions[id.index()];
-            if !func.is_extern {
+            if !func.is_host_extern() {
                 return Err(exc::ValidationError::new_err(format!(
                     "`{name}` is a Noev function, not an `extern fn`"
                 )));
@@ -338,7 +338,7 @@ impl PyRuntime {
             check_python_arity(py, name, reg.callable.bind(py), expected_arity)?;
         }
         for func in &ir.functions {
-            if func.is_extern && !self.hosts.contains_key(&func.name) {
+            if func.is_host_extern() && !self.hosts.contains_key(&func.name) {
                 return Err(exc::ValidationError::new_err(format!(
                     "missing host implementation for `extern fn {}`",
                     func.name

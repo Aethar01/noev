@@ -101,6 +101,17 @@ pub fn link_object(
     output: &Path,
     runtime_lib: &Path,
 ) -> Result<(), CodegenError> {
+    link_object_with_args(obj_bytes, output, runtime_lib, &[])
+}
+
+/// Links native object bytes with `runtime_lib` and extra C objects, archives, or `-l`/`-L`
+/// flags into a standalone executable at `output`.
+pub fn link_object_with_args(
+    obj_bytes: &[u8],
+    output: &Path,
+    runtime_lib: &Path,
+    extra_args: &[String],
+) -> Result<(), CodegenError> {
     let obj_path = output.with_extension("noev.tmp.o");
     std::fs::write(&obj_path, obj_bytes).map_err(|e| {
         CodegenError(format!(
@@ -110,7 +121,15 @@ pub fn link_object(
     })?;
 
     let mut cmd = Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()));
-    cmd.arg(&obj_path).arg(runtime_lib).arg("-o").arg(output);
+    cmd.arg(&obj_path);
+    for arg in extra_args {
+        if Path::new(arg).exists() || arg.starts_with('-') {
+            cmd.arg(arg);
+        } else {
+            cmd.arg(format!("-l{arg}"));
+        }
+    }
+    cmd.arg(runtime_lib).arg("-o").arg(output);
     #[cfg(target_os = "linux")]
     cmd.args(["-lm", "-lpthread", "-ldl"]);
     #[cfg(target_os = "macos")]

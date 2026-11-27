@@ -199,7 +199,7 @@ fn stub(name: String, span: Span) -> Function {
         }],
         span,
         sampled: false,
-        is_extern: false,
+        extern_kind: ExternKind::None,
     }
 }
 
@@ -286,8 +286,8 @@ impl<'a> Builder<'a> {
         builder.params = params;
         builder.args = args;
         builder.function.span = decl.span;
-        builder.function.is_extern = decl.is_extern;
-        if decl.is_extern {
+        builder.function.extern_kind = decl.extern_kind;
+        if decl.is_foreign_import() {
             for (param, &ty) in syntax.list(decl.params).iter().zip(info.sig.params.iter()) {
                 builder.function.locals.push(LocalDecl {
                     ty,
@@ -353,7 +353,7 @@ impl<'a> Builder<'a> {
                 blocks: Vec::new(),
                 span: body.map_or(Span::default(), |b| syntax.block(b).span),
                 sampled: false,
-                is_extern: false,
+                extern_kind: ExternKind::None,
             },
             current: Block(0),
             locals: vec![None; typed.locals.len()],
@@ -457,7 +457,10 @@ impl<'a> Builder<'a> {
     }
 
     fn build(mut self) -> Function {
-        if self.function.is_extern {
+        if matches!(
+            self.function.extern_kind,
+            ExternKind::Host | ExternKind::CImport
+        ) {
             return self.function;
         }
         if let Some(body) = self.body {
@@ -923,6 +926,7 @@ fn successors(term: &Terminator) -> impl Iterator<Item = Block> {
     let (a, b) = match *term {
         Terminator::Goto(next)
         | Terminator::Call { next, .. }
+        | Terminator::CallIndirect { next, .. }
         | Terminator::Undo { next, .. }
         | Terminator::Assert { next, .. } => (Some(next), None),
         Terminator::Branch {
@@ -937,6 +941,7 @@ fn successors_mut(term: &mut Terminator) -> Vec<&mut Block> {
     match term {
         Terminator::Goto(next)
         | Terminator::Call { next, .. }
+        | Terminator::CallIndirect { next, .. }
         | Terminator::Undo { next, .. }
         | Terminator::Assert { next, .. } => vec![next],
         Terminator::Branch {
@@ -1414,6 +1419,15 @@ impl Builder<'_> {
                     unreachable!("a size parameter is a size in each copy");
                 };
                 Some(Operand::Const(Const::Int(n as i64)))
+            }
+            ExprKind::Name(_) | ExprKind::Path(_)
+                if let Res::FnPtr(f) = self.typed.res[id.index()] =>
+            {
+                let ty = self.ty(id);
+                let temp = self.temp(ty);
+                let func = self.func(f, id);
+                self.assign(temp.clone(), Rvalue::FnPtr(func));
+                Some(Operand::Copy(temp))
             }
             ExprKind::Int(v) if self.ty(id) == Ty::BIT => Some(Operand::Const(Const::Bit(v == 1))),
             ExprKind::Int(v) if let Some(w) = self.ty(id).width() => {
@@ -2391,6 +2405,31 @@ impl Builder<'_> {
                         args: ops,
                         dest,
                         adjoint,
+                        next,
+                    },
+                    next,
+                );
+            }
+            Callee::FnPtr => {
+                let ExprKind::Call {
+                    callee: callee_expr,
+                    ..
+                } = self.ast.expr(id).kind
+                else {
+                    unreachable!("Callee::FnPtr only comes from ExprKind::Call");
+                };
+                let callee_op = self.operand(callee_expr);
+                let ops = args.iter().map(|&a| self.operand(a)).collect();
+                let dest = dest.unwrap_or_else(|| {
+                    let ty = self.ty(id);
+                    self.temp(ty)
+                });
+                let next = self.new_block();
+                self.terminate_into(
+                    Terminator::CallIndirect {
+                        callee: callee_op,
+                        args: ops,
+                        dest,
                         next,
                     },
                     next,

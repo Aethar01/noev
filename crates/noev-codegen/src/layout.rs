@@ -153,7 +153,9 @@ impl<'p> LayoutCache<'p> {
             | TyKind::String
             | TyKind::Observable
             | TyKind::Distribution(_) => scalar(8, 8, ScalarKind::I64),
-            TyKind::Qubit | TyKind::Ref { .. } => scalar(ptr_b, ptr_b, ScalarKind::Ptr),
+            TyKind::Qubit | TyKind::Ref { .. } | TyKind::ExternCFn { .. } => {
+                scalar(ptr_b, ptr_b, ScalarKind::Ptr)
+            }
             TyKind::F32 => scalar(4, 4, ScalarKind::F32),
             TyKind::Float => scalar(8, 8, ScalarKind::F64),
             TyKind::Complex => TypeLayout {
@@ -238,6 +240,114 @@ impl<'p> LayoutCache<'p> {
             | TyKind::Size(_)
             | TyKind::SizeSum { .. } => {
                 panic!("unmonomorphised type reached codegen: {:?}", ty)
+            }
+        }
+    }
+}
+
+/// How a C ABI parameter or return value is passed on x86_64 System V (`spec/interop.md` §3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CAbiArg {
+    /// Void (`()`).
+    Void,
+    /// Passed in a single register (`Int` is converted to/from `I64`).
+    Scalar(ScalarKind),
+    /// Small `extern "C" struct` (<= 16 bytes) split into 1 or 2 register chunks
+    /// (`I8`/`I16`/`I32`/`I64`/`F32`/`F64`).
+    DirectChunks(Vec<ScalarKind>),
+    /// Large `extern "C" struct` (> 16 bytes): passed via stack `byval` / `StructArgument`,
+    /// returned via hidden `sret` / `StructReturn` pointer.
+    Indirect {
+        /// Byte size.
+        size: u32,
+        /// Byte alignment.
+        align: u32,
+    },
+}
+
+impl LayoutCache<'_> {
+    /// Classifies `ty` for the platform C ABI (x86_64 System V).
+    pub fn c_abi_arg(&mut self, ty: Ty) -> CAbiArg {
+        let l = self.layout(ty);
+        if l.size == 0 {
+            return CAbiArg::Void;
+        }
+        if let Some(sk) = l.scalar {
+            return CAbiArg::Scalar(sk);
+        }
+        if l.size > 16 {
+            return CAbiArg::Indirect {
+                size: l.size,
+                align: l.align,
+            };
+        }
+        // Classify each 8-byte eightbyte (0..8, 8..16): if every leaf in an eightbyte is
+        // float (`F32`/`F64`), it is SSE; if any leaf is integer/ptr, it is INTEGER.
+        let mut leaves: Vec<(u32, u32, bool)> = Vec::new(); // (offset, size, is_float)
+        self.collect_c_leaves(ty, 0, &mut leaves);
+        let num_chunks = if l.size <= 8 { 1 } else { 2 };
+        let mut chunks = Vec::with_capacity(num_chunks);
+        for chunk_idx in 0..num_chunks {
+            let start = (chunk_idx as u32) * 8;
+            let end = (start + 8).min(l.size);
+            let chunk_bytes = end - start;
+            let mut has_int = false;
+            let mut has_float = false;
+            for &(off, sz, is_f) in &leaves {
+                if off < end && off + sz > start {
+                    if is_f {
+                        has_float = true;
+                    } else {
+                        has_int = true;
+                    }
+                }
+            }
+            let kind = if has_float && !has_int {
+                if chunk_bytes <= 4 {
+                    ScalarKind::F32
+                } else {
+                    ScalarKind::F64
+                }
+            } else if chunk_bytes <= 1 {
+                ScalarKind::I8
+            } else if chunk_bytes <= 2 {
+                ScalarKind::I16
+            } else if chunk_bytes <= 4 {
+                ScalarKind::I32
+            } else {
+                ScalarKind::I64
+            };
+            chunks.push(kind);
+        }
+        CAbiArg::DirectChunks(chunks)
+    }
+
+    fn collect_c_leaves(&mut self, ty: Ty, base: u32, out: &mut Vec<(u32, u32, bool)>) {
+        match self.program.types.kind(ty).clone() {
+            TyKind::F32 => out.push((base, 4, true)),
+            TyKind::Float => out.push((base, 8, true)),
+            TyKind::Array(elem, len) => {
+                let el = self.layout(elem);
+                for i in 0..len {
+                    self.collect_c_leaves(elem, base + (i as u32) * el.size, out);
+                }
+            }
+            TyKind::Struct(id) if self.program.types.structs[id.index()].variants.is_none() => {
+                let l = self.layout(ty);
+                let fields: Vec<Ty> = self.program.types.structs[id.index()]
+                    .fields
+                    .iter()
+                    .map(|&(_, t)| t)
+                    .collect();
+                for (i, fty) in fields.into_iter().enumerate() {
+                    self.collect_c_leaves(fty, base + l.fields[i], out);
+                }
+            }
+            _ => {
+                let l = self.layout(ty);
+                if l.size > 0 {
+                    out.push((base, l.size, false));
+                }
             }
         }
     }

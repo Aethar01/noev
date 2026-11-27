@@ -219,6 +219,13 @@ pub enum TyKind {
         /// The referenced type.
         inner: Ty,
     },
+    /// `extern "C" fn(A, B) -> R`: a C function pointer (`spec/interop.md` §3).
+    ExternCFn {
+        /// Parameter types.
+        params: Box<[Ty]>,
+        /// Return type.
+        ret: Ty,
+    },
     /// A type parameter, inside generic code: any type its bounds allow (`spec/types.md`
     /// §6).
     Param(ParamId),
@@ -292,6 +299,8 @@ pub struct StructDef {
     /// The generic definition this is an instance of, such as `Pair<T, U>` for
     /// `Pair<Int, Bit>`. A generic definition's own `args` are its type parameters.
     pub template: Option<StructId>,
+    /// Whether declared `extern "C" struct` with C layout (`spec/interop.md` §3).
+    pub is_extern_c: bool,
 }
 
 /// One variant of an enum.
@@ -529,6 +538,14 @@ impl Types {
     /// A struct's type.
     pub fn struct_ty(&mut self, id: StructId) -> Ty {
         self.intern(TyKind::Struct(id))
+    }
+
+    /// `extern "C" fn(params) -> ret`.
+    pub fn extern_c_fn(&mut self, params: Vec<Ty>, ret: Ty) -> Ty {
+        self.intern(TyKind::ExternCFn {
+            params: params.into_boxed_slice(),
+            ret,
+        })
     }
 
     /// A new type parameter, and its type.
@@ -1407,6 +1424,18 @@ impl Types {
             TyKind::Ref { mutable, inner } => {
                 let word = if *mutable { "mut" } else { "ref" };
                 format!("{word} {}", self.display(*inner, ast))
+            }
+            TyKind::ExternCFn { params, ret } => {
+                let params: Vec<String> = params.iter().map(|&t| self.display(t, ast)).collect();
+                if *ret == Ty::UNIT {
+                    format!("extern \"C\" fn({})", params.join(", "))
+                } else {
+                    format!(
+                        "extern \"C\" fn({}) -> {}",
+                        params.join(", "),
+                        self.display(*ret, ast)
+                    )
+                }
             }
             TyKind::Param(p) => ast.name(self.params[p.index()].name).into(),
             TyKind::Assoc { base, name, .. } => {

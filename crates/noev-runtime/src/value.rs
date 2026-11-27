@@ -46,6 +46,8 @@ pub enum Value {
     Cond(Rc<Condition>, bool),
     /// An enum value: the variant's number and its data.
     Variant(u32, Vec<Value>),
+    /// An `extern "C" fn` function pointer (function index in the IR program).
+    FnPtr(u32),
 }
 
 /// How often each result occurred in repeated runs.
@@ -279,6 +281,7 @@ impl fmt::Display for Value {
             Value::Clbit(k) => write!(f, "<measurement {k}>"),
             Value::Cond(..) => write!(f, "<measurement logic>"),
             Value::Variant(index, _) => write!(f, "<variant {index}>"),
+            Value::FnPtr(index) => write!(f, "<fn#{index}>"),
             Value::Aggregate(items)
                 if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Bit(_))) =>
             {

@@ -575,6 +575,19 @@ impl Resolver<'_> {
                         };
                         self.insert(id, Ns::Value, decl.name, entry, "the function");
                     }
+                    ItemKind::ExternBlock(fns) => {
+                        for &f in ast.list(fns) {
+                            self.scopes.fn_modules[f.index()] = id;
+                            let decl = ast.function(f);
+                            let f_visible = self.visible(id, decl.vis);
+                            let entry = Entry {
+                                binding: Binding::Fn(f),
+                                visible: f_visible,
+                                span: decl.name_span,
+                            };
+                            self.insert(id, Ns::Value, decl.name, entry, "the function");
+                        }
+                    }
                     ItemKind::Struct {
                         name,
                         name_span,

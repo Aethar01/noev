@@ -680,7 +680,7 @@ impl Ast {
             is_unsafe: false,
             is_rev: false,
             is_circuit: false,
-            is_extern: false,
+            extern_kind: ExternKind::None,
             receiver: Some(Receiver {
                 kind: OwnKind::Mv,
                 span: at,
@@ -1336,6 +1336,13 @@ pub enum TypeKind {
     Size(u64),
     /// A size computed from size parameters, as a type argument: `Register<{N + 1}>`.
     SizeExpr(ExprId),
+    /// `extern "C" fn(A, B) -> R`: a C function pointer type (`spec/interop.md` §3).
+    ExternCFn {
+        /// The parameter types, in order.
+        params: List<TypeId>,
+        /// The return type, if not `()`.
+        ret: Option<TypeId>,
+    },
 }
 
 /// An array's length: a number, a size parameter, or a sum of them.
@@ -1404,6 +1411,8 @@ pub enum ItemKind {
     Error,
     /// A function.
     Fn(FnId),
+    /// `extern "C" { fn … }`: imported C functions (`spec/interop.md` §3).
+    ExternBlock(List<FnId>),
     /// `use …`: the names it imports.
     Use(List<Import>),
     /// A struct with its fields and methods.
@@ -1418,6 +1427,8 @@ pub enum ItemKind {
         fields: List<FieldDecl>,
         /// Methods and associated functions.
         methods: List<FnId>,
+        /// Whether declared `extern "C" struct` with C layout (`spec/interop.md` §3).
+        is_extern_c: bool,
     },
     /// An enum with its variants and methods.
     Enum {
@@ -1560,6 +1571,20 @@ pub struct AssocType {
     pub bounds: List<Bound>,
 }
 
+/// What kind of `extern` declaration a function is (`spec/interop.md` §2–3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExternKind {
+    /// An ordinary Noev function.
+    #[default]
+    None,
+    /// `extern fn name(…) -> R`: a host function provided by an embedding host.
+    Host,
+    /// `extern "C" { fn name(…) -> R }`: an imported C function (unsafe to call).
+    CImport,
+    /// `extern "C" fn name(…) -> R { … }`: a Noev function callable from C.
+    CExport,
+}
+
 /// A function or method declaration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FnDecl {
@@ -1577,18 +1602,25 @@ pub struct FnDecl {
     pub is_rev: bool,
     /// Whether it is `circuit fn`.
     pub is_circuit: bool,
-    /// Whether it is an `extern fn` host function declaration (`spec/interop.md` §2).
-    pub is_extern: bool,
+    /// Whether this is a host `extern fn`, an `extern "C"` import, or an `extern "C" fn` export.
+    pub extern_kind: ExternKind,
     /// `mv self`, `ref self` or `mut self`, for methods.
     pub receiver: Option<Receiver>,
     /// The other parameters.
     pub params: List<Param>,
     /// The return type, if not `()`.
     pub ret: Option<TypeId>,
-    /// The body. Only trait and `extern fn` declarations may omit it.
+    /// The body. Only trait, host `extern fn`, and `extern "C"` import declarations may omit it.
     pub body: Option<BlockId>,
     /// The whole declaration.
     pub span: Span,
+}
+
+impl FnDecl {
+    /// Whether this function is declared without a Noev body (`extern fn` or `extern "C"` import).
+    pub fn is_foreign_import(self) -> bool {
+        matches!(self.extern_kind, ExternKind::Host | ExternKind::CImport)
+    }
 }
 
 /// A method's receiver.

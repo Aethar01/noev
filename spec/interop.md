@@ -1,9 +1,10 @@
 # Interop
 
-Status: **Partially implemented.** Host `extern fn` declarations, boundary type and
-reversibility checks (§1, §4, §5), the safe Rust embedding API (`noev` crate), and the
-Python bindings (`noev-py` / `python/noev` via PyO3) with re-entrant callbacks (§2) are
-implemented. C interop (§3) remains reserved; see `docs/PLAN.md` §11.
+Status: **Implemented** (except inline OpenQASM in §4, which is Step 14 in `docs/PLAN.md`
+§11). Host `extern fn` declarations, the safe Rust embedding API (`noev` crate), the Python
+bindings (`noev-py` / `python/noev`), `extern "C"` imports, `extern "C" struct`,
+`extern "C" fn` callbacks and function pointers (Cranelift and LLVM), and the C/C++
+embedding API (`include/noev.h`, `noev-c`) are all implemented.
 
 Hybrid programs lean on classical libraries Noev will not reimplement (optimisers, linear
 algebra, machine learning, plotting), and many users will want to call Noev from an existing
@@ -149,7 +150,8 @@ fn vqe() -> Float {
 }
 ```
 
-A C API (`noev.h`) also lets C and C++ programs embed Noev, with the same type mapping.
+A C API (`include/noev.h`, built from `crates/noev-c` as `libnoev_c.a`) also lets C and
+C++ programs embed Noev, with the same type mapping and re-entrant host callbacks.
 
 ## 4. Rules for foreign calls
 

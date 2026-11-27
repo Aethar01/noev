@@ -59,6 +59,8 @@ pub enum Res {
     /// A size parameter, as an `Int`: `N` in `for i in 0..N`. Its value is known in each
     /// copy of the generic function.
     Size(Ty),
+    /// An `extern "C" fn` used as a function pointer value (`spec/interop.md` §3).
+    FnPtr(FnId),
 }
 
 /// What a call calls.
@@ -66,6 +68,8 @@ pub enum Res {
 pub enum Callee {
     /// A function or method in the program.
     Fn(FnId),
+    /// A value of type `extern "C" fn(…) -> …` called indirectly (`spec/interop.md` §3).
+    FnPtr,
     /// A built-in.
     Builtin(Builtin),
     /// A conversion, such as `Float(n)`.
@@ -725,6 +729,7 @@ impl<'a> Checker<'a> {
             args: Vec::new(),
             bare: false,
             template: None,
+            is_extern_c: false,
         });
         self.std_types.insert(std_name("Basis"), basis);
         let basis_ty = self.t.types.struct_ty(basis);
@@ -740,6 +745,7 @@ impl<'a> Checker<'a> {
             args: Vec::new(),
             bare: false,
             template: None,
+            is_extern_c: false,
         });
         self.std_types.insert(std_name("State"), state);
         let state_ty = self.t.types.struct_ty(state);
@@ -825,19 +831,20 @@ impl<'a> Checker<'a> {
                 }
                 continue;
             }
-            let (name, name_span, is_enum, generics) = match ast.item(item).kind {
+            let (name, name_span, is_enum, generics, is_extern_c) = match ast.item(item).kind {
                 ItemKind::Struct {
                     name,
                     name_span,
                     generics,
+                    is_extern_c,
                     ..
-                } => (name, name_span, false, generics),
+                } => (name, name_span, false, generics, is_extern_c),
                 ItemKind::Enum {
                     name,
                     name_span,
                     generics,
                     ..
-                } => (name, name_span, true, generics),
+                } => (name, name_span, true, generics, false),
                 _ => continue,
             };
             let id = StructId(self.t.types.structs.len() as u32);
@@ -854,6 +861,7 @@ impl<'a> Checker<'a> {
                 args: params.iter().map(|&(_, t)| t).collect(),
                 bare: false,
                 template: None,
+                is_extern_c,
             });
             if !params.is_empty() {
                 self.struct_params.insert(id, params.clone());
@@ -967,6 +975,11 @@ impl<'a> Checker<'a> {
                     if self.name(decl.name) == "main" && Some(self.module) == main_root {
                         self.t.main = Some(f);
                         self.check_main(f);
+                    }
+                }
+                ItemKind::ExternBlock(fns) => {
+                    for &f in ast.list(fns) {
+                        self.collect_fn(f, None, Vec::new(), None);
                     }
                 }
                 ItemKind::Struct {
@@ -1928,8 +1941,8 @@ impl<'a> Checker<'a> {
             receiver: decl.receiver.map(|r| r.kind),
             params,
             ret,
-            is_unsafe: decl.is_unsafe,
-            reversible: if decl.is_extern {
+            is_unsafe: decl.is_unsafe || decl.extern_kind == ExternKind::CImport,
+            reversible: if decl.is_foreign_import() {
                 Reversible::No
             } else if decl.is_rev {
                 Reversible::Yes
@@ -1941,55 +1954,222 @@ impl<'a> Checker<'a> {
         };
     }
 
-    /// Checks `extern fn` host function rules (`spec/interop.md` §1, §2, §4):
-    /// - cannot be `rev`, `unsafe`, `circuit`, or generic,
-    /// - every parameter and return type must be classical copyable data (no qubits, no refs).
+    /// Checks `extern` host functions, `extern "C"` imports/exports, and `extern "C" struct`
+    /// definitions (`spec/interop.md` §1–4).
     fn check_extern_fns(&mut self) {
+        self.check_extern_c_structs();
         let count = self.ast.all_fns().len();
         for index in 0..count {
             let f = FnId::from_index(index);
             let decl = *self.ast.function(f);
-            if !decl.is_extern {
-                continue;
-            }
-            if decl.is_rev {
-                self.error(
-                    decl.name_span,
-                    "an `extern fn` cannot be `rev` (foreign calls are not reversible)",
-                );
-            }
-            if decl.is_unsafe {
-                self.error(
-                    decl.name_span,
-                    "a host `extern fn` is safe and does not take `unsafe`",
-                );
-            }
-            if decl.is_circuit {
-                self.error(decl.name_span, "an `extern fn` cannot be `circuit fn`");
-            }
-            if !self.t.fns[index].generics.is_empty() {
-                self.error(
-                    decl.name_span,
-                    "an `extern fn` cannot have generic parameters",
-                );
-                continue;
-            }
-            let params = self.t.fns[index].sig.params.clone();
-            let ret = self.t.fns[index].sig.ret;
-            let param_spans: Vec<Span> = self
-                .ast
-                .list(decl.params)
-                .iter()
-                .map(|p| self.ast.ty(p.ty).span)
-                .collect();
-            for (ty, span) in params.into_iter().zip(param_spans) {
-                self.check_extern_boundary_ty(ty, span, "parameter");
-            }
-            if let Some(ret_expr) = decl.ret {
-                let span = self.ast.ty(ret_expr).span;
-                self.check_extern_boundary_ty(ret, span, "return type");
+            match decl.extern_kind {
+                ExternKind::None => continue,
+                ExternKind::Host => {
+                    if decl.is_rev {
+                        self.error(
+                            decl.name_span,
+                            "an `extern fn` cannot be `rev` (foreign calls are not reversible)",
+                        );
+                    }
+                    if decl.is_unsafe {
+                        self.error(
+                            decl.name_span,
+                            "a host `extern fn` is safe and does not take `unsafe`",
+                        );
+                    }
+                    if decl.is_circuit {
+                        self.error(decl.name_span, "an `extern fn` cannot be `circuit fn`");
+                    }
+                    if !self.t.fns[index].generics.is_empty() {
+                        self.error(
+                            decl.name_span,
+                            "an `extern fn` cannot have generic parameters",
+                        );
+                        continue;
+                    }
+                    let params = self.t.fns[index].sig.params.clone();
+                    let ret = self.t.fns[index].sig.ret;
+                    let param_spans: Vec<Span> = self
+                        .ast
+                        .list(decl.params)
+                        .iter()
+                        .map(|p| self.ast.ty(p.ty).span)
+                        .collect();
+                    for (ty, span) in params.into_iter().zip(param_spans) {
+                        self.check_extern_boundary_ty(ty, span, "parameter");
+                    }
+                    if let Some(ret_expr) = decl.ret {
+                        let span = self.ast.ty(ret_expr).span;
+                        self.check_extern_boundary_ty(ret, span, "return type");
+                    }
+                }
+                ExternKind::CImport | ExternKind::CExport => {
+                    let label = if decl.extern_kind == ExternKind::CImport {
+                        "an `extern \"C\"` import"
+                    } else {
+                        "an `extern \"C\" fn`"
+                    };
+                    if decl.is_rev {
+                        self.error(decl.name_span, format!("{label} cannot be `rev`"));
+                    }
+                    if decl.extern_kind == ExternKind::CImport && decl.is_unsafe {
+                        self.error(
+                            decl.name_span,
+                            "an `extern \"C\"` import is implicitly unsafe and does not take `unsafe`",
+                        );
+                    }
+                    if decl.is_circuit {
+                        self.error(decl.name_span, format!("{label} cannot be `circuit fn`"));
+                    }
+                    if !self.t.fns[index].generics.is_empty() {
+                        self.error(
+                            decl.name_span,
+                            format!("{label} cannot have generic parameters"),
+                        );
+                        continue;
+                    }
+                    let params = self.t.fns[index].sig.params.clone();
+                    let ret = self.t.fns[index].sig.ret;
+                    let param_spans: Vec<Span> = self
+                        .ast
+                        .list(decl.params)
+                        .iter()
+                        .map(|p| self.ast.ty(p.ty).span)
+                        .collect();
+                    for (ty, span) in params.into_iter().zip(param_spans) {
+                        self.check_c_param_ty(ty, span);
+                    }
+                    if let Some(ret_expr) = decl.ret {
+                        let span = self.ast.ty(ret_expr).span;
+                        self.check_c_ret_ty(ret, span);
+                    }
+                }
             }
         }
+    }
+
+    fn check_extern_c_structs(&mut self) {
+        let items = self.ast.list(self.ast.root).to_vec();
+        for item_id in items {
+            let ItemKind::Struct {
+                name_span,
+                fields,
+                is_extern_c: true,
+                ..
+            } = self.ast.item(item_id).kind
+            else {
+                continue;
+            };
+            let Some(id) = self.item_structs[item_id.index()] else {
+                continue;
+            };
+            if !self.t.types.structs[id.index()].args.is_empty() {
+                self.error(
+                    name_span,
+                    "an `extern \"C\" struct` cannot have generic parameters",
+                );
+                continue;
+            }
+            let field_tys: Vec<Ty> = self.t.types.structs[id.index()]
+                .fields
+                .iter()
+                .map(|&(_, t)| t)
+                .collect();
+            let field_spans: Vec<Span> = self
+                .ast
+                .list(fields)
+                .iter()
+                .map(|f| self.ast.ty(f.ty).span)
+                .collect();
+            for (ty, span) in field_tys.into_iter().zip(field_spans) {
+                if !self.is_c_field_ty(ty, 0) {
+                    let shown = self.show(ty);
+                    self.error(
+                        span,
+                        format!("an `extern \"C\" struct` field cannot have type `{shown}`"),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Whether `ty` is a valid C value type inside an `extern "C" struct` or array element
+    /// (`spec/interop.md` §3): numbers, `Bool`, `Bit`, `extern "C" struct`, `extern "C" fn`,
+    /// or arrays of these.
+    fn is_c_field_ty(&self, ty: Ty, depth: usize) -> bool {
+        if depth > 64 || ty == Ty::ERROR {
+            return true;
+        }
+        match self.t.types.kind(ty) {
+            TyKind::Int
+            | TyKind::Float
+            | TyKind::F32
+            | TyKind::I8
+            | TyKind::I16
+            | TyKind::I32
+            | TyKind::I64
+            | TyKind::U8
+            | TyKind::U16
+            | TyKind::U32
+            | TyKind::U64
+            | TyKind::Bool
+            | TyKind::Bit => true,
+            TyKind::Array(elem, _) => self.is_c_field_ty(*elem, depth + 1),
+            TyKind::Struct(id) => {
+                let def = &self.t.types.structs[id.index()];
+                def.is_extern_c && def.variants.is_none()
+            }
+            TyKind::ExternCFn { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// Whether `ty` can be passed or returned by value across the C ABI (same as
+    /// `is_c_field_ty` except arrays cannot cross by value — only by `ref`/`mut`).
+    fn is_c_by_value_ty(&self, ty: Ty) -> bool {
+        if ty == Ty::ERROR {
+            return true;
+        }
+        if matches!(self.t.types.kind(ty), TyKind::Array(..)) {
+            return false;
+        }
+        self.is_c_field_ty(ty, 0)
+    }
+
+    fn check_c_param_ty(&mut self, ty: Ty, span: Span) {
+        if ty == Ty::ERROR {
+            return;
+        }
+        if let TyKind::Ref { inner, .. } = *self.t.types.kind(ty) {
+            match *self.t.types.kind(inner) {
+                TyKind::Array(elem, _) if self.is_c_field_ty(elem, 0) => return,
+                TyKind::Struct(id)
+                    if self.t.types.structs[id.index()].is_extern_c
+                        && self.t.types.structs[id.index()].variants.is_none() =>
+                {
+                    return;
+                }
+                _ => {}
+            }
+        } else if self.is_c_by_value_ty(ty) {
+            return;
+        }
+        let shown = self.show(ty);
+        self.error(
+            span,
+            format!("`{shown}` cannot be passed across an `extern \"C\"` boundary"),
+        );
+    }
+
+    fn check_c_ret_ty(&mut self, ty: Ty, span: Span) {
+        if ty == Ty::ERROR || ty == Ty::UNIT || self.is_c_by_value_ty(ty) {
+            return;
+        }
+        let shown = self.show(ty);
+        self.error(
+            span,
+            format!("`{shown}` cannot be returned across an `extern \"C\"` boundary"),
+        );
     }
 
     fn check_extern_boundary_ty(&mut self, ty: Ty, span: Span, role: &str) {
@@ -2379,6 +2559,15 @@ impl<'a> Checker<'a> {
             TypeKind::Size(_) | TypeKind::SizeExpr(_) => {
                 self.error(node.span, "a size is not a type");
                 Ty::ERROR
+            }
+            TypeKind::ExternCFn { params, ret } => {
+                let params: Vec<Ty> = ast
+                    .list(params)
+                    .iter()
+                    .map(|&t| self.resolve_type(t))
+                    .collect();
+                let ret = ret.map_or(Ty::UNIT, |t| self.resolve_type(t));
+                self.t.types.extern_c_fn(params, ret)
             }
             TypeKind::Generic { path, args } => {
                 let args: Vec<Ty> = ast
@@ -3501,6 +3690,13 @@ impl<'a> Checker<'a> {
         if let Some(size) = self.size_param(name) {
             self.t.res[id.index()] = Res::Size(size);
             return Ty::INT;
+        }
+        if let Ok(Some(FnRef::Fn(f))) = self.path_fn(None, name, span)
+            && self.ast.function(f).extern_kind == ExternKind::CExport
+        {
+            self.t.res[id.index()] = Res::FnPtr(f);
+            let sig = self.t.fns[f.index()].sig.clone();
+            return self.t.types.extern_c_fn(sig.params, sig.ret);
         }
         let text = self.name(name).to_string();
         let message = if self.names(name, Ns::Value) {
@@ -4817,8 +5013,21 @@ impl<'a> Checker<'a> {
     ) -> Ty {
         let callee_expr = *self.ast.expr(callee);
         if let Some(local) = self.lookup(name) {
-            let message = format!("`{}` is a variable, not a function", self.name(name));
             self.t.res[callee.index()] = Res::Local(local);
+            let local_ty = self.t.local(local).ty;
+            self.t.expr_types[callee.index()] = local_ty;
+            if let TyKind::ExternCFn { params, ret } = self.t.types.kind(local_ty).clone() {
+                let sig = Sig {
+                    receiver: None,
+                    params: params.into_vec(),
+                    ret,
+                    is_unsafe: true,
+                    reversible: Reversible::No,
+                };
+                self.t.callees[id.index()] = Some(Callee::FnPtr);
+                return self.check_args(&sig, None, args, span);
+            }
+            let message = format!("`{}` is a variable, not a function", self.name(name));
             self.error(callee_expr.span, message);
             return self.skip_args(args);
         }
@@ -4970,7 +5179,18 @@ impl<'a> Checker<'a> {
                 self.skip_args(args)
             }
             _ => {
-                self.expr(callee, Expect::None);
+                let ty = self.expr(callee, Expect::None);
+                if let TyKind::ExternCFn { params, ret } = self.t.types.kind(ty).clone() {
+                    let sig = Sig {
+                        receiver: None,
+                        params: params.into_vec(),
+                        ret,
+                        is_unsafe: true,
+                        reversible: Reversible::No,
+                    };
+                    self.t.callees[id.index()] = Some(Callee::FnPtr);
+                    return self.check_args(&sig, None, args, span);
+                }
                 self.error(callee_expr.span, "only functions can be called");
                 self.skip_args(args)
             }
@@ -5072,6 +5292,7 @@ impl<'a> Checker<'a> {
             args,
             bare: true,
             template: None,
+            is_extern_c: false,
         });
         self.std_enums.insert(name, id);
         id

@@ -59,6 +59,11 @@ required-features = ["ketrs", "llvm"]
 name = "embed"
 required-features = ["ketrs"]
 
+# The C/C++ interop suite needs Cranelift, LLVM, and the ketrs simulator.
+[[test]]
+name = "c_interop"
+required-features = ["ketrs", "cranelift", "llvm"]
+
 [[bench]]
 name = "embed"
 harness = false

@@ -488,7 +488,7 @@ fn compile_time_extern_declaration_checks() {
         "extern rev fn bad(x: Float) -> Float",
         "extern unsafe fn bad(x: Float) -> Float",
         "extern fn bad(x: Float) -> Float { x }",
-        "extern \"C\" { fn erf(x: Float) -> Float }",
+        "extern \"Fortran\" { fn erf(x: Float) -> Float }",
     ] {
         let res = Program::compile_source(bad);
         assert!(

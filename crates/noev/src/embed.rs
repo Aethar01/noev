@@ -203,7 +203,7 @@ impl Program {
         self.ir
             .functions
             .iter()
-            .filter(|f| f.is_extern)
+            .filter(|f| f.is_host_extern())
             .map(|f| f.name.as_str())
     }
 
@@ -212,7 +212,7 @@ impl Program {
         self.ir
             .functions
             .iter()
-            .filter(|f| !f.is_extern)
+            .filter(|f| !f.is_host_extern() && !f.is_c_import())
             .map(|f| f.name.as_str())
     }
 
@@ -1268,7 +1268,7 @@ where
                 )));
             };
             let func = &self.program.ir.functions[id.index()];
-            if !func.is_extern {
+            if !func.is_host_extern() {
                 return Err(Error::UnknownHostFn(format!(
                     "`{name}` is a Noev function, not an `extern fn`"
                 )));
@@ -1276,7 +1276,7 @@ where
             check(&self.program.ir, func)?;
         }
         for func in &self.program.ir.functions {
-            if func.is_extern && !self.hosts.contains(&func.name) {
+            if func.is_host_extern() && !self.hosts.contains(&func.name) {
                 return Err(Error::MissingHostFn(format!(
                     "missing host implementation for `extern fn {}`",
                     func.name

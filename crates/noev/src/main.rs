@@ -63,6 +63,10 @@ enum Command {
         #[arg(long)]
         qir_runtime: bool,
 
+        /// Extra C objects, static libraries, or library names to link into the binary
+        #[arg(short = 'l', long = "link", value_name = "LIB")]
+        link: Vec<String>,
+
         /// Where to write the output (default: file stem for binary/object, stdout for ir/plan/qir/llvm-ir)
         #[arg(short, long, value_name = "PATH")]
         output: Option<PathBuf>,
@@ -193,6 +197,7 @@ fn main() -> ExitCode {
             emit,
             codegen,
             qir_runtime,
+            link,
             output,
             messages,
         } => build(
@@ -200,6 +205,7 @@ fn main() -> ExitCode {
             emit,
             codegen,
             qir_runtime,
+            &link,
             output.as_deref(),
             messages.message_format,
         ),
@@ -303,6 +309,7 @@ fn build(
     emit: Emit,
     codegen: Option<CodegenChoice>,
     qir_runtime: bool,
+    link: &[String],
     output: Option<&Path>,
     format: MessageFormat,
 ) -> ExitCode {
@@ -340,7 +347,7 @@ fn build(
         Emit::Qir => build_qir(file, &checked, &program, output, format),
         Emit::LlvmIr => build_llvm_ir(&program, qir_runtime, output),
         Emit::Object => build_object(file, &program, codegen, qir_runtime, output),
-        Emit::Binary => build_binary(file, &program, codegen, qir_runtime, output),
+        Emit::Binary => build_binary(file, &program, codegen, qir_runtime, link, output),
     }
 }
 
@@ -574,6 +581,7 @@ fn build_binary(
     program: &noev_ir::Program,
     codegen: Option<CodegenChoice>,
     qir_runtime: bool,
+    link: &[String],
     output: Option<&Path>,
 ) -> ExitCode {
     if program.main.is_none() {
@@ -600,7 +608,14 @@ fn build_binary(
     let dest = output
         .map(Path::to_path_buf)
         .unwrap_or_else(|| default_artifact_path(file, None));
-    match generator.emit_binary(program, &dest, &runtime_lib, codegen_options(qir_runtime)) {
+    let res = if link.is_empty() {
+        generator.emit_binary(program, &dest, &runtime_lib, codegen_options(qir_runtime))
+    } else {
+        generator
+            .emit_object(program, codegen_options(qir_runtime))
+            .and_then(|obj| noev_codegen::link_object_with_args(&obj, &dest, &runtime_lib, link))
+    };
+    match res {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             anstream::eprintln!("{ERROR}error:{ERROR:#} {error}");
@@ -615,6 +630,7 @@ fn build_binary(
     _program: &noev_ir::Program,
     _codegen: Option<CodegenChoice>,
     _qir_runtime: bool,
+    _link: &[String],
     _output: Option<&Path>,
 ) -> ExitCode {
     anstream::eprintln!(

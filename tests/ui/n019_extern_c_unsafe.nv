@@ -1,0 +1,14 @@
+// N019: calling an `extern "C"` import or C function pointer requires `unsafe`
+// (`spec/interop.md` §3).
+
+extern "C" {
+    fn erf(x: Float) -> Float
+}
+
+fn bad_c_import(x: Float) -> Float {
+    erf(x)                          //~ N019
+}
+
+fn bad_fn_ptr(f: extern "C" fn(Float) -> Float, x: Float) -> Float {
+    f(x)                            //~ N019
+}

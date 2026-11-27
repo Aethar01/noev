@@ -195,6 +195,7 @@ pub fn analyze_enum_variants(func: &Function) -> Vec<HashMap<PlaceKey, u32>> {
         match &block.term {
             Terminator::Goto(next)
             | Terminator::Call { next, .. }
+            | Terminator::CallIndirect { next, .. }
             | Terminator::Undo { next, .. }
             | Terminator::Assert { next, .. } => {
                 push_edge(next.index(), facts);

@@ -389,7 +389,7 @@ impl Parser<'_> {
         }
         let kind = match self.kind() {
             _ if self.at_fn_start() => ItemKind::Fn(self.fn_decl(true, vis)),
-            TokenKind::Struct => self.struct_def(),
+            TokenKind::Struct => self.struct_def(false),
             TokenKind::Enum => self.enum_def(),
             TokenKind::Type => {
                 self.bump();
@@ -405,43 +405,62 @@ impl Parser<'_> {
             TokenKind::Trait => self.trait_def(),
             TokenKind::Impl => self.impl_def(),
             TokenKind::Extern => {
-                let extern_span = self.span();
                 self.bump();
                 if self.at(TokenKind::Str) {
-                    self.error(
-                        extern_span,
-                        "`extern \"C\"` declarations are not supported yet",
-                    )
-                    .with_help_mut("see spec/interop.md §3 for what is planned");
-                    self.recover_item();
-                    return Some(self.ast.push_item(Item {
-                        kind: ItemKind::Error,
-                        vis,
-                        span: start.to(self.prev_span()),
-                    }));
-                }
-                if !self.at_fn_start() {
-                    self.expected("`fn` after `extern`");
-                    self.recover_item();
-                    return Some(self.ast.push_item(Item {
-                        kind: ItemKind::Error,
-                        vis,
-                        span: start.to(self.prev_span()),
-                    }));
-                }
-                let f = self.fn_decl(false, vis);
-                let decl = self.ast.function_mut(f);
-                decl.is_extern = true;
-                decl.span = start.to(decl.span);
-                if let Some(body) = decl.body {
-                    let body_span = self.ast.block(body).span;
-                    self.error(body_span, "an `extern fn` cannot have a body")
-                        .with_help_mut(
-                            "host functions are provided by the host program (`spec/interop.md` §2)",
+                    let abi_span = self.span();
+                    let abi_text = self.text(abi_span);
+                    self.bump();
+                    if abi_text != "\"C\"" {
+                        self.error(
+                            abi_span,
+                            format!("unsupported extern ABI {abi_text}; only `\"C\"` is supported"),
                         );
-                    self.ast.function_mut(f).body = None;
+                    }
+                    self.skip_newlines();
+                    match self.kind() {
+                        TokenKind::LBrace => self.extern_c_block(vis),
+                        TokenKind::Struct => self.struct_def(true),
+                        _ if self.at_fn_start() => {
+                            let f = self.fn_decl(true, vis);
+                            let decl = self.ast.function_mut(f);
+                            decl.extern_kind = ExternKind::CExport;
+                            decl.span = start.to(decl.span);
+                            ItemKind::Fn(f)
+                        }
+                        _ => {
+                            self.expected("`{`, `struct`, or `fn` after `extern \"C\"`");
+                            self.recover_item();
+                            return Some(self.ast.push_item(Item {
+                                kind: ItemKind::Error,
+                                vis,
+                                span: start.to(self.prev_span()),
+                            }));
+                        }
+                    }
+                } else {
+                    if !self.at_fn_start() {
+                        self.expected("`fn` or `\"C\"` after `extern`");
+                        self.recover_item();
+                        return Some(self.ast.push_item(Item {
+                            kind: ItemKind::Error,
+                            vis,
+                            span: start.to(self.prev_span()),
+                        }));
+                    }
+                    let f = self.fn_decl(false, vis);
+                    let decl = self.ast.function_mut(f);
+                    decl.extern_kind = ExternKind::Host;
+                    decl.span = start.to(decl.span);
+                    if let Some(body) = decl.body {
+                        let body_span = self.ast.block(body).span;
+                        self.error(body_span, "an `extern fn` cannot have a body")
+                            .with_help_mut(
+                                "host functions are provided by the host program (`spec/interop.md` §2)",
+                            );
+                        self.ast.function_mut(f).body = None;
+                    }
+                    ItemKind::Fn(f)
                 }
-                ItemKind::Fn(f)
             }
             _ => return None,
         };
@@ -630,7 +649,7 @@ impl Parser<'_> {
             is_unsafe,
             is_rev,
             is_circuit,
-            is_extern: false,
+            extern_kind: ExternKind::None,
             receiver,
             params,
             ret,
@@ -678,7 +697,42 @@ impl Parser<'_> {
         }
     }
 
-    fn struct_def(&mut self) -> ItemKind {
+    fn extern_c_block(&mut self, block_vis: Vis) -> ItemKind {
+        self.bump(); // `{`
+        let mark = self.ast.mark::<FnId>();
+        loop {
+            while matches!(self.kind(), TokenKind::Newline | TokenKind::Semi) {
+                self.bump();
+            }
+            if matches!(self.kind(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
+            let fn_vis = self.vis();
+            let eff_vis = if matches!(fn_vis, Vis::Private) {
+                block_vis
+            } else {
+                fn_vis
+            };
+            if self.at_fn_start() {
+                let f = self.fn_decl(false, eff_vis);
+                let decl = self.ast.function_mut(f);
+                decl.extern_kind = ExternKind::CImport;
+                if let Some(body) = decl.body {
+                    let body_span = self.ast.block(body).span;
+                    self.error(body_span, "an `extern \"C\"` import cannot have a body");
+                    self.ast.function_mut(f).body = None;
+                }
+                self.ast.push_to(f);
+            } else {
+                self.expected("`fn` inside `extern \"C\"` block");
+                self.recover_member();
+            }
+        }
+        self.expect(TokenKind::RBrace, "`}`");
+        ItemKind::ExternBlock(self.ast.finish(mark))
+    }
+
+    fn struct_def(&mut self, is_extern_c: bool) -> ItemKind {
         self.bump();
         let (name, name_span) = self.name("a struct name");
         let generics = self.generics();
@@ -725,6 +779,7 @@ impl Parser<'_> {
             generics,
             fields: self.ast.finish(field_mark),
             methods: self.ast.finish(method_mark),
+            is_extern_c,
         }
     }
 
@@ -1148,6 +1203,39 @@ impl Parser<'_> {
                 };
                 self.expect(RBracket, "`]`");
                 TypeKind::Array { elem, len }
+            }
+            Extern => {
+                self.bump();
+                if self.at(Str) {
+                    let abi_span = self.span();
+                    let abi_text = self.text(abi_span);
+                    self.bump();
+                    if abi_text != "\"C\"" {
+                        self.error(
+                            abi_span,
+                            format!("unsupported extern ABI {abi_text}; only `\"C\"` is supported"),
+                        );
+                    }
+                } else {
+                    self.expected("`\"C\"` after `extern`");
+                }
+                self.expect(Fn, "`fn`");
+                let mark = self.ast.mark::<TypeId>();
+                if self.expect(LParen, "`(`") {
+                    while !matches!(self.kind(), RParen | Eof) {
+                        let p = self.ty();
+                        self.ast.push_to(p);
+                        if !self.eat(Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(RParen, "`)`");
+                }
+                let ret = self.eat(Arrow).then(|| self.ty());
+                TypeKind::ExternCFn {
+                    params: self.ast.finish(mark),
+                    ret,
+                }
             }
             Ident | SelfType => {
                 let path = self.path_segments();

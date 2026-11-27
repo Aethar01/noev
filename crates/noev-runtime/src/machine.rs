@@ -170,8 +170,15 @@ impl<'p> Machine<'p> {
     pub fn call(&mut self, func: FuncId, args: Vec<Value>) -> Result<Value> {
         let program = self.program;
         let function = &program.functions[func.index()];
-        if function.is_extern {
-            return self.call_host(func, function, args);
+        match function.extern_kind {
+            ExternKind::Host => return self.call_host(func, function, args),
+            ExternKind::CImport => {
+                return Err(RuntimeError::new(format!(
+                    "`extern \"C\"` import `{}` requires native compilation (`noev build`)",
+                    function.name
+                )));
+            }
+            ExternKind::None | ExternKind::CExport => {}
         }
         let mut locals: Vec<Value> = function.locals.iter().map(|l| self.default(l.ty)).collect();
         for (i, arg) in args.into_iter().enumerate() {
@@ -325,6 +332,28 @@ impl<'p> Machine<'p> {
                     if !unsafe { cabi::noev_rt_assert(&mut self.rt, ok, msg.as_ptr(), msg.len()) } {
                         return Err(self.rt.take_error().at(*span));
                     }
+                    next.index()
+                }
+                Terminator::CallIndirect {
+                    callee,
+                    args,
+                    dest,
+                    next,
+                } => {
+                    let callee = self.operand(callee)?;
+                    let args = args
+                        .iter()
+                        .map(|a| self.operand(a))
+                        .collect::<Result<Vec<_>>>()?;
+                    let value = match callee {
+                        Value::FnPtr(idx) => self.call(FuncId(idx), args)?,
+                        _ => {
+                            return Err(RuntimeError::new(
+                                "indirect call target is not a function pointer",
+                            ));
+                        }
+                    };
+                    self.store(dest, value)?;
                     next.index()
                 }
                 Terminator::Return => return Ok(()),
@@ -1384,6 +1413,7 @@ impl Machine<'_> {
                 let bit = self.truth(bit)?;
                 Value::Observable(Observable::projector(*x_basis, index, bit))
             }
+            Rvalue::FnPtr(func) => Value::FnPtr(func.0),
         })
     }
 
