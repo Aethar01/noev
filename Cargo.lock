@@ -953,9 +953,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "ketrs"
-version = "0.2.0"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82accd577983c9a752cd3afbaee7d5d6a58aae7262c907e8bad3137df67c5af3"
+checksum = "4756c81ff070b3994cae9463902a2f3fafa8212012bae9d00facac2df46dec4f"
 dependencies = [
  "faer",
  "num-complex",

@@ -126,4 +126,57 @@ fn main() {
         time.as_secs_f64() * 1e3,
         qasm_rec_calls,
     );
+
+    // 4. Circuit-level ketrs backend: 16-qubit real circuit with redundant gates (tests
+    //    Circuit::optimize + RealStatevector dispatch).
+    use noev_runtime::backend::{Backend, Circuit, Instruction, Op};
+    use noev_sema::prelude::Gate;
+    let n = 16usize;
+    let mut instructions = Vec::new();
+    for q in 0..n {
+        instructions.push(Instruction::Gate(Op {
+            gate: Gate::Ry,
+            adjoint: false,
+            params: vec![0.3],
+            controls: vec![],
+            targets: vec![q],
+        }));
+        instructions.push(Instruction::Gate(Op {
+            gate: Gate::Ry,
+            adjoint: false,
+            params: vec![0.4],
+            controls: vec![],
+            targets: vec![q],
+        }));
+    }
+    for q in 0..(n - 1) {
+        instructions.push(Instruction::Gate(Op {
+            gate: Gate::X,
+            adjoint: false,
+            params: vec![],
+            controls: vec![q],
+            targets: vec![q + 1],
+        }));
+    }
+    for q in 0..n {
+        instructions.push(Instruction::Measure { qubit: q, clbit: q });
+    }
+    let circuit = Circuit {
+        qubits: n,
+        clbits: n,
+        instructions,
+    };
+    let time = fastest(5, || {
+        black_box(
+            noev_runtime::Ketrs
+                .run_circuit(&circuit, 10_000, 7)
+                .unwrap()
+                .unwrap(),
+        );
+    });
+    println!(
+        "{:<14} {:>10.2} ms  (16q real circuit, 10000 shots)",
+        "ketrs_16q_real",
+        time.as_secs_f64() * 1e3,
+    );
 }
