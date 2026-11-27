@@ -114,6 +114,7 @@ fn main() {
 
     impls(400);
     operators(2000);
+    with_do(1000);
     inferred("inferred", 2000, true);
     inferred("irrev", 2000, false);
     modules("modules", 2000, |i| {
@@ -202,6 +203,37 @@ fn operators(count: usize) {
         types.as_secs_f64() * 1e3,
         ownership.as_secs_f64() * 1e3,
         2 * count,
+    );
+}
+
+/// Checks `count` `with`/`do` blocks with ancillas and outer controls, measuring type and
+/// ownership checking throughput.
+fn with_do(count: usize) {
+    let mut text = String::from("fn f(a: ref Qubit, b: ref Qubit, out: mut Qubit) {\n");
+    for i in 0..count {
+        text.push_str(&format!(
+            " with {{ let t{i} = |0>\n ctrl a, b {{ t{i}.x() }} }} do {{ ctrl t{i} {{ out.x() }} }}\n"
+        ));
+    }
+    text.push_str("}\n");
+    let parsed = noev_syntax::parse(&text);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let (typed, errors) = noev_sema::check(&parsed.ast);
+    assert!(errors.is_empty(), "{errors:?}");
+    let errors = noev_sema::check_ownership(&parsed.ast, &typed);
+    assert!(errors.is_empty(), "{errors:?}");
+    let types = fastest(5, || {
+        black_box(noev_sema::check(black_box(&parsed.ast)));
+    });
+    let ownership = fastest(5, || {
+        black_box(noev_sema::check_ownership(black_box(&parsed.ast), &typed));
+    });
+    println!(
+        "{:<9} {:>10.0} blocks/s  ({:.2} ms types, {:.2} ms ownership, for {count} with/do blocks)",
+        "with_do",
+        count as f64 / (types + ownership).as_secs_f64(),
+        types.as_secs_f64() * 1e3,
+        ownership.as_secs_f64() * 1e3,
     );
 }
 

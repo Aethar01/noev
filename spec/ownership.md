@@ -160,11 +160,12 @@ fn f() {
 ```
 
 At the end of every scope, and at every `return` and `break`, each linear place owned by
-that scope must have been moved. A qubit is consumed by `measure`, `discard`, moving it into
+that scope must have been moved, unless it is proven to be in \|0⟩ (§9), in which case it
+is released automatically. A qubit is consumed by `measure`, `discard`, moving it into
 something that is itself consumed, or returning it. Discarding a linear value as a block's
-unused final expression is also N003, and so is binding one to `_`, alone or inside a tuple
-or array pattern (`let [a, _] = mv pair`). Dropping a value of a generic type `T` infers
-`T: Copy` where a copy would (N001).
+unused final expression is also N003 unless it is proven \|0⟩, and so is binding one to `_`,
+alone or inside a tuple or array pattern (`let [a, _] = mv pair`). Dropping a value of a
+generic type `T` infers `T: Copy` where a copy would (N001).
 
 There is never an implicit measure or discard. If `q` is entangled with a qubit the program
 keeps, discarding `q` acts as a measurement and collapses the kept qubit. The programmer has
@@ -308,12 +309,13 @@ In a reversible context, these are not allowed:
 
 - calls to `measure`, `reset`, `discard`, or any function that is not reversible;
 - ket literals (allocating qubits), except in a `with` block;
-- moving a linear value;
+- moving a linear value, except a local declared inside the same `with` block;
 - assignment to a variable declared outside the context.
 
 Allowed: gates, calls to reversible functions (including purely classical ones, which are
-trivially reversible), nested `ctrl`, `adj`, `let` bindings and assignments of variables
-declared inside the context, `if` and `while`, and `for` loops over classical ranges.
+trivially reversible), nested `ctrl`, `adj`, `with`/`do` (when its `do` block is also
+reversible), `let` bindings and assignments of variables declared inside the context, `if`
+and `while`, and `for` loops over classical ranges.
 
 Classical control flow is safe here because nothing in a reversible context can depend on a
 measurement: every classical value is determined by the inputs, so undoing the code can
@@ -347,29 +349,45 @@ pure quantum value (a qubit, an array or tuple of qubits, a struct of qubits) or
 to one; every qubit in it is a control. So `ctrl r { t.x() }` with `r: [Qubit; 3]` is a
 multi-controlled X. The body is a reversible context (§7).
 
-### `with` / `do` (Reserved)
+### `with` / `do`
 
 ```noev
 with { majority(a, b, c) }
 do   { ctrl c { out.x() } }
 ```
 
-Runs the `with` block, then the `do` block, then the inverse of the `with` block. Qubits
-allocated in `with` are back in \|0⟩ at the end and are released automatically. During
-`do`, every qubit the `with` block allocated or acted on is `ref`-lent (usable only as a
-control). This guarantees the inverse restores them.
+Runs the `with` block, then the `do` block, then the inverse of the `with` block.
 
-Parsed, but rejected with "not yet supported".
+- The `with` block is a reversible context (§7) that may allocate qubits (ancillas) and move
+  locals declared inside it. Its variables stay in scope in the `do` block.
+- During `do`, every linear place that `with` allocated, acted on, or read (`ref`/`ctrl`) is
+  `ref`-lent (usable only as a control): mutating one in `do` is N005 and moving one is N006.
+  This guarantees the inverse sees the same inputs and restores the state.
+- `return`, `break` and `continue` cannot leave `with` or `do`.
+- The value of `with { … } do { … }` is the value of the `do` block; it cannot return a
+  reference to a local declared in `with` (N008).
+- After `do`, the inverse of `with` runs and every qubit allocated in `with` is released
+  automatically. On simulators, `release` checks that each released qubit really returned to
+  \|0⟩ (§11).
+- `with`/`do` is itself reversible when its `do` block is, so it can appear in a `rev fn`,
+  under `ctrl`, or inside `adj`. Under an enclosing `ctrl`, only the `do` block needs the
+  enclosing controls, since $U^\dagger (\text{ctrl } V) U = \text{ctrl}(U^\dagger V U)$.
 
-## 9. Toward automatic release (goal, not implemented yet)
+## 9. Automatic release
 
-For now, every qubit must be consumed explicitly (N003). The goal is to release a qubit
-automatically when the compiler can **prove** it is back in \|0⟩: for example, a qubit never
-acted on since its `|0>` literal, or one restored by `with`/`do`. Accepting those programs
-later breaks no existing code. `discard` stays available for saying it explicitly.
+A linear value whose remaining qubits are **proven to be in \|0⟩** is released automatically
+when it goes out of scope (at the end of a block, `return`, or `break`), when bound to `_`,
+or when discarded as an unused expression, without triggering N003:
 
-So the checker records more than "owned / moved / lent" per place from the start: at least
-whether a qubit has been acted on since it was created, and its literal state if not.
+- a freshly created `|0>` (or `|00…>`, `[|0>; N]`, or a tuple, array, struct or enum built
+  solely from proven-\|0⟩ qubits) that has not been acted on (`mut`-lent);
+- a `Qubit` immediately after `q.reset()`, before any further gate acts on it;
+- qubits allocated in a `with` block, restored by its inverse (§8).
+
+Any `mut` lend other than `reset` on a whole `Qubit` clears the proof; `ref` lends (including
+`ctrl`) preserve it, since a \|0⟩ control is left unchanged. Values not proven to be in \|0⟩
+(such as `|+>`, `|1>`, or any qubit acted on by a gate) still require explicit consumption
+(N003). `discard` and `unsafe { mv q.release() }` stay available.
 
 ## 10. Array indices
 

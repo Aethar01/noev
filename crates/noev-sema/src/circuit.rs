@@ -555,7 +555,8 @@ fn is_quantum_op(ast: &Ast, typed: &Typed, quantum: &[bool], e: ExprId) -> bool 
         ExprKind::Ket { .. }
         | ExprKind::BraTest { .. }
         | ExprKind::PrepTest { .. }
-        | ExprKind::Ctrl { .. } => true,
+        | ExprKind::Ctrl { .. }
+        | ExprKind::With { .. } => true,
         // Calls, and operators and compound assignments that call `std::ops` traits.
         _ => match typed.callees[e.index()] {
             Some(Callee::Builtin(
@@ -835,6 +836,11 @@ impl<'a> Walker<'a> {
                         let loops = self.contains_quantum(Node::Block(body));
                         self.mark_block(body, later || loops);
                         stack.push(Node::Expr(cond));
+                    }
+                    ExprKind::With { with, body } => {
+                        let uncomputes = self.contains_quantum(Node::Block(with));
+                        let in_body = self.mark_block(body, later || uncomputes);
+                        self.mark_block(with, later || uncomputes || in_body);
                     }
                     _ => children(self.cx.ast, child, &mut stack),
                 },
@@ -1345,6 +1351,10 @@ impl<'a> Walker<'a> {
                 self.block(body);
                 false
             }
+            ExprKind::With { with, body } => {
+                self.block(with);
+                self.value_block(body)
+            }
             ExprKind::Error
             | ExprKind::Int(_)
             | ExprKind::BigInt
@@ -1352,8 +1362,7 @@ impl<'a> Walker<'a> {
             | ExprKind::Imag(_)
             | ExprKind::Bool(_)
             | ExprKind::Path(_)
-            | ExprKind::Unit
-            | ExprKind::With { .. } => false,
+            | ExprKind::Unit => false,
         }
     }
 

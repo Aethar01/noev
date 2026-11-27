@@ -178,6 +178,14 @@ impl Machine<'_> {
 /// the end; beyond it they reuse measured qubits after a reset.
 const FRESH_QUBITS: usize = 24;
 
+/// Recorded operations, ancillas and saved outer controls for one `with`/`do` block.
+struct WithFrame {
+    ops: Vec<Op>,
+    allocs: Vec<usize>,
+    controls: Vec<usize>,
+    control_marks: Vec<usize>,
+}
+
 /// The state of one run of a program.
 pub struct Machine<'p> {
     program: &'p Program,
@@ -193,6 +201,12 @@ pub struct Machine<'p> {
     control_marks: Vec<usize>,
     /// Gates recorded by enclosing `adj` calls, innermost last.
     recording: Vec<Vec<Op>>,
+    /// Qubits released inside enclosing `adj` calls, verified once their ops replay.
+    adj_releases: Vec<Vec<usize>>,
+    /// Currently executing `with` blocks (recording ops and allocations).
+    with_active: Vec<WithFrame>,
+    /// `with` blocks whose `do` block is currently running, waiting to uncompute at `WithEnd`.
+    with_pending: Vec<WithFrame>,
     rng: SmallRng,
     /// Whether anything has been measured, which makes an expectation value an estimate.
     measured: bool,
@@ -219,6 +233,9 @@ impl<'p> Machine<'p> {
             controls: Vec::new(),
             control_marks: Vec::new(),
             recording: Vec::new(),
+            adj_releases: Vec::new(),
+            with_active: Vec::new(),
+            with_pending: Vec::new(),
             rng: seeds,
             measured: false,
             output: None,
@@ -356,12 +373,17 @@ impl<'p> Machine<'p> {
                         .collect::<Result<Vec<_>>>()?;
                     let value = if *adjoint {
                         self.recording.push(Vec::new());
+                        self.adj_releases.push(Vec::new());
                         let value = self.call(*func, args);
                         let ops = self.recording.pop().expect("pushed above");
+                        let releases = self.adj_releases.pop().expect("pushed above");
                         let value = value?;
                         for mut op in ops.into_iter().rev() {
                             op.adjoint = !op.adjoint;
                             self.emit(op)?;
+                        }
+                        for qubit in releases {
+                            self.verify_release(qubit)?;
                         }
                         value
                     } else {
@@ -870,17 +892,7 @@ impl Machine<'_> {
             }
             Stmt::Release(place) => {
                 let qubit = self.qubit(place)?;
-                match &mut self.mode {
-                    Mode::Simulate => {}
-                    Mode::Build(recording) => {
-                        recording.free.push((qubit, false));
-                        return Ok(());
-                    }
-                }
-                // Simulators check `release`'s claim (spec/ownership.md §11).
-                self.session()?.release(qubit).map_err(backend_error)?;
-                self.free.push(qubit);
-                Ok(())
+                self.release_qubit(qubit)
             }
             Stmt::CtrlPush(places) => {
                 self.control_marks.push(self.controls.len());
@@ -894,6 +906,45 @@ impl Machine<'_> {
             Stmt::CtrlPop => {
                 let mark = self.control_marks.pop().unwrap_or(0);
                 self.controls.truncate(mark);
+                Ok(())
+            }
+            Stmt::WithStart => {
+                // Under an enclosing `ctrl`, `U† (ctrl V) U = ctrl(U† V U)`, so `with` and
+                // its inverse run without the outer controls.
+                let controls = std::mem::take(&mut self.controls);
+                let control_marks = std::mem::take(&mut self.control_marks);
+                self.with_active.push(WithFrame {
+                    ops: Vec::new(),
+                    allocs: Vec::new(),
+                    controls,
+                    control_marks,
+                });
+                Ok(())
+            }
+            Stmt::WithDo => {
+                let mut frame = self.with_active.pop().expect("matching WithStart");
+                self.controls = std::mem::take(&mut frame.controls);
+                self.control_marks = std::mem::take(&mut frame.control_marks);
+                self.with_pending.push(frame);
+                Ok(())
+            }
+            Stmt::WithEnd => {
+                let frame = self.with_pending.pop().expect("matching WithDo");
+                let controls = std::mem::take(&mut self.controls);
+                let control_marks = std::mem::take(&mut self.control_marks);
+                let result = (|| -> Result<()> {
+                    for mut op in frame.ops.into_iter().rev() {
+                        op.adjoint = !op.adjoint;
+                        self.emit(op)?;
+                    }
+                    Ok(())
+                })();
+                self.controls = controls;
+                self.control_marks = control_marks;
+                result?;
+                for qubit in frame.allocs.into_iter().rev() {
+                    self.release_qubit(qubit)?;
+                }
                 Ok(())
             }
             Stmt::Sample {
@@ -1136,9 +1187,52 @@ impl Machine<'_> {
         ))
     }
 
+    /// Releases `qubit`, which must be in \|0⟩ (`spec/ownership.md` §9, §11). While recording
+    /// for `adj`, defers the simulator's \|0⟩ check until the inverted ops replay.
+    fn release_qubit(&mut self, qubit: usize) -> Result<()> {
+        if let Some(pending) = self.adj_releases.last_mut() {
+            if !pending.contains(&qubit) {
+                pending.push(qubit);
+            }
+            match &mut self.mode {
+                Mode::Simulate => self.free.push(qubit),
+                Mode::Build(recording) => recording.free.push((qubit, false)),
+            }
+            return Ok(());
+        }
+        match &mut self.mode {
+            Mode::Simulate => {}
+            Mode::Build(recording) => {
+                recording.free.push((qubit, false));
+                return Ok(());
+            }
+        }
+        // Simulators check `release`'s claim (spec/ownership.md §11).
+        self.session()?.release(qubit).map_err(backend_error)?;
+        self.free.push(qubit);
+        Ok(())
+    }
+
+    /// Checks a deferred `release` after an `adj` call replays its inverted ops.
+    fn verify_release(&mut self, qubit: usize) -> Result<()> {
+        if let Some(outer) = self.adj_releases.last_mut() {
+            if !outer.contains(&qubit) {
+                outer.push(qubit);
+            }
+            return Ok(());
+        }
+        if matches!(self.mode, Mode::Simulate) {
+            self.session()?.release(qubit).map_err(backend_error)?;
+        }
+        Ok(())
+    }
+
     /// Applies a gate, or records it when a function's gates are being collected (`adj`, a
-    /// bra's preparation).
+    /// bra's preparation), also recording into any enclosing active `with` blocks.
     fn emit(&mut self, op: Op) -> Result<()> {
+        for frame in &mut self.with_active {
+            frame.ops.push(op.clone());
+        }
         match self.recording.last_mut() {
             Some(recording) => {
                 recording.push(op);
@@ -1160,8 +1254,10 @@ impl Machine<'_> {
     /// the qubits, still \|0⟩, are freed. Returns the qubits it made, in order, and the gates.
     fn record_prep(&mut self, prep: &Prep, args: Vec<Value>) -> Result<(Vec<usize>, Vec<Op>)> {
         self.recording.push(Vec::new());
+        self.adj_releases.push(Vec::new());
         let made = self.prepare(prep, args);
         let ops = self.recording.pop().expect("pushed above");
+        self.adj_releases.pop();
         let made = made?;
         for &qubit in &made {
             self.free_unused(qubit)?;
@@ -1170,7 +1266,9 @@ impl Machine<'_> {
     }
 
     /// Applies `ops`, recorded on the qubits `from`, to the qubits `onto` instead: in reverse
-    /// and inverted when `inverse`, and each also controlled by `control` if given.
+    /// and inverted when `inverse`, and each also controlled by `control` if given. Temporary
+    /// ancillas (allocated and released inside `with`/`do`) get fresh qubits that are released
+    /// afterwards.
     fn replay(
         &mut self,
         ops: Vec<Op>,
@@ -1186,25 +1284,46 @@ impl Machine<'_> {
                 onto.len()
             )));
         }
-        let map = |q: &usize| {
-            let k = from.iter().position(|f| f == q).ok_or_else(|| {
-                RuntimeError::new("the preparation acts on a qubit it does not return")
-            })?;
-            Ok(onto[k])
-        };
+        let mut temps: Vec<(usize, usize)> = Vec::new();
         let ops: Vec<Op> = if inverse {
             ops.into_iter().rev().collect()
         } else {
             ops
         };
-        for mut op in ops {
-            op.adjoint ^= inverse;
-            op.targets = op.targets.iter().map(map).collect::<Result<_>>()?;
-            op.controls = op.controls.iter().map(map).collect::<Result<_>>()?;
-            op.controls.extend(control);
-            self.emit(op)?;
+        let result = (|| -> Result<()> {
+            for mut op in ops {
+                op.adjoint ^= inverse;
+                let mut map = |q: usize| -> Result<usize> {
+                    if let Some(k) = from.iter().position(|&f| f == q) {
+                        return Ok(onto[k]);
+                    }
+                    if let Some(&(_, mapped)) = temps.iter().find(|&&(src, _)| src == q) {
+                        return Ok(mapped);
+                    }
+                    let fresh = self.allocate()?;
+                    temps.push((q, fresh));
+                    Ok(fresh)
+                };
+                let mut targets = Vec::with_capacity(op.targets.len());
+                for q in op.targets {
+                    targets.push(map(q)?);
+                }
+                let mut controls =
+                    Vec::with_capacity(op.controls.len() + usize::from(control.is_some()));
+                for q in op.controls {
+                    controls.push(map(q)?);
+                }
+                controls.extend(control);
+                op.targets = targets;
+                op.controls = controls;
+                self.emit(op)?;
+            }
+            Ok(())
+        })();
+        for (_, fresh) in temps.into_iter().rev() {
+            self.release_qubit(fresh)?;
         }
-        Ok(())
+        result
     }
 
     /// Undoes `prep` on the qubits `onto`, controlled by `control` if given.
@@ -1233,27 +1352,37 @@ impl Machine<'_> {
 
     /// A qubit in \|0⟩: a released one, or a new one added to the state.
     fn allocate(&mut self) -> Result<usize> {
-        match &mut self.mode {
-            Mode::Simulate => {}
+        let qubit = match &mut self.mode {
+            Mode::Simulate => {
+                if let Some(qubit) = self.free.pop() {
+                    qubit
+                } else {
+                    self.session()?.add_qubit().map_err(backend_error)?
+                }
+            }
             Mode::Build(recording) => {
                 let circuit = &mut recording.circuit;
-                let (qubit, needs_reset) =
-                    if circuit.qubits < FRESH_QUBITS || recording.free.is_empty() {
-                        circuit.qubits += 1;
-                        (circuit.qubits - 1, false)
-                    } else {
-                        recording.free.pop().expect("checked above")
-                    };
+                let clean = (recording.loops == 0)
+                    .then(|| recording.free.iter().rposition(|&(_, dirty)| !dirty))
+                    .flatten();
+                let (qubit, needs_reset) = if let Some(i) = clean {
+                    recording.free.remove(i)
+                } else if circuit.qubits < FRESH_QUBITS || recording.free.is_empty() {
+                    circuit.qubits += 1;
+                    (circuit.qubits - 1, false)
+                } else {
+                    recording.free.pop().expect("checked above")
+                };
                 if needs_reset || recording.loops > 0 {
                     circuit.instructions.push(Instruction::Reset(qubit));
                 }
-                return Ok(qubit);
+                qubit
             }
+        };
+        if let Some(frame) = self.with_active.last_mut() {
+            frame.allocs.push(qubit);
         }
-        if let Some(qubit) = self.free.pop() {
-            return Ok(qubit);
-        }
-        self.session()?.add_qubit().map_err(backend_error)
+        Ok(qubit)
     }
 
     /// Measures a qubit: its `Bit`, or while recording, the classical bit it was measured into.

@@ -1,14 +1,14 @@
 // A quantum integer defined by a program (spec/types.md §6): a register with `+` from
-// `std::ops::Add`, whose sum is one qubit wider (`QInt<{N + 1}>`). Qubit 0 is the lowest bit.
-//
-// `+` takes its operands by value, so they and the carries are measured away at the end;
-// a register in superposition would want them kept, or uncomputed with `with`/`do`.
+// `std::ops::Add`, whose sum is one qubit wider (`QInt<{N + 1}>`), and in-place `+=` from
+// `std::ops::AddAssign`, which computes and uncomputes its carries cleanly with `with`/`do`
+// and is therefore reversible (works on superpositions, under `ctrl`, and under `adj`).
+// Qubit 0 is the lowest bit.
 
-use std::ops::Add
+use std::ops::{Add, AddAssign}
 
 struct QInt<const N: Int> { r: [Qubit; N] }
 
-impl<const N: Int> Add<QInt<N>> for QInt<N> {
+impl<const N: Int> Add for QInt<N> {
     type Output = QInt<{N + 1}>
 
     // A ripple-carry adder: each carry is the majority of the bits and the carry below,
@@ -34,11 +34,38 @@ impl<const N: Int> Add<QInt<N>> for QInt<N> {
     }
 }
 
+// Reversible in-place modular adder (`self += rhs` mod 2^N): updates bits from top down so
+// each bit's carry depends only on lower, unmodified bits, and `with`/`do` uncomputes and
+// releases the carry ancillas with zero measurements.
+impl<const N: Int> AddAssign<ref QInt<N>> for QInt<N> {
+    fn add_assign(mut self, rhs: ref QInt<N>) {
+        for k in 0..N {
+            let i = N - 1 - k
+            assert 0 <= i and i < N
+            with {
+                let carry: [Qubit; N] = [|0>; N]
+                for j in 0..i {
+                    ctrl self.r[j], rhs.r[j] { carry[j + 1].x() }
+                    ctrl self.r[j], carry[j] { carry[j + 1].x() }
+                    ctrl rhs.r[j], carry[j] { carry[j + 1].x() }
+                }
+            } do {
+                ctrl carry[i] { self.r[i].x() }
+            }
+            ctrl rhs.r[i] { self.r[i].x() }
+        }
+    }
+}
+
+rev fn add_in_place<const N: Int>(a: mut QInt<N>, b: ref QInt<N>) {
+    a += b
+}
+
 // The size of the result follows from the arguments': `[Qubit; N + 1]` for `N`.
 fn width<const N: Int>(x: ref QInt<N>) -> Int { N }
 
-// Any type that adds to itself, through the bound.
-fn double<T: Add<T, Output = U>, U>(a: T, b: T) -> U { mv a + mv b }
+// Any type that adds to itself, through the bound (with `Rhs` defaulting to `Self`).
+fn double<T: Add<Output = U>, U>(a: T, b: T) -> U { mv a + mv b }
 
 fn main() {
     let six = QInt { r: |011> }
@@ -51,4 +78,48 @@ fn main() {
     let ten = double(mv five, QInt { r: |1010> })
     print(width(ref ten))
     print(mv ten.r.measure())
+
+    // In-place `+=`: 3 + 4 = 7, leaving rhs unchanged.
+    let a = QInt { r: |110> }
+    let b = QInt { r: |001> }
+    a += b
+    print("{mv a.r.measure()} {mv b.r.measure()}")
+
+    // Modular wrap-around (5 + 5 = 2 mod 8), then `adj` subtracts 5 back to 5.
+    let x = QInt { r: |101> }
+    let y = QInt { r: |101> }
+    add_in_place(mut x, ref y)
+    let wrapped = QInt { r: |000> }
+    ctrl x.r[1] { wrapped.r[1].x() }
+    adj add_in_place(mut x, ref y)
+    print("{mv wrapped.r.measure()} {mv x.r.measure()}")
+    mv y.r.measure()
+
+    // On a superposition: `b` is (|2> + |3>)/sqrt(2), `a` is |1>. Adding and undoing with
+    // `adj` restores the exact superposition with zero ancilla entanglement.
+    let sa = QInt { r: |100> }
+    let sb = QInt { r: |+10> }
+    sa += sb
+    adj add_in_place(mut sa, ref sb)
+    print("{<100| mv sa.r} {<+10| mv sb.r}")
+
+    // Controlled in-place addition and circuit sampling.
+    let c0 = |0>
+    let c1 = |1>
+    let t = QInt { r: |100> }
+    let inc = QInt { r: |010> }
+    ctrl c0 { t += inc }
+    ctrl c1 { t += inc }
+    print(mv t.r.measure())
+    mv inc.r.measure()
+    mv c1.discard()
+
+    let dist = sample 20 {
+        let p = QInt { r: |110> }
+        let q = QInt { r: |100> }
+        p += q
+        mv q.r.measure()
+        mv p.r.measure()
+    }
+    print(dist.most_likely())
 }

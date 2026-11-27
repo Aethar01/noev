@@ -90,7 +90,7 @@ pub fn validate(program: &Program) -> Vec<String> {
                     Stmt::CtrlPush(places) => {
                         places.iter().for_each(|p| check_place(p, &mut report))
                     }
-                    Stmt::CtrlPop => {}
+                    Stmt::CtrlPop | Stmt::WithStart | Stmt::WithDo | Stmt::WithEnd => {}
                     Stmt::Sample {
                         dest,
                         func,

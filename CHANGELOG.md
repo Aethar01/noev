@@ -25,13 +25,19 @@ before 1.0.
   the `impl` by the arguments inferred from it, or by the type's only `impl` or bound when
   they leave one open, and is an error otherwise. A generic trait's associated types depend
   on its arguments (`Scale<Int>` and `Scale<Float>` can each give a type its own `Out`).
-- Operator traits: `+`, `-`, `*` and unary `-` on a program's own types call `std::ops`'s
-  `Add`, `Sub`, `Mul` and `Neg`, picked by the right side's type, so `v * 2` and `v * w` can
-  differ. Sides holding qubits are moved with `mv`, as arguments are. `/` and `%` call
-  `Div` and `Rem`, and `+=`, `-=`, `*=`, `/=` and `%=` call `AddAssign` and the other
-  compound-assignment traits, changing a value in place: reversibly when the `impl` is, so
-  `a += b` on qubits can run under `adj`. Built-in types implement the traits by their
-  built-in operators, so `fn sum<T: Add<T, Output = T>>` takes `Int`s and `Float`s.
+- Operator traits: `+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `<<`, `>>`, unary `-` and `~`,
+  and their compound assignments (`+=`, … `>>=`) on a program's own types call `std::ops`
+  traits; `==`, `!=`, `<`, `<=`, `>`, `>=` call `std::cmp::{Eq, Ord}` (lending both sides).
+  Trailing trait parameters can have defaults (`trait Add<Rhs = Self>`,
+  `trait Pad<const N: Int = 1>`), so `impl Add for V` and `T: Add<Output = T>` omit `Rhs`.
+  Built-in types implement the traits by their built-in operators.
+- `with`/`do` and automatic release (`spec/ownership.md` §8–9): `with { … } do { … }` runs a
+  reversible `with` block (which may allocate ancillas), runs `do` with every linear place
+  `with` allocated, acted on or read held `ref`-lent, then inverts `with` and releases its
+  ancillas automatically; under `ctrl`, only `do` takes the outer controls. Qubits proven to
+  be in `|0>` (untouched `|0>` literals/aggregates, or a `Qubit` after `reset`) release
+  automatically on scope exit without N003. `tests/run/qint.nv` adds a reversible in-place
+  `QInt += QInt` using `with`/`do`.
 - Arithmetic in sizes: `[Qubit; N + 1]`, `[Bit; 2 * N]` and `Reg<{N + 1}>`, compared after
   normalising and solved by calls (`[Qubit; 5]` for `[Qubit; N + 1]` makes `N` 4), so a
   quantum integer can be a library type (`tests/run/qint.nv`). A call also infers a parameter

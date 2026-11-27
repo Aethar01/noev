@@ -184,8 +184,8 @@ item        = [ vis ] ( struct_def | enum_def | type_alias | fn_def | trait_def 
 type_alias  = "type" IDENT "=" type ;
 
 generics    = "<" generic { "," generic } [ "," ] ">" ;
-generic     = IDENT [ ":" bounds ]                      (* a type parameter *)
-            | "const" IDENT ":" type ;                  (* a size parameter: `const N: Int` *)
+generic     = IDENT [ ":" bounds ] [ "=" type ]         (* a type parameter; `= type` on traits *)
+            | "const" IDENT ":" type [ "=" type_arg ] ; (* a size parameter: `const N: Int` *)
 bounds      = bound { "+" bound } ;
 bound       = path [ "<" bound_arg { "," bound_arg } [ "," ] ">" ] ;
 bound_arg   = type_arg | IDENT "=" type ;               (* `Measure<Result = Bit>` *)
@@ -293,7 +293,7 @@ match_expr  = "match" expr_no_struct "{" { arm ( "," | sep ) } "}" ;
 arm         = pattern "=>" expr ;
 
 ctrl_stmt   = "ctrl" place { "," place } block ;
-with_stmt   = "with" block "do" block ;          (* Reserved *)
+with_stmt   = "with" block "do" block ;
 unsafe_block = "unsafe" block ;
 ```
 

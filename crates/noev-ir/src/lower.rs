@@ -16,6 +16,14 @@ use noev_syntax::{Ast, SourceMap, Span};
 
 use crate::ir::*;
 
+/// What a `std::ops` or `std::cmp` trait's function lowers to on a built-in type.
+enum BuiltinOp {
+    Unary(UnOp),
+    Binary(ast::BinaryOp),
+    Assign(ast::BinaryOp),
+    Cmp(ast::BinaryOp),
+}
+
 /// Lowers every function of a checked program, given which of its runs are circuits
 /// ([`noev_sema::check_circuits`]). `source` supplies the text of kets and bras.
 pub fn lower(syntax: &Ast, typed: &Typed, circuits: &Circuits, source: &SourceMap) -> Program {
@@ -239,8 +247,17 @@ struct Builder<'a> {
     current: Block,
     /// IR locals for source locals, indexed by [`LocalId::index`].
     locals: Vec<Option<Local>>,
-    /// `(continue, break)` targets of enclosing loops.
-    loops: Vec<(Block, Block)>,
+    /// `(continue, break, linear_scope_mark)` targets of enclosing loops.
+    loops: Vec<(Block, Block, usize)>,
+    /// Linear locals currently in scope (excluding `with` blocks, whose ancillas release at
+    /// [`Stmt::WithEnd`]), in declaration order, for automatic \|0⟩ release.
+    linear_scope: Vec<(LocalId, Local, Ty)>,
+    /// Moved linear places (local plus field / constant-index path) in the current flow.
+    moved: Vec<(LocalId, Vec<u32>)>,
+    /// Nesting depth inside the `with` part of `with`/`do`.
+    in_with_block: u32,
+    /// Whether control has left the current block via `return`, `break` or `continue`.
+    diverged: bool,
     /// The span of the expression being lowered.
     span: Span,
 }
@@ -327,6 +344,10 @@ impl<'a> Builder<'a> {
             current: Block(0),
             locals: vec![None; typed.locals.len()],
             loops: Vec::new(),
+            linear_scope: Vec::new(),
+            moved: Vec::new(),
+            in_with_block: 0,
+            diverged: false,
             span: Span::default(),
         };
         builder.current = builder.new_block();
@@ -425,6 +446,9 @@ impl<'a> Builder<'a> {
         if let Some(body) = self.body {
             let dest = (self.function.locals[0].ty != Ty::UNIT).then(|| Place::local(Local(0)));
             self.block_into(body, dest);
+            if !self.diverged {
+                self.release_scope(0);
+            }
             self.terminate(Terminator::Return);
         }
         remove_unreachable(&mut self.function);
@@ -479,7 +503,196 @@ impl<'a> Builder<'a> {
         });
         let ir = Local(self.function.locals.len() as u32 - 1);
         self.locals[local.index()] = Some(ir);
+        if self.in_with_block == 0 && self.types.linearity(ty) == noev_sema::ty::Kind::Linear {
+            self.linear_scope.push((local, ir, ty));
+        }
         ir
+    }
+
+    /// The static path of a place expression (local plus field / tuple / constant array
+    /// indices), for tracking which linear parts have been moved before scope exit.
+    fn static_place_path(&mut self, id: ExprId) -> Option<(LocalId, Vec<u32>)> {
+        let ast = self.ast;
+        match ast.expr(id).kind {
+            ExprKind::Own { place, .. } => self.static_place_path(place),
+            ExprKind::Name(_) => match self.typed.res[id.index()] {
+                Res::Local(local) => Some((local, Vec::new())),
+                _ => None,
+            },
+            ExprKind::Field { base, name } => {
+                let (root, mut path) = self.static_place_path(base)?;
+                let ty = {
+                    let ty = self.ty(base);
+                    self.types.deref(ty)
+                };
+                let TyKind::Struct(s) = *self.types.kind(ty) else {
+                    return None;
+                };
+                let index = self.types.structs[s.index()]
+                    .fields
+                    .iter()
+                    .position(|(n, _)| *n == name)?;
+                path.push(index as u32);
+                Some((root, path))
+            }
+            ExprKind::TupleIndex { base, index } => {
+                let (root, mut path) = self.static_place_path(base)?;
+                path.push(index);
+                Some((root, path))
+            }
+            ExprKind::Index { base, index } => {
+                let (root, mut path) = self.static_place_path(base)?;
+                let ExprKind::Int(k) = ast.expr(index).kind else {
+                    return None;
+                };
+                path.push(u32::try_from(k).ok()?);
+                Some((root, path))
+            }
+            _ => None,
+        }
+    }
+
+    fn mark_moved(&mut self, place: ExprId) {
+        if let Some(entry) = self.static_place_path(place) {
+            self.moved.push(entry);
+        }
+    }
+
+    fn unmark_moved(&mut self, place: ExprId) {
+        if let Some((root, path)) = self.static_place_path(place) {
+            self.moved
+                .retain(|(l, p)| *l != root || !p.starts_with(&path));
+        }
+    }
+
+    /// Releases every unmoved qubit owned by linear locals declared since `mark` (proven \|0⟩
+    /// by the ownership checker).
+    fn release_scope(&mut self, mark: usize) {
+        let entries: Vec<(LocalId, Local, Ty)> = self.linear_scope[mark..].to_vec();
+        let mut path = Vec::new();
+        for (local, ir, ty) in entries.into_iter().rev() {
+            path.clear();
+            self.release_unmoved(local, &mut path, Place::local(ir), ty);
+        }
+    }
+
+    fn release_unmoved(&mut self, local: LocalId, path: &mut Vec<u32>, place: Place, ty: Ty) {
+        if self.types.linearity(ty) != noev_sema::ty::Kind::Linear {
+            return;
+        }
+        if self
+            .moved
+            .iter()
+            .any(|(l, p)| *l == local && path.starts_with(p))
+        {
+            return;
+        }
+        let has_partial = self
+            .moved
+            .iter()
+            .any(|(l, p)| *l == local && p.starts_with(path));
+        if !has_partial {
+            self.release_value(place, ty);
+            return;
+        }
+        match self.types.kind(ty).clone() {
+            TyKind::Array(elem, len) => {
+                for k in 0..len {
+                    path.push(k as u32);
+                    let index = Proj::Index(Operand::Const(Const::Int(k as i64)));
+                    self.release_unmoved(local, path, place.with(index), elem);
+                    path.pop();
+                }
+            }
+            TyKind::Tuple(elems) => {
+                for (i, &elem) in elems.iter().enumerate() {
+                    path.push(i as u32);
+                    self.release_unmoved(local, path, place.with(Proj::Field(i as u32)), elem);
+                    path.pop();
+                }
+            }
+            TyKind::Struct(s) if self.types.structs[s.index()].variants.is_none() => {
+                let fields: Vec<Ty> = self.types.structs[s.index()]
+                    .fields
+                    .iter()
+                    .map(|&(_, t)| t)
+                    .collect();
+                for (i, fty) in fields.into_iter().enumerate() {
+                    path.push(i as u32);
+                    self.release_unmoved(local, path, place.with(Proj::Field(i as u32)), fty);
+                    path.pop();
+                }
+            }
+            _ => self.release_value(place, ty),
+        }
+    }
+
+    /// Emits [`Stmt::Release`] for every qubit in `place` of type `ty`.
+    fn release_value(&mut self, place: Place, ty: Ty) {
+        if self.types.linearity(ty) != noev_sema::ty::Kind::Linear {
+            return;
+        }
+        match self.types.kind(ty).clone() {
+            TyKind::Qubit => self.push(Stmt::Release(place)),
+            TyKind::Array(elem, len) => {
+                for k in 0..len {
+                    let index = Proj::Index(Operand::Const(Const::Int(k as i64)));
+                    self.release_value(place.with(index), elem);
+                }
+            }
+            TyKind::Tuple(elems) => {
+                for (i, &elem) in elems.iter().enumerate() {
+                    self.release_value(place.with(Proj::Field(i as u32)), elem);
+                }
+            }
+            TyKind::Struct(s) => match self.types.structs[s.index()].variants.clone() {
+                None => {
+                    let fields: Vec<Ty> = self.types.structs[s.index()]
+                        .fields
+                        .iter()
+                        .map(|&(_, t)| t)
+                        .collect();
+                    for (i, fty) in fields.into_iter().enumerate() {
+                        self.release_value(place.with(Proj::Field(i as u32)), fty);
+                    }
+                }
+                Some(variants) => {
+                    let tag = self.temp(Ty::INT);
+                    self.assign(tag.clone(), Rvalue::Tag(Operand::Copy(place.clone())));
+                    let join = self.new_block();
+                    for (idx, variant) in variants.iter().enumerate() {
+                        if !variant
+                            .data
+                            .iter()
+                            .any(|&t| self.types.linearity(t) == noev_sema::ty::Kind::Linear)
+                        {
+                            continue;
+                        }
+                        let pass = self.new_block();
+                        let next = self.new_block();
+                        let cond = self.compare(
+                            Operand::Copy(tag.clone()),
+                            Operand::Const(Const::Int(idx as i64)),
+                        );
+                        self.terminate_into(
+                            Terminator::Branch {
+                                cond,
+                                then: pass,
+                                otherwise: next,
+                                control: None,
+                            },
+                            pass,
+                        );
+                        for (fi, &fty) in variant.data.iter().enumerate() {
+                            self.release_value(place.with(Proj::Field(fi as u32)), fty);
+                        }
+                        self.terminate_into(Terminator::Goto(join), next);
+                    }
+                    self.terminate_into(Terminator::Goto(join), join);
+                }
+            },
+            _ => {}
+        }
     }
 
     fn local(&self, local: LocalId) -> Local {
@@ -504,20 +717,57 @@ impl<'a> Builder<'a> {
         self.subst(ty)
     }
 
-    /// For a call `call` of `Measure::measure` whose `Self` has no `impl` of its own (a
-    /// qubit, an array, a tuple), `Self`.
-    /// For a call `call` of a `std::ops` trait's function on a built-in type (in a copy of
-    /// generic code, `T: Add<T>` given `Int`), the operator it is (`spec/types.md` §6).
-    fn builtin_operator(&mut self, f: ast::FnId, call: ExprId) -> Option<OpKind> {
+    /// For a call `call` of a `std::ops` or `std::cmp` trait's function on a built-in type
+    /// (in a copy of generic code, `T: Add` given `Int`), the built-in operator it is
+    /// (`spec/types.md` §6).
+    fn builtin_operator(&mut self, f: ast::FnId, call: ExprId) -> Option<BuiltinOp> {
         let &t = self.typed.fn_traits.get(&f)?;
         let kind = self.types.op_trait(t.index() as u32)?;
         let args: Vec<Ty> = self.typed.type_args.get(&call)?.clone();
         let args: Vec<Ty> = args.into_iter().map(|a| self.subst(a)).collect();
         let (&self_ty, rest) = args.split_first()?;
         let n = self.typed.traits[t.index()].params.len();
+        let trait_args = rest.get(..n)?;
+        if self
+            .typed
+            .impl_for(self.types, t, trait_args, self_ty)
+            .is_some()
+        {
+            return None;
+        }
         self.types
-            .builtin_op(t.index() as u32, self_ty, Some(rest.get(..n)?))
-            .map(|_| kind)
+            .builtin_op(t.index() as u32, self_ty, Some(trait_args))?;
+        let op = match kind {
+            OpKind::Neg => BuiltinOp::Unary(UnOp::Neg),
+            OpKind::BitNot => BuiltinOp::Unary(UnOp::BitNot),
+            OpKind::Binary(op) => BuiltinOp::Binary(op),
+            OpKind::Assign(op) => BuiltinOp::Assign(op),
+            OpKind::Eq => {
+                let idx = self.typed.traits[t.index()]
+                    .fns
+                    .iter()
+                    .position(|&tf| tf == f)?;
+                BuiltinOp::Cmp(if idx == 0 {
+                    ast::BinaryOp::Eq
+                } else {
+                    ast::BinaryOp::NotEq
+                })
+            }
+            OpKind::Ord => {
+                let idx = self.typed.traits[t.index()]
+                    .fns
+                    .iter()
+                    .position(|&tf| tf == f)?;
+                let op = match idx {
+                    0 => ast::BinaryOp::Lt,
+                    1 => ast::BinaryOp::Le,
+                    2 => ast::BinaryOp::Gt,
+                    _ => ast::BinaryOp::Ge,
+                };
+                BuiltinOp::Cmp(op)
+            }
+        };
+        Some(op)
     }
 
     fn measured_by_parts(&mut self, f: ast::FnId, call: ExprId) -> Option<Ty> {
@@ -691,15 +941,38 @@ fn successors_mut(term: &mut Terminator) -> Vec<&mut Block> {
 impl Builder<'_> {
     fn block_into(&mut self, block: ast::BlockId, dest: Option<Place>) {
         let ast = self.ast;
+        let scope_mark = self.linear_scope.len();
         let stmts = ast.list(ast.block(block).stmts);
         for (i, &stmt) in stmts.iter().enumerate() {
+            if self.diverged {
+                break;
+            }
             match ast.stmt(stmt).kind {
                 StmtKind::Expr { expr, semi: false } if i + 1 == stmts.len() => {
-                    self.expr_into(expr, dest.clone());
+                    self.expr_into_or_release(expr, dest.clone());
                 }
                 _ => self.stmt(stmt),
             }
         }
+        if !self.diverged {
+            self.release_scope(scope_mark);
+        }
+        self.linear_scope.truncate(scope_mark);
+    }
+
+    /// Lowers `expr` into `dest`, or if `dest` is `None` and `expr` produces a linear value
+    /// (proven \|0⟩ by the ownership checker), lowers into a temporary and releases its qubits.
+    fn expr_into_or_release(&mut self, expr: ExprId, dest: Option<Place>) {
+        if dest.is_none() && !matches!(self.ast.expr(expr).kind, ExprKind::With { .. }) {
+            let ty = self.ty(expr);
+            if self.types.linearity(ty) == noev_sema::ty::Kind::Linear {
+                let temp = self.temp(ty);
+                self.expr_into(expr, Some(temp.clone()));
+                self.release_value(temp, ty);
+                return;
+            }
+        }
+        self.expr_into(expr, dest);
     }
 
     fn stmt(&mut self, id: ast::StmtId) {
@@ -718,7 +991,7 @@ impl Builder<'_> {
                         self.temp(ty)
                     };
                     self.expr_into(init, Some(temp.clone()));
-                    self.bind(pat, temp);
+                    self.bind(pat, temp, false);
                 }
             },
             // `a += b` on a type of the program's own calls `AddAssign::add_assign`.
@@ -728,6 +1001,22 @@ impl Builder<'_> {
             StmtKind::Assign { op, place, value } => {
                 let target = self.place_deref(place);
                 let value = self.operand(value);
+                if op == ast::AssignOp::Assign
+                    && let Some((root, path)) = self.static_place_path(place)
+                    && let Some((_, ir, _)) = self
+                        .linear_scope
+                        .iter()
+                        .find(|&&(l, _, _)| l == root)
+                        .copied()
+                {
+                    let ty = self.ty(place);
+                    let mut p = path;
+                    let mut place_ir = Place::local(ir);
+                    for &step in &p {
+                        place_ir = place_ir.with(Proj::Field(step));
+                    }
+                    self.release_unmoved(root, &mut p, place_ir, ty);
+                }
                 let rvalue = match op {
                     ast::AssignOp::Assign => Rvalue::Use(value),
                     ast::AssignOp::Compound(op) => {
@@ -738,21 +1027,28 @@ impl Builder<'_> {
                 let outer = std::mem::replace(&mut self.span, stmt.span);
                 self.assign(target, rvalue);
                 self.span = outer;
+                if op == ast::AssignOp::Assign {
+                    self.unmark_moved(place);
+                }
             }
             StmtKind::Return(value) => {
                 if let Some(value) = value {
                     self.expr_into(value, Some(Place::local(Local(0))));
                 }
+                self.release_scope(0);
                 self.terminate(Terminator::Return);
+                self.diverged = true;
             }
             StmtKind::Break | StmtKind::Continue => {
-                let &(cont, brk) = self.loops.last().expect("checked: inside a loop");
+                let &(cont, brk, scope_mark) = self.loops.last().expect("checked: inside a loop");
+                self.release_scope(scope_mark);
                 let target = if stmt.kind == StmtKind::Break {
                     brk
                 } else {
                     cont
                 };
                 self.terminate(Terminator::Goto(target));
+                self.diverged = true;
             }
             StmtKind::Assert(cond) => {
                 let cond = self.operand(cond);
@@ -766,7 +1062,7 @@ impl Builder<'_> {
                     next,
                 );
             }
-            StmtKind::Expr { expr, .. } => self.expr_into(expr, None),
+            StmtKind::Expr { expr, .. } => self.expr_into_or_release(expr, None),
         }
     }
 
@@ -793,13 +1089,36 @@ impl Builder<'_> {
         let join = self.new_block();
         // On a measurement result in a circuit, each test is an `if` recorded up to `join`.
         let control = self.control(id, join, false);
+        let lent = !matches!(
+            self.ast.expr(scrutinee).kind,
+            ExprKind::Own {
+                kind: OwnKind::Mv,
+                ..
+            }
+        ) && (self.is_ref(ty) || self.is_place_expr(scrutinee));
+        let moved_before = self.moved.clone();
+        let mut arm_moved = None;
+        let mut all_diverged = true;
         for arm in self.ast.list(arms).to_vec() {
+            self.moved = moved_before.clone();
+            self.diverged = false;
+            let scope_mark = self.linear_scope.len();
             let next = self.new_block();
             self.test_or_jump(arm.pat, &value, next, &control);
-            self.bind(arm.pat, value.clone());
-            self.expr_into(arm.body, dest.clone());
+            self.bind(arm.pat, value.clone(), lent);
+            self.expr_into_or_release(arm.body, dest.clone());
+            if !self.diverged {
+                self.release_scope(scope_mark);
+                if arm_moved.is_none() {
+                    arm_moved = Some(self.moved.clone());
+                }
+            }
+            all_diverged &= self.diverged;
+            self.linear_scope.truncate(scope_mark);
             self.terminate_into(Terminator::Goto(join), next);
         }
+        self.diverged = all_diverged;
+        self.moved = arm_moved.unwrap_or(moved_before);
         self.terminate_into(Terminator::Unreachable, join);
     }
 
@@ -924,7 +1243,7 @@ impl Builder<'_> {
     }
 
     /// Binds a destructuring pattern to the parts of `value`.
-    fn bind(&mut self, pat: ast::PatId, value: Place) {
+    fn bind(&mut self, pat: ast::PatId, value: Place, lent: bool) {
         match self.ast.pat(pat).kind {
             ast::PatKind::Name(_) => {
                 let local = self.typed.pat_locals[pat.index()].expect("checked");
@@ -948,22 +1267,29 @@ impl Builder<'_> {
                 };
                 self.assign(Place::local(local), value);
             }
-            ast::PatKind::Wildcard => {}
+            ast::PatKind::Wildcard => {
+                if !lent {
+                    let ty = self.subst(self.typed.pat_types[pat.index()]);
+                    if self.types.linearity(ty) == noev_sema::ty::Kind::Linear {
+                        self.release_value(value, ty);
+                    }
+                }
+            }
             ast::PatKind::Tuple(pats) => {
                 for (i, &p) in self.ast.list(pats).iter().enumerate() {
-                    self.bind(p, value.with(Proj::Field(i as u32)));
+                    self.bind(p, value.with(Proj::Field(i as u32)), lent);
                 }
             }
             ast::PatKind::Array(pats) => {
                 for (i, &p) in self.ast.list(pats).iter().enumerate() {
                     let index = Operand::Const(Const::Int(i as i64));
-                    self.bind(p, value.with(Proj::Index(index)));
+                    self.bind(p, value.with(Proj::Index(index)), lent);
                 }
             }
             ast::PatKind::Literal(_) => {}
             ast::PatKind::Variant { data, .. } => {
                 for (i, p) in self.variant_parts(pat, data) {
-                    self.bind(p, value.with(Proj::Field(i)));
+                    self.bind(p, value.with(Proj::Field(i)), lent);
                 }
             }
         }
@@ -1060,11 +1386,9 @@ impl Builder<'_> {
         }
     }
 
-    /// An expression's value as an operand, applying any implicit lend or dereference.
-    fn operand(&mut self, id: ExprId) -> Operand {
-        let ast = self.ast;
-        let expr = *ast.expr(id);
-        let adjust = self.typed.adjust[id.index()];
+    /// A constant or size-parameter expression as an operand, without applying `Adjust::Lend`.
+    fn const_operand(&mut self, id: ExprId) -> Option<Operand> {
+        let expr = *self.ast.expr(id);
         match expr.kind {
             // A size parameter: its value in this copy.
             ExprKind::Name(_) if let Res::Size(size) = self.typed.res[id.index()] => {
@@ -1072,45 +1396,50 @@ impl Builder<'_> {
                 let TyKind::Size(n) = *self.types.kind(size) else {
                     unreachable!("a size parameter is a size in each copy");
                 };
-                return Operand::Const(Const::Int(n as i64));
+                Some(Operand::Const(Const::Int(n as i64)))
             }
-            ExprKind::Int(v) if self.ty(id) == Ty::BIT => {
-                return Operand::Const(Const::Bit(v == 1));
-            }
+            ExprKind::Int(v) if self.ty(id) == Ty::BIT => Some(Operand::Const(Const::Bit(v == 1))),
             ExprKind::Int(v) if let Some(w) = self.ty(id).width() => {
-                return Operand::Const(Const::Sized(i128::from(v), w));
+                Some(Operand::Const(Const::Sized(i128::from(v), w)))
             }
-            ExprKind::Int(v) if let Ok(v) = i64::try_from(v) => {
-                return Operand::Const(Const::Int(v));
-            }
+            ExprKind::Int(v) if let Ok(v) = i64::try_from(v) => Some(Operand::Const(Const::Int(v))),
             // Past `i64`: computed from its text (spec/types.md §1).
             ExprKind::Int(_) | ExprKind::BigInt => {
                 let temp = self.temp(Ty::INT);
                 let text = self.text(expr.span).to_string();
                 self.assign(temp.clone(), Rvalue::BigInt(text));
-                return Operand::Copy(temp);
+                Some(Operand::Copy(temp))
             }
             // A float or imaginary literal, of the type it took.
-            ExprKind::Float(v) => {
-                return Operand::Const(match self.ty(id) {
-                    Ty::F32 => Const::F32(v as f32),
-                    Ty::COMPLEX => Const::Complex(v, 0.0),
-                    Ty::C32 => Const::C32(v as f32, 0.0),
-                    _ => Const::Float(v),
-                });
-            }
-            ExprKind::Imag(v) => {
-                return Operand::Const(match self.ty(id) {
-                    Ty::C32 => Const::C32(0.0, v as f32),
-                    _ => Const::Complex(0.0, v),
-                });
-            }
-            ExprKind::Bool(v) => return Operand::Const(Const::Bool(v)),
-            ExprKind::Unit => return Operand::Const(Const::Unit),
-            _ => {}
+            ExprKind::Float(v) => Some(Operand::Const(match self.ty(id) {
+                Ty::F32 => Const::F32(v as f32),
+                Ty::COMPLEX => Const::Complex(v, 0.0),
+                Ty::C32 => Const::C32(v as f32, 0.0),
+                _ => Const::Float(v),
+            })),
+            ExprKind::Imag(v) => Some(Operand::Const(match self.ty(id) {
+                Ty::C32 => Const::C32(0.0, v as f32),
+                _ => Const::Complex(0.0, v),
+            })),
+            ExprKind::Bool(v) => Some(Operand::Const(Const::Bool(v))),
+            ExprKind::Unit => Some(Operand::Const(Const::Unit)),
+            _ => None,
         }
+    }
+
+    /// An expression's value as an operand, applying any implicit lend or dereference.
+    fn operand(&mut self, id: ExprId) -> Operand {
+        let expr = *self.ast.expr(id);
+        let adjust = self.typed.adjust[id.index()];
         if let Adjust::Lend { mutable } = adjust {
-            let place = self.lend_target(id);
+            let place = if let Some(op) = self.const_operand(id) {
+                let ty = self.ty(id);
+                let temp = self.temp(ty);
+                self.assign(temp.clone(), Rvalue::Use(op));
+                temp
+            } else {
+                self.lend_target(id)
+            };
             let ref_ty = {
                 let ty = self.ty(id);
                 self.types.reference(mutable, ty)
@@ -1118,6 +1447,9 @@ impl Builder<'_> {
             let temp = self.temp(ref_ty);
             self.assign(temp.clone(), Rvalue::Ref { mutable, place });
             return Operand::Copy(temp);
+        }
+        if let Some(op) = self.const_operand(id) {
+            return op;
         }
         // A projection is read from its place, which `place` makes from a temporary when its
         // base is a value such as a call's result.
@@ -1144,6 +1476,7 @@ impl Builder<'_> {
                 kind: OwnKind::Mv,
                 place,
             } => {
+                self.mark_moved(place);
                 let ty = self.ty(place);
                 let p = self.place(place);
                 return self.read(p, ty);
@@ -1177,6 +1510,30 @@ impl Builder<'_> {
             _ => ty,
         };
         self.read(temp, ty)
+    }
+
+    /// An expression's value, following any references (including an implicit `Adjust::Lend`
+    /// that was recorded for a `ref` parameter), for built-in comparison operators.
+    fn deref_operand(&mut self, id: ExprId) -> Operand {
+        let op = self.operand(id);
+        let mut ty = self.ty(id);
+        match self.typed.adjust[id.index()] {
+            Adjust::Lend { mutable } => ty = self.types.reference(mutable, ty),
+            Adjust::Deref => ty = self.types.deref(ty),
+            Adjust::None => {}
+        }
+        if !self.is_ref(ty) {
+            return op;
+        }
+        let mut place = match op {
+            Operand::Copy(place) | Operand::Move(place) => place,
+            constant @ Operand::Const(_) => return constant,
+        };
+        while let TyKind::Ref { inner, .. } = *self.types.kind(ty) {
+            place = place.with(Proj::Deref);
+            ty = inner;
+        }
+        Operand::Copy(place)
     }
 
     /// An expression's value, following any references, for printing.
@@ -1220,7 +1577,12 @@ impl Builder<'_> {
     fn qubit_place(&mut self, id: ExprId) -> Place {
         let ast = self.ast;
         match ast.expr(id).kind {
-            ExprKind::Own { place, .. } => self.qubit_place(place),
+            ExprKind::Own { kind, place } => {
+                if kind == OwnKind::Mv {
+                    self.mark_moved(place);
+                }
+                self.qubit_place(place)
+            }
             ExprKind::MethodCall { .. } if self.is_gate_chain(id) => self.gate_call(id),
             _ if self.is_place_expr(id) => self.place_deref(id),
             _ => {
@@ -1289,7 +1651,29 @@ impl Builder<'_> {
         let ast = self.ast;
         let expr = *ast.expr(id);
         match expr.kind {
-            ExprKind::Error | ExprKind::With { .. } => {}
+            ExprKind::Error => {}
+            ExprKind::With { with, body } => {
+                self.push(Stmt::WithStart);
+                self.in_with_block += 1;
+                let stmts = ast.list(ast.block(with).stmts);
+                for (i, &stmt) in stmts.iter().enumerate() {
+                    if self.diverged {
+                        break;
+                    }
+                    match ast.stmt(stmt).kind {
+                        StmtKind::Expr { expr, semi: false } if i + 1 == stmts.len() => {
+                            self.expr_into(expr, None);
+                        }
+                        _ => self.stmt(stmt),
+                    }
+                }
+                self.in_with_block -= 1;
+                self.push(Stmt::WithDo);
+                let outer_with = std::mem::replace(&mut self.in_with_block, 0);
+                self.block_into(body, dest);
+                self.in_with_block = outer_with;
+                self.push(Stmt::WithEnd);
+            }
             ExprKind::Int(_)
             | ExprKind::BigInt
             | ExprKind::Float(_)
@@ -1525,11 +1909,24 @@ impl Builder<'_> {
                     },
                     then_block,
                 );
+                let moved_before = self.moved.clone();
+                self.diverged = false;
                 self.block_into(then, dest.clone());
+                let then_diverged = self.diverged;
+                let then_moved = std::mem::replace(&mut self.moved, moved_before);
                 self.terminate_into(Terminator::Goto(join), else_block);
+                self.diverged = false;
                 if let Some(otherwise) = otherwise {
-                    self.expr_into(otherwise, dest);
+                    self.expr_into_or_release(otherwise, dest);
                 }
+                let else_diverged = self.diverged;
+                let else_moved = std::mem::take(&mut self.moved);
+                self.diverged = then_diverged && else_diverged;
+                self.moved = if !then_diverged {
+                    then_moved
+                } else {
+                    else_moved
+                };
                 self.terminate_into(Terminator::Goto(join), join);
             }
             ExprKind::While { cond, body } => {
@@ -1547,9 +1944,12 @@ impl Builder<'_> {
                     },
                     body_block,
                 );
-                self.loops.push((head, exit));
+                let scope_mark = self.linear_scope.len();
+                self.loops.push((head, exit, scope_mark));
+                self.diverged = false;
                 self.block_into(body, None);
                 self.loops.pop();
+                self.diverged = false;
                 self.terminate_into(Terminator::Goto(head), exit);
             }
             ExprKind::For {
@@ -1795,9 +2195,12 @@ impl Builder<'_> {
             Place::local(var),
             Rvalue::Use(Operand::Copy(counter.clone())),
         );
-        self.loops.push((step, exit));
+        let scope_mark = self.linear_scope.len();
+        self.loops.push((step, exit, scope_mark));
+        self.diverged = false;
         self.block_into(body, None);
         self.loops.pop();
+        self.diverged = false;
         self.terminate_into(Terminator::Goto(step), step);
         self.assign(
             counter.clone(),
@@ -1916,7 +2319,7 @@ impl Builder<'_> {
                 .expect("`measure`");
             return self.measure_into(dest, source, self_ty, measure);
         }
-        // A `std::ops` trait's function on a built-in type is its built-in operator.
+        // A `std::ops` or `std::cmp` trait's function on a built-in type is its built-in operator.
         if let Callee::Fn(f) = callee
             && let Some(kind) = self.builtin_operator(f, id)
         {
@@ -1925,15 +2328,19 @@ impl Builder<'_> {
                 None => (args[0], &args[1..]),
             };
             match kind {
-                OpKind::Neg => {
+                BuiltinOp::Unary(op) => {
                     let x = self.operand(first);
-                    self.set(&dest, Rvalue::Unary(UnOp::Neg, x));
+                    self.set(&dest, Rvalue::Unary(op, x));
                 }
-                OpKind::Binary(op) => {
+                BuiltinOp::Binary(op) => {
                     let (a, b) = (self.operand(first), self.operand(rest[0]));
                     self.set(&dest, Rvalue::Binary(op, a, b));
                 }
-                OpKind::Assign(op) => {
+                BuiltinOp::Cmp(op) => {
+                    let (a, b) = (self.deref_operand(first), self.deref_operand(rest[0]));
+                    self.set(&dest, Rvalue::Binary(op, a, b));
+                }
+                BuiltinOp::Assign(op) => {
                     let place = match ast.expr(first).kind {
                         ExprKind::Own { place, .. } => place,
                         _ => first,

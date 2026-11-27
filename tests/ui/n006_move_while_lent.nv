@@ -22,7 +22,7 @@ fn moved_while_a_match_lends_it(h: Held) {
     match h {
         Held::Qubit(q) => {
             give(mv h)              //~ N006
-            q.x()
+            ctrl q {}
         }
         Held::Nothing => give(mv h),
     }

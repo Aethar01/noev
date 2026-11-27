@@ -652,10 +652,27 @@ fn generics_text(ast: &Ast, generics: Generics) -> String {
         .list(generics.params)
         .iter()
         .map(|p| match p.kind {
-            GenericKind::Size { .. } => format!("const {}", ast.name(p.name)),
-            GenericKind::Type { bounds } if bounds.is_empty() => ast.name(p.name).to_string(),
-            GenericKind::Type { bounds } => {
-                format!("{}: {}", ast.name(p.name), bounds_text(bounds))
+            GenericKind::Size { default, .. } => {
+                if default.is_some() {
+                    format!("const {} = _", ast.name(p.name))
+                } else {
+                    format!("const {}", ast.name(p.name))
+                }
+            }
+            GenericKind::Type { bounds, default } if bounds.is_empty() => {
+                if default.is_some() {
+                    format!("{} = _", ast.name(p.name))
+                } else {
+                    ast.name(p.name).to_string()
+                }
+            }
+            GenericKind::Type { bounds, default } => {
+                let base = format!("{}: {}", ast.name(p.name), bounds_text(bounds));
+                if default.is_some() {
+                    format!("{base} = _")
+                } else {
+                    base
+                }
             }
         })
         .collect();

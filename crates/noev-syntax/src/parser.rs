@@ -926,9 +926,14 @@ impl Parser<'_> {
                 let (name, _) = self.name("a size parameter's name");
                 self.expect(Colon, "`:` and the size's type, `Int`");
                 let ty = self.ty();
+                let default = if self.eat(Eq) {
+                    Some(self.type_arg())
+                } else {
+                    None
+                };
                 GenericParam {
                     name,
-                    kind: GenericKind::Size { ty },
+                    kind: GenericKind::Size { ty, default },
                     span: start.to(self.prev_span()),
                 }
             } else {
@@ -938,9 +943,10 @@ impl Parser<'_> {
                 } else {
                     List::default()
                 };
+                let default = if self.eat(Eq) { Some(self.ty()) } else { None };
                 GenericParam {
                     name,
-                    kind: GenericKind::Type { bounds },
+                    kind: GenericKind::Type { bounds, default },
                     span: start.to(self.prev_span()),
                 }
             };
@@ -1774,8 +1780,13 @@ impl Parser<'_> {
             Ket => {
                 self.bump();
                 let parts = self.ket_parts(start);
+                let text = self.text(start);
+                let inner = &text[1..text.len().saturating_sub(1)];
+                let zero =
+                    parts.is_empty() && !inner.is_empty() && inner.bytes().all(|b| b == b'0');
                 ExprKind::Ket {
                     qubits: self.qubits(start),
+                    zero,
                     parts,
                 }
             }
@@ -2166,8 +2177,11 @@ impl Parser<'_> {
                 .with_help_mut("prepare the state in a function, as in `<prep(b)| H |prep(b)>`");
             ExprKind::Error
         } else {
+            let inner = &text[1..text.len().saturating_sub(1)];
+            let zero = !inner.is_empty() && inner.bytes().all(|b| b == b'0');
             ExprKind::Ket {
                 qubits: self.qubits(span),
+                zero,
                 parts: List::default(),
             }
         };

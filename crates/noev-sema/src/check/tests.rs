@@ -205,10 +205,15 @@ fn main_takes_nothing_and_returns_unit() {
 }
 
 #[test]
-fn reserved_items() {
+fn with_do_typing() {
+    ok("fn f() { with { let a = |0> } do { let _ = ref a } }");
     assert_eq!(
-        one_error("fn f() { with { } do { } }"),
-        "`with`/`do` is not supported yet"
+        one_error("fn f() -> Int { with { let a = |0> } do { return 1 } }"),
+        "`return` cannot leave a `with`/`do` block"
+    );
+    assert_eq!(
+        one_error("fn f() { for i in 0..2 { with {} do { break } } }"),
+        "`break` outside a loop"
     );
 }
 

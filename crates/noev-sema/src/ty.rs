@@ -3,53 +3,103 @@
 use noev_syntax::ast::BinaryOp;
 use noev_syntax::{Ast, FxHashMap, Span, Symbol};
 
-/// What a `std::ops` trait stands for (`spec/types.md` §6).
+/// What an operator trait in `std::ops` or `std::cmp` stands for (`spec/types.md` §6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpKind {
-    /// A binary operator: `Add` for `a + b`.
+    /// A binary operator: `Add` for `a + b`, `BitAnd` for `a & b`.
     Binary(BinaryOp),
     /// Unary `-`.
     Neg,
+    /// Unary `~`.
+    BitNot,
     /// A compound assignment: `AddAssign` for `a += b`.
     Assign(BinaryOp),
+    /// `std::cmp::Eq` (`==`, `!=`).
+    Eq,
+    /// `std::cmp::Ord` (`<`, `<=`, `>`, `>=`).
+    Ord,
 }
 
-/// A `std::ops` trait: its name, how its operator is written, and what it stands for.
+/// An operator trait: its module in `std`, its name, how its operator is written, and what it
+/// stands for.
 #[derive(Clone, Copy, Debug)]
 pub struct OpTrait {
+    /// The module in `std` (`ops` or `cmp`).
+    pub module: &'static str,
     /// The trait's name.
     pub name: &'static str,
-    /// How the operator is written.
+    /// How the operator is written (the primary symbol, for messages).
     pub word: &'static str,
     /// What it stands for.
     pub kind: OpKind,
 }
 
-const fn op(name: &'static str, word: &'static str, kind: OpKind) -> OpTrait {
-    OpTrait { name, word, kind }
+const fn op(module: &'static str, name: &'static str, word: &'static str, kind: OpKind) -> OpTrait {
+    OpTrait {
+        module,
+        name,
+        word,
+        kind,
+    }
 }
 
-/// `std::ops`'s traits, in the order of [`Types::ops`].
-pub const OPS: [OpTrait; 11] = [
-    op("Add", "+", OpKind::Binary(BinaryOp::Add)),
-    op("Sub", "-", OpKind::Binary(BinaryOp::Sub)),
-    op("Mul", "*", OpKind::Binary(BinaryOp::Mul)),
-    op("Div", "/", OpKind::Binary(BinaryOp::Div)),
-    op("Rem", "%", OpKind::Binary(BinaryOp::Rem)),
-    op("Neg", "-", OpKind::Neg),
-    op("AddAssign", "+=", OpKind::Assign(BinaryOp::Add)),
-    op("SubAssign", "-=", OpKind::Assign(BinaryOp::Sub)),
-    op("MulAssign", "*=", OpKind::Assign(BinaryOp::Mul)),
-    op("DivAssign", "/=", OpKind::Assign(BinaryOp::Div)),
-    op("RemAssign", "%=", OpKind::Assign(BinaryOp::Rem)),
+/// `std::ops` and `std::cmp`'s operator traits, in the order of [`Types::ops`].
+pub const OPS: [OpTrait; 24] = [
+    op("ops", "Add", "+", OpKind::Binary(BinaryOp::Add)),
+    op("ops", "Sub", "-", OpKind::Binary(BinaryOp::Sub)),
+    op("ops", "Mul", "*", OpKind::Binary(BinaryOp::Mul)),
+    op("ops", "Div", "/", OpKind::Binary(BinaryOp::Div)),
+    op("ops", "Rem", "%", OpKind::Binary(BinaryOp::Rem)),
+    op("ops", "BitAnd", "&", OpKind::Binary(BinaryOp::BitAnd)),
+    op("ops", "BitOr", "|", OpKind::Binary(BinaryOp::BitOr)),
+    op("ops", "BitXor", "^", OpKind::Binary(BinaryOp::BitXor)),
+    op("ops", "Shl", "<<", OpKind::Binary(BinaryOp::Shl)),
+    op("ops", "Shr", ">>", OpKind::Binary(BinaryOp::Shr)),
+    op("ops", "Neg", "-", OpKind::Neg),
+    op("ops", "BitNot", "~", OpKind::BitNot),
+    op("ops", "AddAssign", "+=", OpKind::Assign(BinaryOp::Add)),
+    op("ops", "SubAssign", "-=", OpKind::Assign(BinaryOp::Sub)),
+    op("ops", "MulAssign", "*=", OpKind::Assign(BinaryOp::Mul)),
+    op("ops", "DivAssign", "/=", OpKind::Assign(BinaryOp::Div)),
+    op("ops", "RemAssign", "%=", OpKind::Assign(BinaryOp::Rem)),
+    op(
+        "ops",
+        "BitAndAssign",
+        "&=",
+        OpKind::Assign(BinaryOp::BitAnd),
+    ),
+    op("ops", "BitOrAssign", "|=", OpKind::Assign(BinaryOp::BitOr)),
+    op(
+        "ops",
+        "BitXorAssign",
+        "^=",
+        OpKind::Assign(BinaryOp::BitXor),
+    ),
+    op("ops", "ShlAssign", "<<=", OpKind::Assign(BinaryOp::Shl)),
+    op("ops", "ShrAssign", ">>=", OpKind::Assign(BinaryOp::Shr)),
+    op("cmp", "Eq", "==", OpKind::Eq),
+    op("cmp", "Ord", "<", OpKind::Ord),
 ];
 
 /// [`OPS`]'s `Neg`.
-pub const NEG: usize = 5;
+pub const NEG: usize = 10;
+/// [`OPS`]'s `BitNot`.
+pub const BIT_NOT: usize = 11;
+/// [`OPS`]'s `Eq`.
+pub const EQ: usize = 22;
+/// [`OPS`]'s `Ord`.
+pub const ORD: usize = 23;
 
-/// The `std::ops` trait for a binary operator, or for its compound assignment, by position
-/// in [`OPS`].
+/// The operator trait for a binary operator, or for its compound assignment, by position in
+/// [`OPS`].
 pub fn op_index(op: BinaryOp, assign: bool) -> Option<usize> {
+    if !assign {
+        match op {
+            BinaryOp::Eq | BinaryOp::NotEq => return Some(EQ),
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => return Some(ORD),
+            _ => {}
+        }
+    }
     OPS.iter().position(|o| {
         o.kind
             == if assign {
@@ -58,6 +108,17 @@ pub fn op_index(op: BinaryOp, assign: bool) -> Option<usize> {
                 OpKind::Binary(op)
             }
     })
+}
+
+/// Which function of its operator trait `op` calls (`0` for single-method traits; `ne`/`le`/
+/// `gt`/`ge` for `Eq` and `Ord`).
+pub fn op_fn_index(op: BinaryOp) -> usize {
+    match op {
+        BinaryOp::NotEq | BinaryOp::Le => 1,
+        BinaryOp::Gt => 2,
+        BinaryOp::Ge => 3,
+        _ => 0,
+    }
 }
 
 /// An interned type.
@@ -1114,23 +1175,51 @@ impl Types {
         ok.then_some(ty)
     }
 
-    /// The `std::ops` trait `trait_index` is, if it is one.
+    /// What built-in unary `~` gives on `ty`, if it applies.
+    pub fn builtin_bitnot(&self, ty: Ty) -> Option<Ty> {
+        (ty.is_integer() || ty == Ty::BIT).then_some(ty)
+    }
+
+    /// The `std::ops` or `std::cmp` trait `trait_index` is, if it is one.
     pub fn op_trait(&self, trait_index: u32) -> Option<OpKind> {
         let i = self.ops.iter().position(|&t| t == Some(trait_index))?;
         Some(OPS[i].kind)
     }
 
-    /// For a built-in type, what its built-in operator gives as the `std::ops` trait
-    /// `trait_index` with the arguments `args` (any right side if `None`): the `Output`, or
-    /// `()` for a compound assignment. `None` when the built-in operator does not apply, or
-    /// the trait is not an operator's (`spec/types.md` §6).
+    /// For a built-in type, what its built-in operator gives as the operator trait
+    /// `trait_index` with the arguments `args` (any right side if `None`): the `Output`,
+    /// `Bool` for comparisons, or `()` for a compound assignment. `None` when the built-in
+    /// operator does not apply, or the trait is not an operator's (`spec/types.md` §6).
     pub fn builtin_op(&self, trait_index: u32, self_ty: Ty, args: Option<&[Ty]>) -> Option<Ty> {
-        if !self.is_builtin_value(self_ty) {
-            return None;
-        }
         match self.op_trait(trait_index)? {
-            OpKind::Neg => self.builtin_neg(self_ty),
+            OpKind::Eq => {
+                let rhs = match args {
+                    Some(&[rhs]) => rhs,
+                    Some(_) => return None,
+                    None => self_ty,
+                };
+                (self_ty == rhs && self.is_comparable(self_ty)).then_some(Ty::BOOL)
+            }
+            OpKind::Ord => {
+                let rhs = match args {
+                    Some(&[rhs]) => rhs,
+                    Some(_) => return None,
+                    None => self_ty,
+                };
+                (self_ty == rhs && self_ty.is_number()).then_some(Ty::BOOL)
+            }
+            OpKind::Neg => self
+                .is_builtin_value(self_ty)
+                .then(|| self.builtin_neg(self_ty))
+                .flatten(),
+            OpKind::BitNot => self
+                .is_builtin_value(self_ty)
+                .then(|| self.builtin_bitnot(self_ty))
+                .flatten(),
             OpKind::Binary(op) => {
+                if !self.is_builtin_value(self_ty) {
+                    return None;
+                }
                 let rhs = match args {
                     Some(&[rhs]) => rhs,
                     Some(_) => return None,
@@ -1139,6 +1228,9 @@ impl Types {
                 self.builtin_binary(op, self_ty, rhs)
             }
             OpKind::Assign(op) => {
+                if !self.is_builtin_value(self_ty) {
+                    return None;
+                }
                 let rhs = match args {
                     Some(&[rhs]) => rhs,
                     Some(_) => return None,

@@ -474,7 +474,11 @@ impl Oracle<4> for Parity {
 - A trait declares functions, with or without default bodies, and associated types
   (`type Result`). An `impl` provides them for a type, and can itself be generic:
   `impl<T: Measure> Measure for Pair<T, T>`.
-- A trait can take type and size parameters, which its functions see after `Self`. A type
+- A trait can take type and size parameters, which its functions see after `Self`. A
+  trait's trailing parameters can have defaults (`trait Add<Rhs = Self>`,
+  `trait Pad<const N: Int = 1>`), which can name `Self` and earlier parameters; leaving an
+  argument out in an `impl` or bound uses the default, so `impl Add for V` means
+  `impl Add<V> for V` and `T: Add<Output = T>` means `T: Add<T, Output = T>`. A type
   can implement one trait several times with different arguments (`Oracle<2>` and
   `Oracle<4>`), and a call picks the `impl` by them: they are inferred from the call's
   arguments, as a function's are; if that leaves one open, it is the trait's only arguments
@@ -516,14 +520,14 @@ classical `ExperimentResult`. The free function `measure(x)` is `measure<T: Meas
 
 ### Operator traits
 
-`+`, `-`, `*`, `/`, `%`, unary `-` and the compound assignments `+=`, `-=`, `*=`, `/=` and
-`%=` on a type of the program's own call the function of a trait in `std::ops`, which the
-program implements:
+`+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `<<`, `>>`, unary `-` and `~`, and their compound
+assignments (`+=`, … `>>=`) on a type of the program's own call the function of a trait in
+`std::ops`; `==`, `!=`, `<`, `<=`, `>`, `>=` call `Eq` and `Ord` in `std::cmp`:
 
 ```noev
 use std::ops::{Add, Mul}
 
-impl Add<V> for V {
+impl Add for V {
     type Output = V
     fn add(mv self, rhs: V) -> V { V { x: self.x + rhs.x } }
 }
@@ -534,35 +538,48 @@ impl Mul<Int> for V {                  // `v * 2`
 }
 ```
 
-| Operator | Trait         | Function                                   |
-| -------- | ------------- | ------------------------------------------ |
-| `a + b`  | `Add<Rhs>`    | `fn add(mv self, rhs: Rhs) -> Self::Output` |
-| `a - b`  | `Sub<Rhs>`    | `fn sub(mv self, rhs: Rhs) -> Self::Output` |
-| `a * b`  | `Mul<Rhs>`    | `fn mul(mv self, rhs: Rhs) -> Self::Output` |
-| `a / b`  | `Div<Rhs>`    | `fn div(mv self, rhs: Rhs) -> Self::Output` |
-| `a % b`  | `Rem<Rhs>`    | `fn rem(mv self, rhs: Rhs) -> Self::Output` |
-| `-a`     | `Neg`         | `fn neg(mv self) -> Self::Output`           |
-| `a += b` | `AddAssign<Rhs>` | `fn add_assign(mut self, rhs: Rhs)`      |
-| `a -= b`, `a *= b`, `a /= b`, `a %= b` | `SubAssign<Rhs>`, `MulAssign<Rhs>`, `DivAssign<Rhs>`, `RemAssign<Rhs>` | as `AddAssign` |
+| Operator | Trait | Function |
+| -------- | ----- | -------- |
+| `a + b` | `std::ops::Add<Rhs = Self>` | `fn add(mv self, rhs: Rhs) -> Self::Output` |
+| `a - b` | `std::ops::Sub<Rhs = Self>` | `fn sub(mv self, rhs: Rhs) -> Self::Output` |
+| `a * b` | `std::ops::Mul<Rhs = Self>` | `fn mul(mv self, rhs: Rhs) -> Self::Output` |
+| `a / b` | `std::ops::Div<Rhs = Self>` | `fn div(mv self, rhs: Rhs) -> Self::Output` |
+| `a % b` | `std::ops::Rem<Rhs = Self>` | `fn rem(mv self, rhs: Rhs) -> Self::Output` |
+| `a & b` | `std::ops::BitAnd<Rhs = Self>` | `fn bitand(mv self, rhs: Rhs) -> Self::Output` |
+| `a \| b` | `std::ops::BitOr<Rhs = Self>` | `fn bitor(mv self, rhs: Rhs) -> Self::Output` |
+| `a ^ b` | `std::ops::BitXor<Rhs = Self>` | `fn bitxor(mv self, rhs: Rhs) -> Self::Output` |
+| `a << b` | `std::ops::Shl<Rhs = Self>` | `fn shl(mv self, rhs: Rhs) -> Self::Output` |
+| `a >> b` | `std::ops::Shr<Rhs = Self>` | `fn shr(mv self, rhs: Rhs) -> Self::Output` |
+| `-a` | `std::ops::Neg` | `fn neg(mv self) -> Self::Output` |
+| `~a` | `std::ops::BitNot` | `fn bitnot(mv self) -> Self::Output` |
+| `a += b`, … `a >>= b` | `AddAssign<Rhs = Self>`, `SubAssign`, `MulAssign`, `DivAssign`, `RemAssign`, `BitAndAssign`, `BitOrAssign`, `BitXorAssign`, `ShlAssign`, `ShrAssign` | `fn …_assign(mut self, rhs: Rhs)` |
+| `a == b`, `a != b` | `std::cmp::Eq<Rhs = Self>` | `fn eq(ref self, rhs: ref Rhs) -> Bool`, default `ne` |
+| `a < b`, `a <= b`, `a > b`, `a >= b` | `std::cmp::Ord<Rhs = Self>` | `fn lt(ref self, rhs: ref Rhs) -> Bool`, `fn le(ref self, rhs: ref Rhs) -> Bool`, defaults `gt`, `ge` |
 
 - `a + b` is `Add::add(a, b)`: the `impl` is picked by the right side's type, as for any
   generic trait, so `v * 2` and `v * w` can be different `impl`s with different `Output`s.
-- Both sides are given by value, so they follow the rules for arguments: a side holding
-  qubits is moved with `mv` (`mv a + mv b`, N001 otherwise), and a copyable one is copied.
+  `Rhs` defaults to `Self`, so `impl Add for V` and `T: Add<Output = T>` omit it when both
+  sides have the same type.
+- Both sides of arithmetic and bit operators are given by value, so they follow the rules
+  for arguments: a side holding qubits is moved with `mv` (`mv a + mv b`, N001 otherwise),
+  and a copyable one is copied. Comparisons lend both sides (`ref`), so `a == b` and `a < b`
+  never move or copy.
 - `a += b` lends `a` for changing, as a `mut self` method does, once `b` is evaluated, so a
   classical `a` must be `let mut` (N015), and changes a value in place: on qubits, an `impl`
   of gates only is reversible, so `a += b` can run in a `rev fn` and under `adj`. When the
   type has one `impl` of the trait, the right side is expected as it takes it, so
   `impl AddAssign<ref Reg> for Reg` makes `a += b` lend `b`.
-- In generic code the bound is written: `T: Add<T, Output = T>`. Operators do not infer
-  bounds, since their traits have parameters.
+- In generic code the bound is written: `T: Add<Output = T>`, `T: Eq`, `T: Ord`. Operators
+  do not infer bounds, since their traits have parameters.
 - Built-in types implement the traits by their built-in operators, with the same rules:
-  `Int: Add<Int, Output = Int>`, `Float: Mul<Observable, Output = Observable>`,
-  `Int: AddAssign<Int>`, but no `Int: Add<Float>`. So `fn sum<T: Add<T, Output = T>>` takes
-  numbers and types of the program's own alike, and each copy for a built-in type runs the
-  built-in operator. An operator on two values of built-in types is always the built-in
-  one.
-- The traits are not in the prelude: `use std::ops::Add` to implement or bound one.
+  `Int: Add<Output = Int>`, `Float: Mul<Observable, Output = Observable>`,
+  `Int: AddAssign`, `Int: BitAnd<Output = Int>`, `String: Eq`, `Float: Ord`, but no
+  `Int: Add<Float>`. So `fn sum<T: Add<Output = T>>` takes numbers and types of the
+  program's own alike, and each copy for a built-in type runs the built-in operator. An
+  operator on two values of built-in types is always the built-in one; enums whose variant
+  data are comparable keep built-in `==` and `!=` unless they implement `Eq`.
+- The traits are not in the prelude: `use std::ops::Add` or `use std::cmp::Eq` to implement
+  or bound one.
 
 ### Built-in generic types
 
@@ -587,8 +604,6 @@ Arithmetic in sizes beyond `+`, `*` by a number and subtracting what is added (`
 `N * M`, `N / 2`); `From` beyond the
 built-in conversions; `impl Trait` arguments;
 closures; the quantum interfaces `Oracle`, `Ansatz` and `Observable` in the standard library.
-Defaults for trait parameters (`Add<Rhs = Self>`),
-and traits for comparisons and the bit operators.
 
 ## 7. Printing and formatting
 

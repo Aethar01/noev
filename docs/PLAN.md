@@ -86,7 +86,7 @@ programmer never picks physical qubit locations.
 | Quantum control              | `ctrl a, b { c.x() }` (no `cx`, `ccx`, …)       |
 | Classical control            | `if bit { … }`                                  |
 | Reversible functions         | Inferred; `rev fn` promises it; inverted with `adj q.s()` |
-| Compute / use / uncompute    | `with { … } do { … }` (reserved)                |
+| Compute / use / uncompute    | `with { … } do { … }`                           |
 
 Quantum keywords are contextual, so `adj`, `rev`, `ctrl`, `mv` remain usable as variable
 names. Every shortcut stands for a written-out form, which tools can display.
@@ -430,9 +430,9 @@ gets a compile-fail test under `tests/ui/`.
 | 2  | Modules and packages          | Files are modules, `use` imports, `pub` visibility, the prelude, `noev.toml` packages (`spec/modules.md`) | ☑ Done |
 | 3  | Traits and generics           | `trait`, `impl Trait for Type`, generic functions and types; generic code assumes values may be linear; `Copy` and `Measure`; `Option` and `Result` become ordinary generic enums (`spec/types.md` §6) | ☑ Done |
 | 4  | ~~Quantum integers~~          | Dropped on 2026-11-19: a library can define them on generics and size parameters (§11, 0.3) | Dropped |
-| 4a | Operator traits               | `std::ops` (`Add`, `Sub`, `Mul`, `Neg` and the `…Assign` forms) so a program's own types use `+`; needs associated types in generic traits | ☑ Done: `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Neg` and the `…Assign` forms |
+| 4a | Operator traits               | `std::ops` (`Add`, `Sub`, `Mul`, `Div`, `Rem`, bit ops, `Neg`, `BitNot`, `…Assign`) and `std::cmp` (`Eq`, `Ord`) with parameter defaults (`Rhs = Self`) | ☑ Done |
 | 4b | Arithmetic in sizes           | `[Qubit; N + 1]`, `2 * N`: linear size expressions, compared after normalising | ☑ Done: `N - 1` too, proven at least 0 at each call (N024) |
-| 5  | `with`/`do` and release       | Compute–use–uncompute blocks, and automatic release of qubits proven to be in \|0⟩ (`spec/ownership.md` §9) | ☐ |
+| 5  | `with`/`do` and release       | Compute–use–uncompute blocks, and automatic release of qubits proven to be in \|0⟩ (`spec/ownership.md` §8–9) | ☑ Done |
 | 6  | Lifetimes                     | Non-lexical lifetimes, explicit lifetimes, references in structs     | ☐ |
 | 7  | Runtime C ABI                 | Shaped like QIR's, with the interpreter moved onto it (`spec/runtime.md` §4) | ☐ |
 | 8  | Cranelift code generator      | `noev build --emit=binary\|object`; compiled programs tested against the interpreter | ☐ |

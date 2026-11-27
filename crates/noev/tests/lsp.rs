@@ -137,7 +137,7 @@ fn main() {
 fn diagnostics_follow_the_text() {
     let mut client = Client::start();
     let uri = "file:///tmp/bad.nv";
-    client.open(uri, "fn main() {\n    let q = |0>\n}\n");
+    client.open(uri, "fn main() {\n    let q = |+>\n}\n");
     let diagnostics = client.diagnostics();
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(diagnostics[0]["code"], "N003");
@@ -148,7 +148,7 @@ fn diagnostics_follow_the_text() {
         "textDocument/didChange",
         json!({
             "textDocument": { "uri": uri, "version": 2 },
-            "contentChanges": [{ "text": "fn main() {\n    let q = |0>\n    mv q.discard()\n}\n" }],
+            "contentChanges": [{ "text": "fn main() {\n    let q = |+>\n    mv q.discard()\n}\n" }],
         }),
     );
     assert!(client.diagnostics().is_empty());

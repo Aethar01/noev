@@ -10,7 +10,10 @@ use noev_syntax::{Diagnostic, FxHashMap, Span, Symbol};
 
 use crate::prelude::{self, Builtin, Math, Reversible, Sig};
 use crate::resolve::{self, Binding, Entry, Found, Ns, PathError, PathWords, Scopes, Visible};
-use crate::ty::{Kind, NEG, OPS, StructDef, StructId, Ty, TyKind, Types, VariantDef, op_index};
+use crate::ty::{
+    BIT_NOT, Kind, NEG, OPS, OpKind, StructDef, StructId, Ty, TyKind, Types, VariantDef,
+    op_fn_index, op_index,
+};
 
 /// A local variable: a `let` binding, parameter, `self`, or loop variable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -111,6 +114,8 @@ pub struct TraitInfo {
     /// Its own type and size parameters (`trait Oracle<const N: Int>`), after `Self` in each
     /// of its functions' parameters.
     pub params: Vec<Ty>,
+    /// Defaults for trailing parameters (`trait Add<Rhs = Self>`), aligned with `params`.
+    pub defaults: Vec<Option<Ty>>,
     /// Its functions, with or without default bodies.
     pub fns: Vec<FnId>,
     /// Its associated types, each with whether it must be `Copy`.
@@ -540,6 +545,7 @@ pub fn check(ast: &Ast) -> (Typed, Vec<Diagnostic>) {
         ret: Ty::UNIT,
         loops: 0,
         runs: 0,
+        in_with: 0,
         lent_bindings: None,
         negating: false,
         std_enums: FxHashMap::default(),
@@ -590,6 +596,8 @@ struct Checker<'a> {
     loops: u32,
     /// How many `sample` runs enclose the current code.
     runs: u32,
+    /// How many `with`/`do` blocks enclose the current code.
+    in_with: u32,
     /// While binding a `match` arm's pattern on a lent value: whether the lend is `mut`.
     lent_bindings: Option<bool>,
     /// While checking the operand of `-`: a literal there may reach a signed type's minimum.
@@ -632,6 +640,13 @@ struct Checker<'a> {
 /// An `impl`'s type, trait, trait arguments and associated types, while `impl`s are
 /// collected.
 type ImplAssoc = (Ty, TraitId, Vec<Ty>, Vec<(Symbol, Ty)>);
+
+/// Declared generic parameters before their bounds and defaults are resolved.
+type DeclaredParams = (
+    Vec<(Symbol, Ty)>,
+    Vec<(Ty, Vec<List<Bound>>)>,
+    Vec<(Option<TypeId>, Span)>,
+);
 
 /// The type parameters of a generic call or literal, and what each is found to be so far.
 struct Inference {
@@ -736,6 +751,7 @@ impl<'a> Checker<'a> {
                 item,
                 self_param,
                 params: Vec::new(),
+                defaults: Vec::new(),
                 fns: ast.list(fns).to_vec(),
                 assoc,
             });
@@ -756,7 +772,9 @@ impl<'a> Checker<'a> {
         }
 
         // Struct, enum and alias names next, so field and parameter types can refer to any
-        // of them.
+        // of them. Bounds on struct and enum parameters wait until traits' parameters and
+        // defaults exist.
+        let mut struct_bounds = Vec::new();
         for &item in items {
             if let ItemKind::Type {
                 name,
@@ -792,8 +810,9 @@ impl<'a> Checker<'a> {
             let id = StructId(self.t.types.structs.len() as u32);
             self.item_structs[item.index()] = Some(id);
             // A generic struct or enum is a template: its arguments are its parameters.
-            self.module = self.scopes.item_module(item);
-            let params = self.generic_params(generics);
+            let module = self.scopes.item_module(item);
+            self.module = module;
+            let (params, typed, _) = self.declare_generic_params(generics, false);
             self.t.types.structs.push(StructDef {
                 name,
                 span: name_span,
@@ -804,7 +823,10 @@ impl<'a> Checker<'a> {
                 template: None,
             });
             if !params.is_empty() {
-                self.struct_params.insert(id, params);
+                self.struct_params.insert(id, params.clone());
+            }
+            if !generics.params.is_empty() || !generics.wheres.is_empty() {
+                struct_bounds.push((module, generics, params, typed));
             }
         }
 
@@ -815,25 +837,63 @@ impl<'a> Checker<'a> {
             self.alias_type(alias);
         }
 
-        // Each trait's own parameters: `Self: Oracle<N>` in its functions.
+        // Each trait's own parameters and defaults (`Self: Oracle<N>`, `Add<Rhs = Self>`):
+        // parameters first, then defaults (which may name `Self` and earlier parameters), then
+        // bounds on those parameters.
+        let mut trait_pending = Vec::new();
         for &item in items {
             let ItemKind::Trait { generics, .. } = ast.item(item).kind else {
                 continue;
             };
-            if generics.params.is_empty() {
+            if generics.params.is_empty() && generics.wheres.is_empty() {
                 continue;
             }
             let id = self.item_traits[&item];
-            self.module = self.scopes.item_module(item);
-            let params: Vec<Ty> = self
-                .generic_params(generics)
-                .into_iter()
-                .map(|(_, t)| t)
-                .collect();
+            let module = self.scopes.item_module(item);
+            self.module = module;
+            let (params, typed, raw_defaults) = self.declare_generic_params(generics, true);
+            let param_tys: Vec<Ty> = params.iter().map(|&(_, t)| t).collect();
             let self_param = self.t.traits[id.index()].self_param;
             self.param_bounds
-                .insert(self_param, vec![(id, params.clone())]);
-            self.t.traits[id.index()].params = params;
+                .insert(self_param, vec![(id, param_tys.clone())]);
+            self.t.traits[id.index()].params = param_tys;
+            trait_pending.push((id, module, generics, params, typed, raw_defaults));
+        }
+        for &(id, module, _, ref params, _, ref raw_defaults) in &trait_pending {
+            self.module = module;
+            let self_param = self.t.traits[id.index()].self_param;
+            self.self_ty = Some(self_param);
+            self.type_params.clear();
+            let mut defaults = Vec::with_capacity(params.len());
+            let mut seen_default = false;
+            for (&(name, param_ty), &(def, span)) in params.iter().zip(raw_defaults) {
+                if let Some(def_ty) = def {
+                    seen_default = true;
+                    let resolved = self.resolve_type_arg(def_ty);
+                    let ok = self.check_arg_kinds(&[param_ty], &[resolved], span);
+                    defaults.push(Some(if ok { resolved } else { Ty::ERROR }));
+                } else {
+                    if seen_default {
+                        self.error(
+                            span,
+                            "a parameter without a default cannot follow one with a default",
+                        );
+                    }
+                    defaults.push(None);
+                }
+                self.type_params.push((name, param_ty));
+            }
+            self.type_params.clear();
+            self.self_ty = None;
+            self.t.traits[id.index()].defaults = defaults;
+        }
+        for (_, module, generics, params, typed, _) in trait_pending {
+            self.module = module;
+            self.resolve_generic_bounds(generics, &params, typed);
+        }
+        for (module, generics, params, typed) in struct_bounds {
+            self.module = module;
+            self.resolve_generic_bounds(generics, &params, typed);
         }
 
         self.t.fns = ast
@@ -994,9 +1054,9 @@ impl<'a> Checker<'a> {
                 } => {
                     let params = self.generic_params(generics);
                     self.type_params = params.clone();
-                    let trait_ref = self.bound_trait(&bound);
-                    let trait_id = trait_ref.as_ref().map(|(t, _)| *t);
                     let self_ty = self.resolve_type(ty);
+                    let trait_ref = self.bound_trait(&bound, self_ty);
+                    let trait_id = trait_ref.as_ref().map(|(t, _)| *t);
                     self.type_params.clear();
                     self.type_params = params.clone();
                     let assoc: Vec<(Symbol, Ty)> = ast
@@ -1044,9 +1104,10 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// The trait `bound` names, with its arguments (the `4` of `Oracle<4>`), reporting one
-    /// that is not a trait or is given the wrong number of arguments.
-    fn bound_trait(&mut self, bound: &Bound) -> Option<(TraitId, Vec<Ty>)> {
+    /// The trait `bound` names, with its arguments (the `4` of `Oracle<4>`, and any omitted
+    /// trailing arguments filled from the trait's defaults for `self_ty`), reporting one that
+    /// is not a trait or is given the wrong number of arguments.
+    fn bound_trait(&mut self, bound: &Bound, self_ty: Ty) -> Option<(TraitId, Vec<Ty>)> {
         let span = bound.span;
         let (at, rest) = self.qualify(bound.path, span)?;
         let [name] = *rest else {
@@ -1079,29 +1140,44 @@ impl<'a> Checker<'a> {
                 BoundArg::Assoc { .. } => None,
             })
             .collect();
-        // Counted from the declaration, so a bound can come before the trait's parameters
-        // are made.
-        let ItemKind::Trait { generics, .. } = ast.item(self.t.traits[trait_id.index()].item).kind
-        else {
-            unreachable!("a trait's item")
-        };
-        let wanted = ast.list(generics.params).len();
-        if given.len() != wanted {
+        let params = self.t.traits[trait_id.index()].params.clone();
+        let defaults = self.t.traits[trait_id.index()].defaults.clone();
+        let self_param = self.t.traits[trait_id.index()].self_param;
+        let max = params.len();
+        let min = defaults.iter().take_while(|d| d.is_none()).count();
+        if given.len() < min || given.len() > max {
             let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
+            let takes = if min == max {
+                format!("{max} argument{}", if max == 1 { "" } else { "s" })
+            } else if min == 0 {
+                format!("at most {max} argument{}", if max == 1 { "" } else { "s" })
+            } else {
+                format!("{min} to {max} arguments")
+            };
             let message = format!(
-                "`{trait_name}` takes {wanted} argument{}, but {} {} given",
-                if wanted == 1 { "" } else { "s" },
+                "`{trait_name}` takes {takes}, but {} {} given",
                 given.len(),
                 if given.len() == 1 { "is" } else { "are" }
             );
             self.error(span, message);
             return None;
         }
-        let args: Vec<Ty> = given
+        let mut args: Vec<Ty> = given
             .into_iter()
             .map(|t| self.resolve_type_arg(t))
             .collect();
-        let params = self.t.traits[trait_id.index()].params.clone();
+        for i in args.len()..max {
+            let Some(def) = defaults.get(i).copied().flatten() else {
+                break;
+            };
+            let mut from = Vec::with_capacity(1 + i);
+            let mut to = Vec::with_capacity(1 + i);
+            from.push(self_param);
+            to.push(self_ty);
+            from.extend_from_slice(&params[..i]);
+            to.extend_from_slice(&args[..i]);
+            args.push(self.t.types.subst(def, &from, &to));
+        }
         if params.len() == args.len() && !self.check_arg_kinds(&params, &args, span) {
             return None;
         }
@@ -1306,13 +1382,26 @@ impl<'a> Checker<'a> {
 
     /// Makes the type and size parameters of `generics`, written in the current module.
     fn generic_params(&mut self, generics: Generics) -> Vec<(Symbol, Ty)> {
+        let (params, typed, _) = self.declare_generic_params(generics, false);
+        self.resolve_generic_bounds(generics, &params, typed);
+        params
+    }
+
+    /// Creates the type and size parameter `Ty`s for `generics`, without resolving trait
+    /// bounds yet. Returns the parameters, each type parameter with its bound lists, and each
+    /// parameter's raw default (if any) and span.
+    fn declare_generic_params(
+        &mut self,
+        generics: Generics,
+        allow_defaults: bool,
+    ) -> DeclaredParams {
         let ast = self.ast;
         let is_copy = |bound: &Bound| {
             matches!(ast.list(bound.path), [n] if ast.name(*n) == "Copy") && bound.args.is_empty()
         };
-        // The parameters first, so a bound can name any of them: `T: Oracle<N>`.
         let mut params = Vec::new();
         let mut typed = Vec::new();
+        let mut defaults = Vec::new();
         for param in ast.list(generics.params) {
             if params.iter().any(|&(n, _)| n == param.name) {
                 let message = format!(
@@ -1323,7 +1412,10 @@ impl<'a> Checker<'a> {
                 continue;
             }
             match param.kind {
-                GenericKind::Size { ty } => {
+                GenericKind::Size { ty, default } => {
+                    if default.is_some() && !allow_defaults {
+                        self.error(param.span, "defaults are only allowed on trait parameters");
+                    }
                     if self.resolve_type(ty) != Ty::INT {
                         let span = ast.ty(ty).span;
                         self.error(span, "a size parameter is an `Int`: `const N: Int`");
@@ -1338,8 +1430,12 @@ impl<'a> Checker<'a> {
                         }
                     }
                     params.push((param.name, self.t.types.size_param(param.name)));
+                    defaults.push((default, param.span));
                 }
-                GenericKind::Type { bounds } => {
+                GenericKind::Type { bounds, default } => {
+                    if default.is_some() && !allow_defaults {
+                        self.error(param.span, "defaults are only allowed on trait parameters");
+                    }
                     let mut lists = vec![bounds];
                     lists.extend(
                         ast.list(generics.wheres)
@@ -1351,9 +1447,25 @@ impl<'a> Checker<'a> {
                     let ty = self.t.types.param(param.name, copy);
                     params.push((param.name, ty));
                     typed.push((ty, lists));
+                    defaults.push((default, param.span));
                 }
             }
         }
+        (params, typed, defaults)
+    }
+
+    /// Resolves trait bounds and `where` clauses for parameters created by
+    /// [`Checker::declare_generic_params`].
+    fn resolve_generic_bounds(
+        &mut self,
+        generics: Generics,
+        params: &[(Symbol, Ty)],
+        typed: Vec<(Ty, Vec<List<Bound>>)>,
+    ) {
+        let ast = self.ast;
+        let is_copy = |bound: &Bound| {
+            matches!(ast.list(bound.path), [n] if ast.name(*n) == "Copy") && bound.args.is_empty()
+        };
         let outer = self.type_params.len();
         self.type_params.extend(params.iter().copied());
         for (ty, lists) in typed {
@@ -1363,7 +1475,7 @@ impl<'a> Checker<'a> {
                     if is_copy(bound) {
                         continue;
                     }
-                    let Some((trait_id, args)) = self.bound_trait(bound) else {
+                    let Some((trait_id, args)) = self.bound_trait(bound, ty) else {
                         continue;
                     };
                     // `T: Measure<Result = Bit>`: the associated types the bound fixes.
@@ -1389,7 +1501,6 @@ impl<'a> Checker<'a> {
                 self.error(pred.span, message);
             }
         }
-        params
     }
 
     /// A trait of the prelude named `name`: one in the standard library's root module, such
@@ -1720,7 +1831,7 @@ impl<'a> Checker<'a> {
             for &(name, ty) in &own {
                 let written = ast.list(decl.generics.params).iter().any(|p| {
                     p.name == name
-                        && matches!(p.kind, GenericKind::Type { bounds } if !bounds.is_empty())
+                        && matches!(p.kind, GenericKind::Type { bounds, .. } if !bounds.is_empty())
                 }) || ast
                     .list(decl.generics.wheres)
                     .iter()
@@ -2222,7 +2333,16 @@ impl<'a> Checker<'a> {
                         // on the place.
                         if let Some(index) = op_index(op, true)
                             && self
-                                .operator(place, index, place, place_ty, &[value], stmt.span)
+                                .operator(
+                                    place,
+                                    index,
+                                    0,
+                                    OPS[index].word,
+                                    place,
+                                    place_ty,
+                                    &[value],
+                                    stmt.span,
+                                )
                                 .is_some()
                         {
                             if self.t.callees[place.index()].is_some() {
@@ -2245,12 +2365,17 @@ impl<'a> Checker<'a> {
                 }
                 false
             }
-            StmtKind::Return(value) if self.runs > 0 => {
+            StmtKind::Return(value) if self.runs > 0 || self.in_with > 0 => {
                 if let Some(value) = value {
                     self.expr(value, Expect::None);
                 }
-                self.error(stmt.span, "`return` cannot leave a `sample` run")
-                    .help = Some("the run's result is its block's last expression".into());
+                if self.runs > 0 {
+                    self.error(stmt.span, "`return` cannot leave a `sample` run")
+                        .help = Some("the run's result is its block's last expression".into());
+                } else {
+                    self.error(stmt.span, "`return` cannot leave a `with`/`do` block")
+                        .help = Some("yield the value from the `do` block instead".into());
+                }
                 true
             }
             StmtKind::Return(value) => {
@@ -2655,7 +2780,7 @@ impl<'a> Checker<'a> {
             },
             ExprKind::Str(parts) => self.string(parts),
             ExprKind::Bool(_) => Ty::BOOL,
-            ExprKind::Ket { qubits, parts } => {
+            ExprKind::Ket { qubits, parts, .. } => {
                 let Some(computed) = self.computed_labels(parts) else {
                     return Ty::ERROR;
                 };
@@ -2763,8 +2888,10 @@ impl<'a> Checker<'a> {
                     && matches!(ast.expr(operand).kind, ExprKind::Int(_) | ExprKind::BigInt);
                 let ty = self.expr(operand, hint);
                 self.negating = false;
-                if op == UnaryOp::Neg
-                    && let Some(ty) = self.operator(id, NEG, operand, ty, &[], expr.span)
+                if matches!(op, UnaryOp::Neg | UnaryOp::BitNot)
+                    && let index = if op == UnaryOp::Neg { NEG } else { BIT_NOT }
+                    && let Some(ty) =
+                        self.operator(id, index, 0, OPS[index].word, operand, ty, &[], expr.span)
                 {
                     return ty;
                 }
@@ -2810,7 +2937,16 @@ impl<'a> Checker<'a> {
                 } else {
                     let lhs_ty = self.expr(lhs, outer);
                     if let Some(index) = op_index(op, false)
-                        && let Some(ty) = self.operator(id, index, lhs, lhs_ty, &[rhs], expr.span)
+                        && let Some(ty) = self.operator(
+                            id,
+                            index,
+                            op_fn_index(op),
+                            op.as_str(),
+                            lhs,
+                            lhs_ty,
+                            &[rhs],
+                            expr.span,
+                        )
                     {
                         return ty;
                     }
@@ -2994,10 +3130,20 @@ impl<'a> Checker<'a> {
                 self.block(body, Expect::Discard);
                 Ty::UNIT
             }
-            ExprKind::With { .. } => {
-                self.error(expr.span, "`with`/`do` is not supported yet")
-                    .help = Some("see spec/ownership.md §8".into());
-                Ty::UNIT
+            ExprKind::With { with, body } => {
+                let scope_mark = self.scope.len();
+                let outer_loops = self.loops;
+                self.loops = 0;
+                self.in_with += 1;
+                // Statements of `with` stay in scope for `do`.
+                for &stmt in ast.list(ast.block(with).stmts) {
+                    self.stmt(stmt);
+                }
+                let ty = self.block(body, expect);
+                self.in_with -= 1;
+                self.loops = outer_loops;
+                self.scope.truncate(scope_mark);
+                ty
             }
         }
     }
@@ -4224,10 +4370,11 @@ impl<'a> Checker<'a> {
             Some("Noev does not convert between number types implicitly; convert one side, as in `i64(x)` or `Int(x)`".to_string())
         } else if let Some(index) = op_index(op, false)
             && let name = OPS[index].name
+            && let module = OPS[index].module
             && matches!(self.t.types.kind(lhs), TyKind::Struct(_) | TyKind::Param(_))
         {
             Some(format!(
-                "to give {} `{}`, implement `std::ops::{name}` for it",
+                "to give {} `{}`, implement `std::{module}::{name}` for it",
                 self.show(lhs),
                 op.as_str()
             ))
@@ -4902,26 +5049,41 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// `a + b`, `a - b`, `a * b` or `-a` on a type of the program's own, a call of the
-    /// operator's trait's function with `a` as receiver: `std::ops` trait `index` (`Add`,
-    /// `Sub`, `Mul`, `Neg`). `None` for a built-in type, or when `std::ops` is not used,
-    /// leaving the operator built in.
+    /// An operator on a type of the program's own, a call of the operator's trait's function
+    /// (`fn_index`, `0` for single-method traits) with `receiver` as receiver: trait `index`
+    /// in [`OPS`] (`std::ops` or `std::cmp`). `None` for a built-in type, for a comparable
+    /// enum without its own `impl Eq`, or when the trait's module is not used, leaving the
+    /// operator built in.
+    #[allow(clippy::too_many_arguments)]
     fn operator(
         &mut self,
         id: ExprId,
         index: usize,
+        fn_index: usize,
+        word: &'static str,
         receiver: ExprId,
         receiver_ty: Ty,
         args: &[ExprId],
         span: Span,
     ) -> Option<Ty> {
         let trait_id = TraitId(self.t.types.ops[index]?);
-        let word = OPS[index].word;
         let base = self.t.types.deref(receiver_ty);
         if !matches!(
             self.t.types.kind(base),
             TyKind::Struct(_) | TyKind::Param(_)
         ) {
+            return None;
+        }
+        // Comparable enums (`Option<Int>`, plain enums) keep built-in `==`/`!=` unless they
+        // explicitly implement `Eq`.
+        if OPS[index].kind == OpKind::Eq
+            && self.t.types.is_comparable(base)
+            && !self
+                .t
+                .impls
+                .iter()
+                .any(|i| i.trait_id == trait_id && i.matches(&self.t.types, base, None).is_some())
+        {
             return None;
         }
         let trait_name = self.name(self.t.traits[trait_id.index()].name).to_string();
@@ -4932,16 +5094,19 @@ impl<'a> Checker<'a> {
             );
             let help = if self.t.types.as_param(base).is_some() {
                 format!(
-                    "bound it: `{}: {trait_name}<…>`",
+                    "bound it: `{}: {trait_name}`",
                     self.show(base).trim_matches('`')
                 )
             } else {
-                format!("implement `std::ops::{trait_name}` for it")
+                format!(
+                    "implement `std::{}::{trait_name}` for it",
+                    OPS[index].module
+                )
             };
             self.error(span, message).help = Some(help);
             return Some(self.skip_args(args));
         }
-        let f = self.t.traits[trait_id.index()].fns[0];
+        let f = self.t.traits[trait_id.index()].fns[fn_index];
         let sig = self.t.fns[f.index()].sig.clone();
         self.t.callees[id.index()] = Some(Callee::Fn(f));
         self.t.receivers[id.index()] = sig.receiver;

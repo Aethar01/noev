@@ -38,6 +38,8 @@ pub fn check_ownership(ast: &Ast, typed: &Typed) -> Vec<Diagnostic> {
         facts: Vec::new(),
         loops: Vec::new(),
         reversible: Vec::new(),
+        in_with: Vec::new(),
+        with_touched: Vec::new(),
         unsafe_depth: 0,
         diverged: false,
         returns_ref: false,
@@ -140,6 +142,8 @@ struct LocalInfo {
     loop_depth: u32,
     /// Its initialiser already failed to check; it is not checked for consumption.
     poisoned: bool,
+    /// Every remaining qubit owned by this local is proven to be in \|0⟩ (`spec/ownership.md` §9).
+    zero: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +160,8 @@ enum Holder {
     Local(LocalId),
     /// A `ctrl` block's control, for the length of the block.
     Control,
+    /// A place allocated or used in `with`, `ref`-lent for the length of `do`.
+    With,
 }
 
 #[derive(Clone, Debug)]
@@ -222,6 +228,11 @@ struct Owner<'a> {
     loops: Vec<usize>,
     /// For each enclosing reversible context, the declaration order when it started.
     reversible: Vec<u32>,
+    /// For each enclosing `with` block (while checking its `with` part), its declaration order.
+    in_with: Vec<u32>,
+    /// For each enclosing `with` block, its declaration order and the outer places holding
+    /// qubits that it lent (`ref` or `mut`), which stay `ref`-lent during `do`.
+    with_touched: Vec<(u32, Vec<(Place, Span)>)>,
     unsafe_depth: u32,
     /// Control never reaches the current point (after `return`, `break` or `continue`).
     diverged: bool,
@@ -269,7 +280,7 @@ struct Causes<T> {
 fn collect_causes<T>(
     ast: &Ast,
     include: impl Fn(usize) -> bool,
-    mut cause: impl FnMut(usize, Node, &mut Vec<Cause<T>>),
+    mut cause: impl FnMut(usize, Node<'_>, &mut Vec<Cause<T>>),
 ) -> Causes<T> {
     let mut list = Vec::new();
     let ranges = ast
@@ -279,7 +290,8 @@ fn collect_causes<T>(
         .map(|(index, decl)| {
             let body = decl.body.filter(|_| include(index))?;
             let start = list.len();
-            walk_block(ast, body, &mut |node| {
+            let mut with_locals = Vec::new();
+            walk_block(ast, body, false, &mut with_locals, &mut |node| {
                 if list.len() == start || !matches!(list.last(), Some(Cause::Own(_))) {
                     cause(index, node, &mut list);
                 }
@@ -378,7 +390,7 @@ fn infer_preparable(ast: &Ast, typed: &Typed) -> Vec<Option<Irreversible>> {
         ast,
         |index| typed.fns[index].sig.reversible == Reversible::Infer,
         |index, node, list| {
-            let creates = matches!(node, Node::Expr(id) if matches!(
+            let creates = matches!(node, Node::Expr(id, _) if matches!(
                 ast.expr(id).kind,
                 ExprKind::Ket { .. } | ExprKind::Own { kind: OwnKind::Mv, .. }
             ));
@@ -415,7 +427,7 @@ fn infer_printing(ast: &Ast, typed: &Typed) -> Vec<Option<Span>> {
         ast,
         |_| true,
         |_, node, list| {
-            let Node::Expr(id) = node else { return };
+            let Node::Expr(id, _) = node else { return };
             match typed.callees[id.index()] {
                 Some(Callee::Builtin(Builtin::Print { .. })) => {
                     list.push(Cause::Own(ast.expr(id).span))
@@ -434,9 +446,34 @@ fn infer_printing(ast: &Ast, typed: &Typed) -> Vec<Option<Span>> {
 }
 
 #[derive(Clone, Copy)]
-enum Node {
-    Expr(ExprId),
+enum Node<'w> {
+    /// An expression, with the patterns declared inside the enclosing `with` block if any.
+    Expr(ExprId, Option<&'w [PatId]>),
     Assign(ExprId, Span),
+}
+
+/// Whether `local` is bound by any pattern in `pats`.
+fn bound_in(ast: &Ast, typed: &Typed, pats: &[PatId], local: LocalId) -> bool {
+    pats.iter().any(|&p| pat_binds(ast, typed, p, local))
+}
+
+fn pat_binds(ast: &Ast, typed: &Typed, pat: PatId, local: LocalId) -> bool {
+    match ast.pat(pat).kind {
+        PatKind::Name(_) => typed.pat_locals[pat.index()] == Some(local),
+        PatKind::Tuple(l) | PatKind::Array(l) => {
+            ast.list(l).iter().any(|&p| pat_binds(ast, typed, p, local))
+        }
+        PatKind::Variant { data, .. } => match data {
+            PatData::None => false,
+            PatData::Tuple(l) => ast.list(l).iter().any(|&p| pat_binds(ast, typed, p, local)),
+            PatData::Fields { fields, .. } => ast
+                .list(fields)
+                .iter()
+                .filter_map(|f| f.pat)
+                .any(|p| pat_binds(ast, typed, p, local)),
+        },
+        PatKind::Wildcard | PatKind::Literal(_) => false,
+    }
 }
 
 /// What in `node`, in the function `index`, makes it not reversible, if anything: pushed to
@@ -445,7 +482,7 @@ fn irreversible_causes(
     ast: &Ast,
     typed: &Typed,
     index: usize,
-    node: Node,
+    node: Node<'_>,
     list: &mut Vec<Cause<Irreversible>>,
 ) {
     let info = &typed.fns[index];
@@ -468,17 +505,26 @@ fn irreversible_causes(
                 format!("it changes `{name}`, which belongs to its caller"),
             ));
         }
-        Node::Expr(id) => {
+        Node::Expr(id, in_with) => {
             let expr = ast.expr(id);
             let why: String = match expr.kind {
+                // `with` blocks may allocate ancillas and move locals they declared.
+                ExprKind::Ket { .. } if in_with.is_some() => return,
                 ExprKind::Ket { .. } => "it creates qubits".into(),
                 ExprKind::BraTest { .. } | ExprKind::PrepTest { .. } => "it measures qubits".into(),
                 ExprKind::Overlap { .. } => "it computes an amplitude".into(),
                 ExprKind::Expectation { .. } => "it computes an expectation value".into(),
                 ExprKind::Sample { .. } => "it samples a run".into(),
                 ExprKind::Own {
-                    kind: OwnKind::Mv, ..
+                    kind: OwnKind::Mv,
+                    place,
                 } if typed.types.linearity(typed.ty(id)) == Kind::Linear => {
+                    if let Some(pats) = in_with
+                        && root_local(ast, typed, place)
+                            .is_some_and(|l| bound_in(ast, typed, pats, l))
+                    {
+                        return;
+                    }
                     "it moves qubits".into()
                 }
                 _ if typed.callees[id.index()].is_some() => {
@@ -540,26 +586,50 @@ fn root_local(ast: &Ast, typed: &Typed, mut id: ExprId) -> Option<LocalId> {
 
 /// Calls `visit` on every expression and assignment in a block, outside-in. Expectation
 /// preparations and `sample` runs are skipped: they run separately.
-fn walk_block(ast: &Ast, block: BlockId, visit: &mut dyn FnMut(Node)) {
+fn walk_block(
+    ast: &Ast,
+    block: BlockId,
+    in_with: bool,
+    with_pats: &mut Vec<PatId>,
+    visit: &mut dyn FnMut(Node<'_>),
+) {
     for &stmt in ast.list(ast.block(block).stmts) {
         let stmt = ast.stmt(stmt);
         match stmt.kind {
-            StmtKind::Let { init, .. } => walk_expr(ast, init, visit),
+            StmtKind::Let { pat, init, .. } => {
+                walk_expr(ast, init, in_with, with_pats, visit);
+                if in_with {
+                    with_pats.push(pat);
+                }
+            }
             StmtKind::Assign { place, value, .. } => {
                 visit(Node::Assign(place, stmt.span));
-                walk_expr(ast, place, visit);
-                walk_expr(ast, value, visit);
+                walk_expr(ast, place, in_with, with_pats, visit);
+                walk_expr(ast, value, in_with, with_pats, visit);
             }
             StmtKind::Return(Some(e)) | StmtKind::Assert(e) | StmtKind::Expr { expr: e, .. } => {
-                walk_expr(ast, e, visit)
+                walk_expr(ast, e, in_with, with_pats, visit)
             }
             StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
         }
     }
 }
 
-fn walk_expr(ast: &Ast, id: ExprId, visit: &mut dyn FnMut(Node)) {
-    visit(Node::Expr(id));
+fn walk_expr(
+    ast: &Ast,
+    id: ExprId,
+    in_with: bool,
+    with_pats: &mut Vec<PatId>,
+    visit: &mut dyn FnMut(Node<'_>),
+) {
+    visit(Node::Expr(id, in_with.then_some(with_pats.as_slice())));
+    if let ExprKind::With { with, body } = ast.expr(id).kind {
+        let mark = with_pats.len();
+        walk_block(ast, with, true, with_pats, visit);
+        with_pats.truncate(mark);
+        walk_block(ast, body, in_with, with_pats, visit);
+        return;
+    }
     let mut children: Vec<ExprId> = Vec::new();
     let mut blocks: Vec<BlockId> = Vec::new();
     match ast.expr(id).kind {
@@ -635,14 +705,13 @@ fn walk_expr(ast: &Ast, id: ExprId, visit: &mut dyn FnMut(Node)) {
             children.extend(ast.list(controls));
             blocks.push(body);
         }
-        ExprKind::With { with, body } => blocks.extend([with, body]),
         _ => {}
     }
     for child in children {
-        walk_expr(ast, child, visit);
+        walk_expr(ast, child, in_with, with_pats, visit);
     }
     for block in blocks {
-        walk_block(ast, block, visit);
+        walk_block(ast, block, in_with, with_pats, visit);
     }
 }
 
@@ -867,6 +936,7 @@ impl Owner<'_> {
             order: self.order,
             loop_depth: self.loops.len() as u32,
             poisoned,
+            zero: false,
         };
         self.order += 1;
         self.scope.push(local);
@@ -948,7 +1018,7 @@ impl Owner<'_> {
                 root: local,
                 proj: Vec::new(),
             };
-            if self.fully_moved(&place, ty) {
+            if self.fully_moved(&place, ty) || self.locals[local.index()].zero {
                 continue;
             }
             let name = self.name(local).to_string();
@@ -986,9 +1056,10 @@ impl Owner<'_> {
                 let errors = self.diagnostics.len();
                 let carried = self.expr(init, Use::Value);
                 let poisoned = self.diagnostics.len() > errors;
+                let zero = !poisoned && self.expr_is_zero(init);
                 let mut bound = Vec::new();
                 let ty = self.typed.ty(init);
-                self.bind(pat, ty, poisoned, &mut bound);
+                self.bind(pat, ty, poisoned, zero, &mut bound);
                 match bound.as_slice() {
                     [local] if !carried.is_empty() => {
                         for &i in &carried {
@@ -1011,8 +1082,9 @@ impl Owner<'_> {
             }
             StmtKind::Assign { op, place, value } => {
                 let carried = self.expr(value, Use::Value);
+                let value_zero = self.expr_is_zero(value);
                 self.release(&carried);
-                self.assign(place, op, stmt.span);
+                self.assign(place, op, value_zero, stmt.span);
             }
             StmtKind::Return(value) => {
                 if let Some(value) = value {
@@ -1041,19 +1113,20 @@ impl Owner<'_> {
     }
 
     /// Declares the locals a pattern binds from a value of type `ty`. N003 for a `_` that
-    /// would throw qubits away.
-    fn bind(&mut self, pat: PatId, ty: Ty, poisoned: bool, bound: &mut Vec<LocalId>) {
+    /// would throw qubits away (unless proven to be in \|0⟩).
+    fn bind(&mut self, pat: PatId, ty: Ty, poisoned: bool, zero: bool, bound: &mut Vec<LocalId>) {
         let types = &self.typed.types;
         match self.ast.pat(pat).kind {
             PatKind::Name(_) => {
                 if let Some(local) = self.typed.pat_locals[pat.index()] {
                     self.declare(local, poisoned);
+                    self.locals[local.index()].zero = zero;
                     bound.push(local);
                 }
             }
             PatKind::Wildcard => {
-                // In a lent `match`, `_` takes nothing.
-                if !poisoned && !self.lent_match && self.lin(ty) == Kind::Linear {
+                // In a lent `match`, `_` takes nothing; qubits proven |0⟩ release automatically.
+                if !poisoned && !self.lent_match && !zero && self.lin(ty) == Kind::Linear {
                     let span = self.ast.pat(pat).span;
                     self.error("N003", span, "`_` would throw away qubits").help =
                         Some("bind them to a name and consume them, or measure them".into());
@@ -1066,13 +1139,13 @@ impl Owner<'_> {
                 };
                 for (i, &p) in self.ast.list(pats).iter().enumerate() {
                     let ty = elems.get(i).copied().unwrap_or(Ty::ERROR);
-                    self.bind(p, ty, poisoned, bound);
+                    self.bind(p, ty, poisoned, zero, bound);
                 }
             }
             PatKind::Array(pats) => {
                 let elem = types.elem_of(ty).unwrap_or(Ty::ERROR);
                 for &p in self.ast.list(pats) {
-                    self.bind(p, elem, poisoned, bound);
+                    self.bind(p, elem, poisoned, zero, bound);
                 }
             }
             PatKind::Literal(_) => {}
@@ -1086,7 +1159,7 @@ impl Owner<'_> {
                 };
                 for p in pats {
                     let ty = self.typed.pat_types[p.index()];
-                    self.bind(p, ty, poisoned, bound);
+                    self.bind(p, ty, poisoned, zero, bound);
                 }
             }
         }
@@ -1107,7 +1180,7 @@ impl Owner<'_> {
         }
     }
 
-    fn assign(&mut self, place_expr: ExprId, op: AssignOp, span: Span) {
+    fn assign(&mut self, place_expr: ExprId, op: AssignOp, value_zero: bool, span: Span) {
         self.place_subexprs(place_expr);
         let Some(place) = self.place_of(place_expr) else {
             self.expr(place_expr, Use::Read);
@@ -1152,7 +1225,10 @@ impl Owner<'_> {
             .with_label_mut(lend_span, "lent here");
         }
         let ty = self.typed.ty(place_expr);
-        if !self.is_reference(root) && self.lin(ty) == Kind::Linear && !self.fully_moved(&place, ty)
+        if !self.is_reference(root)
+            && self.lin(ty) == Kind::Linear
+            && !self.fully_moved(&place, ty)
+            && !self.locals[root.index()].zero
         {
             self.error(
                 "N003",
@@ -1164,6 +1240,11 @@ impl Owner<'_> {
         // The place holds a new value.
         self.moved.retain(|m| !is_prefix(&place, &m.place));
         self.facts.retain(|f| !f.mentions(root));
+        if place.proj.is_empty() {
+            self.locals[root.index()].zero = value_zero;
+        } else if !value_zero {
+            self.locals[root.index()].zero = false;
+        }
     }
 }
 
@@ -1193,7 +1274,9 @@ impl Owner<'_> {
                 Vec::new()
             }
             ExprKind::Ket { parts, .. } => {
-                self.not_reversible(expr.span, "creating qubits");
+                if self.in_with.is_empty() {
+                    self.not_reversible(expr.span, "creating qubits");
+                }
                 self.computed_labels(parts);
                 self.discarded(id, use_);
                 Vec::new()
@@ -1412,14 +1495,62 @@ impl Owner<'_> {
                 self.ctrl(controls, body);
                 Vec::new()
             }
-            // Rejected by the type checker.
-            ExprKind::With { .. } => Vec::new(),
+            ExprKind::With { with, body } => self.with_do(with, body, use_),
         }
     }
 
-    /// N003 for a fresh value containing qubits that is thrown away.
+    /// Whether every qubit in `id`'s value is proven to be in \|0⟩ (`spec/ownership.md` §9).
+    fn expr_is_zero(&self, id: ExprId) -> bool {
+        let ty = self.typed.ty(id);
+        if self.lin(ty) == Kind::Copyable {
+            return true;
+        }
+        let ast = self.ast;
+        match ast.expr(id).kind {
+            ExprKind::Ket { zero, .. } => zero,
+            ExprKind::ArrayRepeat { value, .. } => self.expr_is_zero(value),
+            ExprKind::Array(elems) | ExprKind::Tuple(elems) => {
+                ast.list(elems).iter().all(|&e| self.expr_is_zero(e))
+            }
+            ExprKind::StructLit { fields, .. } => ast
+                .list(fields)
+                .iter()
+                .all(|f| f.value.is_none_or(|v| self.expr_is_zero(v))),
+            ExprKind::Call { args, .. }
+                if matches!(self.typed.callees[id.index()], Some(Callee::Variant(..))) =>
+            {
+                ast.list(args).iter().all(|&a| self.expr_is_zero(a))
+            }
+            ExprKind::Own {
+                kind: OwnKind::Mv,
+                place,
+            } => self
+                .place_of(place)
+                .is_some_and(|p| self.locals[p.root.index()].zero),
+            ExprKind::Block(b) | ExprKind::Unsafe(b) => self.block_is_zero(b),
+            ExprKind::If {
+                then,
+                otherwise: Some(else_),
+                ..
+            } => self.block_is_zero(then) && self.expr_is_zero(else_),
+            ExprKind::With { body, .. } => self.block_is_zero(body),
+            _ => false,
+        }
+    }
+
+    fn block_is_zero(&self, block: BlockId) -> bool {
+        match self.ast.list(self.ast.block(block).stmts).last() {
+            Some(&stmt) => match self.ast.stmt(stmt).kind {
+                StmtKind::Expr { expr, semi: false } => self.expr_is_zero(expr),
+                _ => false,
+            },
+            None => true,
+        }
+    }
+
+    /// N003 for a fresh value containing qubits that is thrown away (unless proven \|0⟩).
     fn discarded(&mut self, id: ExprId, use_: Use) {
-        if use_ != Use::Discard {
+        if use_ != Use::Discard || self.expr_is_zero(id) {
             return;
         }
         let ty = self.typed.ty(id);
@@ -1445,17 +1576,29 @@ impl Owner<'_> {
     }
 
     fn loop_body(&mut self, body: BlockId, facts: Vec<Fact>, var: Option<LocalId>) {
+        let keep_facts = !self.in_with.is_empty();
         let facts_mark = self.facts.len();
         let scope_mark = self.scope.len();
+        let before_zero: Vec<bool> = self.locals.iter().map(|l| l.zero).collect();
         self.loops.push(scope_mark);
         if let Some(var) = var {
             self.declare(var, false);
         }
         self.facts.extend(facts);
+        let body_facts_mark = if keep_facts {
+            self.facts.len()
+        } else {
+            facts_mark
+        };
         self.block(body, Use::Discard);
-        self.facts.truncate(facts_mark);
+        self.facts.truncate(body_facts_mark);
         self.leave_scope(scope_mark);
         self.loops.pop();
+        // A loop may run zero times, so a local stays proven |0⟩ only if it was before and
+        // still is after.
+        for (l, &was) in self.locals.iter_mut().zip(&before_zero) {
+            l.zero &= was;
+        }
         // A loop may run zero times, and `break` leaves it.
         self.diverged = false;
     }
@@ -1475,12 +1618,17 @@ impl Owner<'_> {
         facts::facts_from(self.ast, self.typed, cond, false, &mut else_facts);
 
         let before = self.moved.clone();
+        let before_zero: Vec<bool> = self.locals.iter().map(|l| l.zero).collect();
         let mark = self.facts.len();
         self.facts.extend(then_facts);
         let carried = self.block(then, use_);
         self.release(&carried);
         self.facts.truncate(mark);
         let then_moved = std::mem::replace(&mut self.moved, before.clone());
+        let then_zero: Vec<bool> = self.locals.iter().map(|l| l.zero).collect();
+        for (l, &was) in self.locals.iter_mut().zip(&before_zero) {
+            l.zero = was;
+        }
         let then_diverged = std::mem::replace(&mut self.diverged, false);
 
         self.facts.extend(else_facts);
@@ -1490,6 +1638,7 @@ impl Owner<'_> {
         }
         self.facts.truncate(mark);
         let else_moved = std::mem::take(&mut self.moved);
+        let else_zero: Vec<bool> = self.locals.iter().map(|l| l.zero).collect();
         let else_diverged = self.diverged;
 
         self.diverged = then_diverged && else_diverged;
@@ -1498,6 +1647,13 @@ impl Owner<'_> {
             (_, true) => then_moved,
             _ => self.merge_branches(then_moved, else_moved, span, false),
         };
+        for ((l, &tz), &ez) in self.locals.iter_mut().zip(&then_zero).zip(&else_zero) {
+            l.zero = match (then_diverged, else_diverged) {
+                (true, _) => ez,
+                (_, true) => tz,
+                _ => tz && ez,
+            };
+        }
     }
 
     /// The arms of a `match` are branches: each starts from what was moved before it, and
@@ -1524,17 +1680,23 @@ impl Owner<'_> {
             _ => self.place_of(scrutinee),
         };
         self.expr(scrutinee, Use::Read);
+        let scrutinee_zero = lent.is_none() && self.expr_is_zero(scrutinee);
         let before = self.moved.clone();
+        let before_zero: Vec<bool> = self.locals.iter().map(|l| l.zero).collect();
         let mut merged: Option<Vec<Moved>> = None;
+        let mut merged_zero: Option<Vec<bool>> = None;
         let mut all_diverged = true;
         for arm in self.ast.list(arms).to_vec() {
             self.moved = before.clone();
+            for (l, &was) in self.locals.iter_mut().zip(&before_zero) {
+                l.zero = was;
+            }
             self.diverged = false;
             let scope_mark = self.scope.len();
             let mut bound = Vec::new();
             let ty = self.typed.pat_types[arm.pat.index()];
             self.lent_match = lent.is_some();
-            self.bind(arm.pat, ty, false, &mut bound);
+            self.bind(arm.pat, ty, false, scrutinee_zero, &mut bound);
             self.lent_match = false;
             // The names bound to parts hold a lend on the matched place for their arm; they
             // all end with it, so one lend, held by the first, covers them.
@@ -1556,16 +1718,30 @@ impl Owner<'_> {
             }
             self.leave_scope(scope_mark);
             let moved = std::mem::take(&mut self.moved);
+            let arm_zero: Vec<bool> = self.locals.iter().map(|l| l.zero).collect();
             if !self.diverged {
                 merged = Some(match merged {
                     None => moved,
                     Some(earlier) => self.merge_branches(earlier, moved, span, true),
+                });
+                merged_zero = Some(match merged_zero {
+                    None => arm_zero,
+                    Some(earlier) => earlier
+                        .into_iter()
+                        .zip(arm_zero)
+                        .map(|(a, b)| a && b)
+                        .collect(),
                 });
             }
             all_diverged &= self.diverged;
         }
         self.diverged = all_diverged;
         self.moved = merged.unwrap_or(before);
+        if let Some(zeros) = merged_zero {
+            for (l, z) in self.locals.iter_mut().zip(zeros) {
+                l.zero = z;
+            }
+        }
     }
 
     /// N009 for anything with qubits moved in one branch but not the other.
@@ -1647,6 +1823,90 @@ impl Owner<'_> {
         self.block(body, Use::Discard);
         self.reversible.pop();
         self.release(&held);
+    }
+
+    /// `with { W } do { D }` (`spec/ownership.md` §8): `W` is reversible and may allocate
+    /// ancillas; every linear place `W` allocated, acted on or read stays `ref`-lent during
+    /// `D`, and `W`'s ancillas are uncomputed and released automatically at the end.
+    fn with_do(&mut self, with: BlockId, body: BlockId, use_: Use) -> Carried {
+        let ast = self.ast;
+        let scope_mark = self.scope.len();
+        let facts_mark = self.facts.len();
+        let with_order = self.order;
+        self.reversible.push(with_order);
+        self.in_with.push(with_order);
+        self.with_touched.push((with_order, Vec::new()));
+        let stmts = ast.list(ast.block(with).stmts);
+        for (i, &stmt) in stmts.iter().enumerate() {
+            if self.diverged {
+                break;
+            }
+            match ast.stmt(stmt).kind {
+                StmtKind::Expr { expr, semi: false } if i + 1 == stmts.len() => {
+                    let carried = self.expr(expr, Use::Discard);
+                    self.release(&carried);
+                }
+                _ => self.stmt(stmt),
+            }
+            self.release_pending(&[]);
+        }
+        let (_, touched) = self.with_touched.pop().expect("pushed above");
+        self.in_with.pop();
+        self.reversible.pop();
+
+        // Hold `ref` lends across `do` on every linear place `with` touched, and on every
+        // linear local `with` declared that was not moved inside `with`.
+        let mut held = Vec::new();
+        for (place, span) in touched {
+            if !held.iter().any(|&i: &usize| self.lends[i].place == place) {
+                self.lends.push(Lend {
+                    place,
+                    mutable: false,
+                    holder: Holder::With,
+                    span,
+                    alive: true,
+                });
+                held.push(self.lends.len() - 1);
+            }
+        }
+        let with_locals: Vec<LocalId> = self.scope[scope_mark..].to_vec();
+        for local in with_locals {
+            let ty = self.typed.local(local).ty;
+            let place = Place {
+                root: local,
+                proj: Vec::new(),
+            };
+            if self.lin(ty) == Kind::Linear && !self.fully_moved(&place, ty) {
+                self.lends.push(Lend {
+                    place,
+                    mutable: false,
+                    holder: Holder::With,
+                    span: self.typed.local(local).span,
+                    alive: true,
+                });
+                held.push(self.lends.len() - 1);
+            }
+        }
+
+        let carried = self.block(body, use_);
+        if use_ != Use::Discard {
+            for &i in &carried {
+                let root = self.lends[i].place.root;
+                if !self.is_reference(root) && self.locals[root.index()].order >= with_order {
+                    let name = self.name(root).to_string();
+                    let span = self.lends[i].span;
+                    self.error(
+                        "N008",
+                        span,
+                        format!("`{name}` is dropped at the end of `with`, so a reference to it cannot leave `do`"),
+                    );
+                }
+            }
+        }
+        self.release(&held);
+        self.leave_scope(scope_mark);
+        self.facts.truncate(facts_mark);
+        carried
     }
 
     /// Whether calling `f` from the current function counts as reversible: as declared, or as
@@ -1758,8 +2018,9 @@ impl Owner<'_> {
     /// N022 for printing in a `sample` run, directly or through a call.
     fn run_prints(&mut self, body: BlockId) {
         let mut found = Vec::new();
-        walk_block(self.ast, body, &mut |node| {
-            let Node::Expr(id) = node else { return };
+        let mut with_pats = Vec::new();
+        walk_block(self.ast, body, false, &mut with_pats, &mut |node| {
+            let Node::Expr(id, _) = node else { return };
             match self.typed.callees[id.index()] {
                 Some(Callee::Builtin(Builtin::Print { .. })) => found.push((id, None)),
                 Some(Callee::Fn(f)) => {
@@ -1810,13 +2071,14 @@ impl Owner<'_> {
             _ => None,
         };
         let mut problems: Vec<(LocalId, Span, &str)> = Vec::new();
-        walk_block(ast, body, &mut |node| match node {
+        let mut with_pats = Vec::new();
+        walk_block(ast, body, false, &mut with_pats, &mut |node| match node {
             Node::Assign(place, span) => {
                 if let Some(l) = root_local(ast, typed, place).filter(|l| l.index() < first) {
                     problems.push((l, span, "changes"));
                 }
             }
-            Node::Expr(e) => {
+            Node::Expr(e, _) => {
                 if let Some(l) = outside(e) {
                     let ty = typed.local(l).ty;
                     if typed.types.linearity_assuming(ty, &assume) != Kind::Copyable {
@@ -2075,6 +2337,16 @@ impl Owner<'_> {
             .filter(|i| !carried.contains(i))
             .collect();
         self.release(&finished);
+        // `q.reset()` puts a whole owned `Qubit` back in |0⟩ (`spec/ownership.md` §9).
+        if callee == Some(Callee::Builtin(Builtin::Reset))
+            && let Some(target) = receiver.or_else(|| args.first().copied())
+            && let Some(place) = self.place_of(target)
+            && place.proj.is_empty()
+            && !self.is_reference(place.root)
+            && self.typed.local(place.root).ty == Ty::QUBIT
+        {
+            self.locals[place.root.index()].zero = true;
+        }
         if use_ == Use::Discard {
             self.discarded(id, use_);
         }
@@ -2191,6 +2463,10 @@ impl Owner<'_> {
         let (method, operator) = match self.ast.expr(call).kind {
             ExprKind::MethodCall { method, .. } => (self.ast.name(method).to_string(), None),
             ExprKind::Binary { op, .. } => (op.as_str().to_string(), Some(op.as_str())),
+            ExprKind::Unary {
+                op: UnaryOp::BitNot,
+                ..
+            } => ("~".to_string(), Some("~")),
             ExprKind::Unary { .. } => ("-".to_string(), Some("-")),
             _ => (String::new(), None),
         };
@@ -2220,10 +2496,10 @@ impl Owner<'_> {
                             format!("`{method}` takes ownership of `{text}`"),
                         )
                         .help = Some(match operator {
-                            Some("-")
+                            Some(op @ ("-" | "~"))
                                 if matches!(self.ast.expr(call).kind, ExprKind::Unary { .. }) =>
                             {
-                                format!("write `-(mv {text})`")
+                                format!("write `{op}(mv {text})`")
                             }
                             Some(op) => format!("write `mv {text} {op} …`"),
                             None => format!("write `mv {text}.{method}()`"),
@@ -2260,7 +2536,7 @@ impl Owner<'_> {
             }
             OwnKind::Ref | OwnKind::Mut => {
                 let mutable = kind == OwnKind::Mut;
-                if is_place && !is_ref {
+                if is_place {
                     self.place_subexprs(receiver);
                     let Some(place) = self.place_of(receiver) else {
                         return Vec::new();
@@ -2270,7 +2546,7 @@ impl Owner<'_> {
                         .into_iter()
                         .collect();
                 }
-                // A reference (a variable or the result of a chain) is lent on as it is.
+                // The result of a chain or expression is lent on as it is.
                 self.expr(receiver, Use::Read)
             }
         }
@@ -2593,6 +2869,7 @@ impl Owner<'_> {
             let holder = match self.lends[i].holder {
                 Holder::Local(l) => format!(" to `{}`", self.name(l)),
                 Holder::Control => " as a control".into(),
+                Holder::With => " to `with`".into(),
                 Holder::Pending => String::new(),
             };
             self.error(
@@ -2612,7 +2889,12 @@ impl Owner<'_> {
             .help = Some("move it after the loop, or create it inside the loop".into());
         }
         if self.lin(ty) == Kind::Linear && !self.reversible.is_empty() {
-            self.error("N013", span, format!("moving `{name}` is not reversible"));
+            let allowed_in_with = self.in_with.last().is_some_and(|&w| {
+                self.reversible.last() == Some(&w) && self.locals[place.root.index()].order >= w
+            });
+            if !allowed_in_with {
+                self.error("N013", span, format!("moving `{name}` is not reversible"));
+            }
         }
         self.moved.push(Moved {
             place: place.clone(),
@@ -2681,6 +2963,9 @@ impl Owner<'_> {
                     let other_span = other.span;
                     let message = match other.holder {
                         Holder::Control => format!("`{name}` is a control of this block"),
+                        Holder::With => {
+                            format!("`{name}` was used in `with` and can only be read in `do`")
+                        }
                         Holder::Local(l) => {
                             format!("`{name}` is already lent to `{}`", self.name(l))
                         }
@@ -2703,6 +2988,17 @@ impl Owner<'_> {
                 }
             }
             break;
+        }
+        if mutable {
+            self.locals[root.index()].zero = false;
+        }
+        if !self.with_touched.is_empty() && self.lin(self.typed.types.deref(ty)) != Kind::Copyable {
+            let order = self.locals[root.index()].order;
+            for (with_order, touched) in &mut self.with_touched {
+                if order < *with_order {
+                    touched.push((place.clone(), span));
+                }
+            }
         }
         self.lends.push(Lend {
             place: place.clone(),

@@ -1,12 +1,21 @@
 // Built-in types implement `std::ops` by their built-in operators (spec/types.md §6), so
 // generic code bound on an operator trait can be given numbers.
 
-use std::ops::{Add, AddAssign, Mul, Neg}
+use std::cmp::{Eq, Ord}
+use std::ops::{Add, AddAssign, BitAnd, BitNot, BitXor, Mul, Neg, Shl}
 
-fn sum3<T: Add<T, Output = T>>(a: T, b: T, c: T) -> T { mv a + mv b + mv c }
+fn sum3<T: Add<Output = T>>(a: T, b: T, c: T) -> T { mv a + mv b + mv c }
 fn scale<T: Mul<Float, Output = T>>(x: T, k: Float) -> T { mv x * k }
 fn negate<T: Neg<Output = T>>(x: T) -> T { -(mv x) }
-fn bump<T: AddAssign<T>>(x: mut T, by: T) { x += mv by }
+fn bump<T: AddAssign>(x: mut T, by: T) { x += mv by }
+fn mask<T: Copy + BitAnd<Output = T> + BitXor<Output = T> + BitNot<Output = T>>(a: T, b: T) -> T {
+    ~(a & b) ^ (a & b)
+}
+fn shift<T: Shl<Int, Output = T>>(a: T, n: Int) -> T { mv a << n }
+fn same<T: Eq>(a: ref T, b: ref T) -> Bool { a == b and not (a != b) }
+fn ordered<T: Ord>(a: ref T, b: ref T) -> (Bool, Bool, Bool, Bool) {
+    (a < b, a <= b, a > b, a >= b)
+}
 
 fn main() {
     print(sum3(1, 2, 3))
@@ -17,4 +26,8 @@ fn main() {
     bump(mut n, 2)
     print(n)
     print(Add::add(1, 2) * Mul::mul(2, 3))
+    print("{mask(5, 3)} {shift(3, 4)}")
+    print("{same(7, 7)} {same("ok", "ok")} {same([0, 1], [0, 1])}")
+    print(ordered(2, 5))
+    print(ordered(3.0, 3.0))
 }

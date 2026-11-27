@@ -245,44 +245,98 @@ pub const STD_MODULES: [&str; 4] = ["debug", "fourier", "observables", "state"];
 /// `ops`: the traits behind `+`, `-`, `*`, `/` and `%`, and their compound assignments, on
 /// a program's own types.
 const STD_OPS: &str = "
-pub trait Add<Rhs> {
+pub trait Add<Rhs = Self> {
     type Output
     fn add(mv self, rhs: Rhs) -> Self::Output
 }
-pub trait Sub<Rhs> {
+pub trait Sub<Rhs = Self> {
     type Output
     fn sub(mv self, rhs: Rhs) -> Self::Output
 }
-pub trait Mul<Rhs> {
+pub trait Mul<Rhs = Self> {
     type Output
     fn mul(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Div<Rhs = Self> {
+    type Output
+    fn div(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Rem<Rhs = Self> {
+    type Output
+    fn rem(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait BitAnd<Rhs = Self> {
+    type Output
+    fn bitand(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait BitOr<Rhs = Self> {
+    type Output
+    fn bitor(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait BitXor<Rhs = Self> {
+    type Output
+    fn bitxor(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Shl<Rhs = Self> {
+    type Output
+    fn shl(mv self, rhs: Rhs) -> Self::Output
+}
+pub trait Shr<Rhs = Self> {
+    type Output
+    fn shr(mv self, rhs: Rhs) -> Self::Output
 }
 pub trait Neg {
     type Output
     fn neg(mv self) -> Self::Output
 }
-pub trait Div<Rhs> {
+pub trait BitNot {
     type Output
-    fn div(mv self, rhs: Rhs) -> Self::Output
+    fn bitnot(mv self) -> Self::Output
 }
-pub trait Rem<Rhs> {
-    type Output
-    fn rem(mv self, rhs: Rhs) -> Self::Output
-}
-pub trait AddAssign<Rhs> {
+pub trait AddAssign<Rhs = Self> {
     fn add_assign(mut self, rhs: Rhs)
 }
-pub trait SubAssign<Rhs> {
+pub trait SubAssign<Rhs = Self> {
     fn sub_assign(mut self, rhs: Rhs)
 }
-pub trait MulAssign<Rhs> {
+pub trait MulAssign<Rhs = Self> {
     fn mul_assign(mut self, rhs: Rhs)
 }
-pub trait DivAssign<Rhs> {
+pub trait DivAssign<Rhs = Self> {
     fn div_assign(mut self, rhs: Rhs)
 }
-pub trait RemAssign<Rhs> {
+pub trait RemAssign<Rhs = Self> {
     fn rem_assign(mut self, rhs: Rhs)
+}
+pub trait BitAndAssign<Rhs = Self> {
+    fn bitand_assign(mut self, rhs: Rhs)
+}
+pub trait BitOrAssign<Rhs = Self> {
+    fn bitor_assign(mut self, rhs: Rhs)
+}
+pub trait BitXorAssign<Rhs = Self> {
+    fn bitxor_assign(mut self, rhs: Rhs)
+}
+pub trait ShlAssign<Rhs = Self> {
+    fn shl_assign(mut self, rhs: Rhs)
+}
+pub trait ShrAssign<Rhs = Self> {
+    fn shr_assign(mut self, rhs: Rhs)
+}
+";
+
+/// The standard library's `std::cmp` module (`spec/types.md` §6), parsed when a program names
+/// `cmp`: the traits behind `==`, `!=`, `<`, `<=`, `>` and `>=` on a program's own types.
+const STD_CMP: &str = "
+pub trait Eq<Rhs = Self> {
+    fn eq(ref self, rhs: ref Rhs) -> Bool
+    fn ne(ref self, rhs: ref Rhs) -> Bool { not self.eq(rhs) }
+}
+pub trait Ord<Rhs = Self> {
+    fn lt(ref self, rhs: ref Rhs) -> Bool
+    fn le(ref self, rhs: ref Rhs) -> Bool
+    fn gt(ref self, rhs: ref Rhs) -> Bool { not self.le(rhs) }
+    fn ge(ref self, rhs: ref Rhs) -> Bool { not self.lt(rhs) }
 }
 ";
 
@@ -484,6 +538,7 @@ impl Ast {
         let generic = self.all_fns().iter().any(|f| !f.generics.is_empty());
         let measure = named("Measure") || (generic && named("measure"));
         let ops = named("ops");
+        let cmp = named("cmp");
         if self.std.is_none() && (named("std") || measure) {
             let std = self.add_package("std");
             let root = self.package(std).root;
@@ -493,6 +548,10 @@ impl Ast {
             if ops {
                 let module = self.add_module(root, "ops");
                 self.std_module(module, STD_OPS);
+            }
+            if cmp {
+                let module = self.add_module(root, "cmp");
+                self.std_module(module, STD_CMP);
             }
             if measure {
                 let item = self.measure_trait();
@@ -519,6 +578,7 @@ impl Ast {
     /// nothing.
     fn std_module(&mut self, module: ModuleId, source: &str) {
         let (items, fns, types) = (self.items.len(), self.fns.len(), self.types.len());
+        let (blocks, stmts, exprs) = (self.blocks.len(), self.stmts.len(), self.exprs.len());
         let params = self.pools.params.items.len();
         let generic_params = self.pools.generic_params.items.len();
         let bounds = self.pools.bounds.items.len();
@@ -540,6 +600,15 @@ impl Ast {
         }
         for t in &mut self.types[types..] {
             t.span = none;
+        }
+        for b in &mut self.blocks[blocks..] {
+            b.span = none;
+        }
+        for s in &mut self.stmts[stmts..] {
+            s.span = none;
+        }
+        for e in &mut self.exprs[exprs..] {
+            e.span = none;
         }
         for p in &mut self.pools.params.items[params..] {
             p.span = none;
@@ -662,6 +731,8 @@ pub enum ExprKind {
     Ket {
         /// How many fixed labels it has: one qubit each.
         qubits: u32,
+        /// Whether every label is `0` (`|0>`, `|00>`, …), with no computed labels.
+        zero: bool,
         /// Its labels in order, when some are computed (`|0{b}>`); empty when all are fixed.
         parts: List<KetPart>,
     },
@@ -1400,15 +1471,19 @@ pub struct GenericParam {
 /// What a generic parameter stands for.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GenericKind {
-    /// A type, with the bounds written on it: `T: Measure`.
+    /// A type, with the bounds written on it: `T: Measure`, or `Rhs = Self` on a trait.
     Type {
         /// Its bounds.
         bounds: List<Bound>,
+        /// Its default type, if written (`= Self`), allowed on traits.
+        default: Option<TypeId>,
     },
-    /// A size: `const N: Int`.
+    /// A size: `const N: Int`, or `const N: Int = 1` on a trait.
     Size {
         /// Its type, `Int`.
         ty: TypeId,
+        /// Its default size, if written (`= 1`), allowed on traits.
+        default: Option<TypeId>,
     },
 }
 

@@ -671,3 +671,103 @@ fn builtin_types_implement_operator_traits() {
         ["`s` needs `T: Mul<Float>`, but `Int` does not implement `Mul<Float>`"]
     );
 }
+
+/// Trait parameters can have defaults (`trait Add<Rhs = Self>`), naming `Self` or earlier
+/// parameters, and leaving an argument out uses the default in `impl`s and bounds.
+#[test]
+fn trait_param_defaults() {
+    // `Add` defaults `Rhs = Self`, so both `impl Add for V` and `T: Add<Output = T>` work.
+    ok("use std::ops::Add\n\
+         struct V { x: Int }\n\
+         impl Add for V { type Output = V\n fn add(mv self, r: V) -> V { V { x: self.x + r.x } } }\n\
+         fn sum<T: Add<Output = T>>(a: T, b: T) -> T { mv a + mv b }\n\
+         fn f(a: V, b: V) -> (V, Int) { (sum(a, b), sum(1, 2)) }");
+    // Custom traits with type and size defaults, and a later default naming an earlier param.
+    ok(
+        "trait Pair<A = Self, B = A> { fn pair(ref self, a: A, b: B) -> Int }\n\
+         struct S { x: Int }\n\
+         impl Pair for S { fn pair(ref self, a: S, b: S) -> Int { self.x + a.x + b.x } }\n\
+         impl Pair<Int> for S { fn pair(ref self, a: Int, b: Int) -> Int { self.x + a + b } }\n\
+         fn use_same<T: Pair>(x: ref T, a: T, b: T) -> Int { x.pair(mv a, mv b) }\n\
+         fn use_int<T: Pair<Int>>(x: ref T, a: Int, b: Int) -> Int { x.pair(a, b) }\n\
+         fn f(s: S) -> Int { use_same(ref s, s, s) + use_int(ref s, 1, 2) }",
+    );
+    ok(
+        "trait Pad<const N: Int = 1> { fn pad(ref self) -> [Int; N] }\n\
+         struct S {}\n\
+         impl Pad for S { fn pad(ref self) -> [Int; 1] { [0] } }\n\
+         fn f<T: Pad>(x: ref T) -> [Int; 1] { x.pad() }\n\
+         fn g(s: S) -> [Int; 1] { f(ref s) }",
+    );
+    // Ordering, arity and non-trait errors.
+    assert_eq!(
+        errors("trait Bad<A = Int, B> { fn f(ref self, a: A, b: B) }"),
+        ["a parameter without a default cannot follow one with a default"]
+    );
+    assert_eq!(
+        errors("struct Bad<T = Int> { x: T }"),
+        ["defaults are only allowed on trait parameters"]
+    );
+    assert_eq!(
+        errors("fn bad<T = Int>(x: T) -> T { mv x }"),
+        ["defaults are only allowed on trait parameters"]
+    );
+    assert_eq!(
+        errors(
+            "trait One<A, B = Self> { fn f(ref self, a: A, b: B) }\n\
+             struct S {}\n\
+             impl One for S { fn f(ref self, a: S, b: S) {} }"
+        ),
+        ["`One` takes 1 to 2 arguments, but 0 are given"]
+    );
+}
+
+/// Comparison (`std::cmp::{Eq, Ord}`) and bit operator traits (`std::ops::{BitAnd, ...}`).
+#[test]
+fn comparison_and_bit_operator_traits() {
+    let mask = "use std::ops::{BitAnd, BitOr, BitXor, BitNot, Shl, Shr, BitAndAssign, ShlAssign}\n\
+                struct Mask { bits: Int }\n\
+                impl BitAnd for Mask { type Output = Mask\n fn bitand(mv self, r: Mask) -> Mask { Mask { bits: self.bits & r.bits } } }\n\
+                impl BitOr for Mask { type Output = Mask\n fn bitor(mv self, r: Mask) -> Mask { Mask { bits: self.bits | r.bits } } }\n\
+                impl BitXor for Mask { type Output = Mask\n fn bitxor(mv self, r: Mask) -> Mask { Mask { bits: self.bits ^ r.bits } } }\n\
+                impl BitNot for Mask { type Output = Mask\n fn bitnot(mv self) -> Mask { Mask { bits: ~self.bits } } }\n\
+                impl Shl<Int> for Mask { type Output = Mask\n fn shl(mv self, n: Int) -> Mask { Mask { bits: self.bits << n } } }\n\
+                impl Shr<Int> for Mask { type Output = Mask\n fn shr(mv self, n: Int) -> Mask { Mask { bits: self.bits >> n } } }\n\
+                impl BitAndAssign for Mask { fn bitand_assign(mut self, r: Mask) { self.bits &= r.bits } }\n\
+                impl ShlAssign<Int> for Mask { fn shl_assign(mut self, n: Int) { self.bits <<= n } }\n";
+    ok(&format!(
+        "{mask}fn f(a: Mask, b: Mask) -> Mask {{ let mut m = ~(a & b | a ^ b)\n m &= a\n m <<= 2\n (m << 1) >> 1 }}"
+    ));
+    // Comparisons lend both sides, so linear types don't move and copyable types aren't copied.
+    let cmp = "use std::cmp::{Eq, Ord}\n\
+               struct P { x: Int }\n\
+               impl Eq for P { fn eq(ref self, r: ref P) -> Bool { self.x == r.x } }\n\
+               impl Ord for P {\n\
+                   fn lt(ref self, r: ref P) -> Bool { self.x < r.x }\n\
+                   fn le(ref self, r: ref P) -> Bool { self.x <= r.x }\n\
+               }\n";
+    ok(&format!(
+        "{cmp}fn f(a: P, b: P) -> Bool {{ a == b or a != b or a < b or a <= b or a > b or a >= b }}\n\
+         fn g<T: Eq + Ord>(a: ref T, b: ref T) -> Bool {{ a == b or a != b or a < b or a >= b }}"
+    ));
+    // Comparable enums keep built-in `==` even when `std::cmp::Eq` is imported.
+    ok("use std::cmp::Eq\n\
+         enum Color { Red, Blue }\n\
+         fn f(a: Color, b: Color) -> Bool { a == b and a != b }\n\
+         fn g<T: Eq>(a: T, b: T) -> Bool { a == b }\n\
+         fn h() -> Bool { g(Color::Red, Color::Blue) and g(\"hi\", \"hi\") and g([0, 1], [0, 1]) }");
+    // Comparing linear structs lends them, never moves.
+    let qcmp = "use std::cmp::Eq\n\
+                struct Tagged { id: Int, q: Qubit }\n\
+                impl Eq for Tagged { fn eq(ref self, r: ref Tagged) -> Bool { self.id == r.id } }\n";
+    assert_eq!(
+        ownership(&format!(
+            "{qcmp}fn f(a: Tagged, b: Tagged) -> (Bool, Bit, Bit) {{ let eq = a == b\n (eq, mv a.q.measure(), mv b.q.measure()) }}"
+        )),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        errors("use std::cmp::Ord\nstruct P { x: Int }\nfn f(a: P, b: P) -> Bool { a >= b }"),
+        ["`>=` cannot be applied to `P`: it does not implement `Ord`"]
+    );
+}

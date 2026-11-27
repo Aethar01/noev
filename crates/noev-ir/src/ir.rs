@@ -306,6 +306,14 @@ pub enum Stmt {
     CtrlPush(Vec<Place>),
     /// Remove the controls added by the matching [`Stmt::CtrlPush`].
     CtrlPop,
+    /// Begin a `with` block: record gates and allocated qubits so [`Stmt::WithEnd`] can
+    /// uncompute and release them.
+    WithStart,
+    /// End the `with` block and begin the `do` block (restoring enclosing controls).
+    WithDo,
+    /// End the `do` block: invert the recorded `with` gates and release every qubit
+    /// allocated in `with`.
+    WithEnd,
     /// `dest = sample shots { … }`, with the block made into `func`: the distribution of
     /// `func(args)`'s results over `shots` runs, with returned qubits measured at the end of each.
     Sample {
@@ -589,6 +597,9 @@ impl Program {
                 format!("ctrl push {}", places.join(", "))
             }
             Stmt::CtrlPop => "ctrl pop".into(),
+            Stmt::WithStart => "with start".into(),
+            Stmt::WithDo => "with do".into(),
+            Stmt::WithEnd => "with end".into(),
             Stmt::Sample {
                 dest,
                 func,
