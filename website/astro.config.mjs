@@ -21,7 +21,8 @@ export default defineConfig({
       description:
         'A statically typed hybrid classical-quantum programming language with linear qubit ownership and automatic circuit extraction.',
       logo: {
-        src: './src/assets/logo.svg',
+        light: './src/assets/logo-light.svg',
+        dark: './src/assets/logo-dark.svg',
       },
       favicon: '/favicon.svg',
       social: [
@@ -36,7 +37,7 @@ export default defineConfig({
       },
       customCss: ['./src/styles/custom.css'],
       expressiveCode: {
-        themes: ['github-dark-default', 'github-light-default'],
+        themes: ['vitesse-dark', 'vitesse-light'],
         shiki: {
           langs: [noevGrammar, ebnfGrammar],
         },
